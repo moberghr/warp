@@ -1,9 +1,12 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Shouldly;
 using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
 using Warp.Tests.Fixtures;
+using Warp.Tests.Helpers;
 using Warp.Tests.TestData.Handlers;
+using Warp.Worker;
 
 namespace Warp.Tests.Features.Pause;
 
@@ -47,7 +50,11 @@ public abstract class PauseIntegrationTestsBase : IntegrationTestBase
         // periodic tick. Disable the auto Heartbeat and drive it manually so the test fully
         // owns the timing of the holder flip — no race between auto-heartbeat and the
         // pause/publish sequence below.
-        await using var server = await WarpTestServer.StartAsync(Fixture, configure: cfg => cfg.HealthCheckInterval = null);
+        using var loops = new WorkerLoopPauseTracker();
+        await using var server = await WarpTestServer.StartAsync(
+            Fixture,
+            configure: cfg => cfg.HealthCheckInterval = null,
+            configureServices: services => services.AddSingleton<PauseStateHolder>(loops));
         var groupId = await GetFirstGroupId(server);
         var svc = server.CreateServerCommandService();
 
@@ -58,17 +65,12 @@ public abstract class PauseIntegrationTestsBase : IntegrationTestBase
         await server.RunHeartbeatOnceAsync(Xunit.TestContext.Current.CancellationToken);
         server.PauseState.IsPaused(groupId).ShouldBeTrue();
 
-        // Drain in-flight worker iterations. This is NOT a timing guess — it models the §6.8
-        // pause contract: pause is "no new fetches after up to one heartbeat", deliberately
-        // non-synchronous so the worker fetch/execute hot path stays observation-free (§6.1).
-        // A worker that read holder=false just before the manual heartbeat is now somewhere
-        // in GetAndProcessJob; without this drain its already-running SQL claim could see the
-        // row we're about to publish. Waiting one full PollingInterval (100ms in test config)
-        // plus 4× slack guarantees every such iteration finishes against an empty queue, loops
-        // back, and reads paused=true on its next check. Making this deterministic would
-        // require either worker-iteration observability (forbidden by §6.1) or making pause
-        // synchronous (a contract change). The wall-clock wait is the contract.
-        await Task.Delay(500, Xunit.TestContext.Current.CancellationToken);
+        // A worker iteration that passed its pause check before the heartbeat flipped the holder still
+        // completes its claim (rule 6.8), and that claim can see the row published below. A fixed 500 ms
+        // wait for such claims to finish was not enough on CI (SQL Server 2025: a claim stamped 600 ms before
+        // the job existed came back with it). Wait until every worker loop has since answered "paused"
+        // instead; none can claim after that.
+        await loops.WaitUntilEveryLoopSawPauseAsync(Xunit.TestContext.Current.CancellationToken);
 
         // Publish a job — by now all worker iterations are either sleeping in the pause
         // short-circuit or about to enter it; none can claim this row.
@@ -95,13 +97,26 @@ public abstract class PauseIntegrationTestsBase : IntegrationTestBase
     [TimedFact]
     public async Task PauseServer_Resume_JobsGetProcessed()
     {
-        await using var server = await WarpTestServer.StartAsync(Fixture);
-        var groupId = await GetFirstGroupId(server);
+        // Heartbeat driven by hand: pause propagation is deterministic, and with the periodic heartbeat off the
+        // server's clock is not corrected to the database's (DatabaseClock), so the claim stamp below and
+        // resumedAt are read off the same clock. With the correction on, each beat re-measures the offset
+        // with up to half a round trip of error, which moved a claim stamp tens of ms before resumedAt on CI.
+        using var loops = new WorkerLoopPauseTracker();
+        await using var server = await WarpTestServer.StartAsync(
+            Fixture,
+            configure: cfg => cfg.HealthCheckInterval = null,
+            configureServices: services => services.AddSingleton<PauseStateHolder>(loops));
         var svc = server.CreateServerCommandService();
 
         // Pause, publish, then resume
         await svc.PauseServer(server.ServerId);
-        await server.WaitForPauseState(groupId, expectedPaused: true);
+        await server.RunHeartbeatOnceAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // A worker iteration that passed its pause check before the heartbeat flipped the holder still
+        // completes its claim (rule 6.8): on CI one did, claiming the job published below while the server was
+        // paused. So wait until every worker loop that has checked at all has since answered "paused"; none
+        // can claim after that.
+        await loops.WaitUntilEveryLoopSawPauseAsync(Xunit.TestContext.Current.CancellationToken);
 
         var publisher = server.CreatePublisher();
         var jobId = await publisher.Enqueue(new UnitRequest());
@@ -110,6 +125,7 @@ public abstract class PauseIntegrationTestsBase : IntegrationTestBase
         // Resume — job should complete
         var resumedAt = DateTime.UtcNow;
         await svc.ResumeServer(server.ServerId);
+        await server.RunHeartbeatOnceAsync(Xunit.TestContext.Current.CancellationToken);
         await server.WaitForCompletion();
 
         var job = await server.GetJob(jobId);
@@ -126,7 +142,11 @@ public abstract class PauseIntegrationTestsBase : IntegrationTestBase
     public async Task PauseWorkerGroup_JobsStayEnqueued()
     {
         // See PauseServer_JobsStayEnqueued for why we drive Heartbeat manually.
-        await using var server = await WarpTestServer.StartAsync(Fixture, configure: cfg => cfg.HealthCheckInterval = null);
+        using var loops = new WorkerLoopPauseTracker();
+        await using var server = await WarpTestServer.StartAsync(
+            Fixture,
+            configure: cfg => cfg.HealthCheckInterval = null,
+            configureServices: services => services.AddSingleton<PauseStateHolder>(loops));
         var groupId = await GetFirstGroupId(server);
         var svc = server.CreateServerCommandService();
 
@@ -134,9 +154,8 @@ public abstract class PauseIntegrationTestsBase : IntegrationTestBase
         await server.RunHeartbeatOnceAsync(Xunit.TestContext.Current.CancellationToken);
         server.PauseState.IsPaused(groupId).ShouldBeTrue();
 
-        // Drain in-flight worker iterations — see PauseServer_JobsStayEnqueued for the §6.8
-        // contract rationale and why this isn't a timing guess.
-        await Task.Delay(500, Xunit.TestContext.Current.CancellationToken);
+        // Wait out claims already in flight — see PauseServer_JobsStayEnqueued.
+        await loops.WaitUntilEveryLoopSawPauseAsync(Xunit.TestContext.Current.CancellationToken);
 
         var publisher = server.CreatePublisher();
         var jobId = await publisher.Enqueue(new UnitRequest());

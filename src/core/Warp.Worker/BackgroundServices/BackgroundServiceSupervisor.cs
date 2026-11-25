@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Warp.Core;
 using Warp.Core.BackgroundServices;
 using Warp.Core.Logging;
 
@@ -46,7 +47,7 @@ internal sealed class BackgroundServiceSupervisor<TContext>
         WarpBackgroundService service,
         IBackgroundServiceStrategy strategy,
         IServiceScopeFactory scopes,
-        TimeProvider time,
+        [FromKeyedServices(DatabaseClock.Key)] TimeProvider time,
         TimeSpan acquirePollInterval,
         TimeSpan logFlushInterval,
         ILogger logger,

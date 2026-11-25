@@ -14,6 +14,9 @@ public class ServerModel
 
     public double? CpuUsagePercent { get; set; }
 
+    /// <summary>The database clock minus this server's clock, in ms, from its last heartbeat (#350).</summary>
+    public double? ClockOffsetMs { get; set; }
+
     public long? MemoryWorkingSetBytes { get; set; }
 
     public DateTime? PausedAt { get; set; }

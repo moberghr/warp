@@ -4,6 +4,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Warp.Core.Data.Entities;
+using Warp.Core.Data.Queries;
 using Warp.Core.Diagnostics;
 using Warp.Core.Enums;
 
@@ -20,6 +21,14 @@ namespace Warp.Core;
 /// row + writes a <see cref="ApplicationInstanceEventType.Stopped"/> event) on graceful shutdown. No
 /// provider and no distributed lock — each instance owns its own row by its generated id. Uses
 /// <see cref="IServiceScopeFactory"/> (§0.5) and <see cref="TimeProvider"/> (§5.7).
+/// <para>
+/// <c>LastHeartbeatAt</c> is compared by the servers' <c>ExpirationCleanup</c> on the database's clock (rule
+/// 2.20), so with a database provider registered the beat writes the DATABASE's time, in one statement: a
+/// process whose own clock lags the database's by more than <c>ApplicationInstanceStaleGrace</c> was swept while
+/// alive. While a server from before 8.0 is alive (a <c>Server</c> row without <c>CoordinationVersion</c>) it
+/// writes this process's own time instead, as 7.7 did, because such a server sweeps on its own clock; the same
+/// statement decides. Without a provider (EF only) it keeps the local time.
+/// </para>
 /// </summary>
 internal sealed class ApplicationHeartbeatHost<TContext> : BackgroundService
     where TContext : DbContext
@@ -38,6 +47,10 @@ internal sealed class ApplicationHeartbeatHost<TContext> : BackgroundService
 
     // Latches once the row is found swept-while-alive so the warning below is logged at most once.
     private bool _staleSweptWarned;
+
+    // Whether a database provider is registered (UsePostgreSql / UseSqlServer), read once at registration: the beat
+    // then writes the database's time. Without one (EF only) it writes the local time, as before.
+    private bool _databaseTime;
 
     public ApplicationHeartbeatHost(
         IServiceScopeFactory scopeFactory,
@@ -145,6 +158,17 @@ internal sealed class ApplicationHeartbeatHost<TContext> : BackgroundService
 
         await context.SaveChangesAsync(ct);
 
+        // At once, not one interval later: until then the row carries this process's own time, and a sweep in
+        // between would remove an instance that lags the database by more than the grace.
+        // A relational provider only: the beat is an ExecuteUpdate that reads the database's clock, which a
+        // non-relational provider (EF's in-memory one, as tests use) cannot run.
+        _databaseTime = context.Database.IsRelational()
+            && scope.ServiceProvider.GetService<IWarpSqlQueries<TContext>>() is not null;
+        if (_databaseTime)
+        {
+            await BeatAtDatabaseTimeAsync(context, now, snapshot, ct);
+        }
+
         await RecordDeployAsync(context, now, ct);
     }
 
@@ -156,30 +180,69 @@ internal sealed class ApplicationHeartbeatHost<TContext> : BackgroundService
         using var scope = _scopeFactory.CreateScope();
         var context = scope.ServiceProvider.GetRequiredService<TContext>();
         var now = _timeProvider.GetUtcNow().UtcDateTime;
+        var snapshot = _cpuTracker.Sample(now);
 
-        var instance = await context.Set<ApplicationInstance>().FindAsync([_instanceId], ct);
-        if (instance is null)
+        if (_databaseTime)
         {
-            // Swept while this process was unresponsive. A later tick deliberately does not recreate the
-            // row — the process is treated as gone, so there is nothing to refresh. Warn ONCE so operators
-            // can see this happened without spamming the log every tick for the rest of the process life.
-            if (!_staleSweptWarned)
+            if (await BeatAtDatabaseTimeAsync(context, now, snapshot, ct) == 0)
             {
-                _staleSweptWarned = true;
-                _logger.LogWarning(
-                    "Application instance {InstanceId} was stale-swept (heartbeat lost / process unresponsive past ApplicationInstanceStaleGrace). The row is not recreated, so this process will not reappear on the Applications view until it is restarted.",
-                    _instanceId);
+                WarnSweptOnce();
             }
 
             return;
         }
 
-        var snapshot = _cpuTracker.Sample(now);
+        var instance = await context.Set<ApplicationInstance>().FindAsync([_instanceId], ct);
+        if (instance is null)
+        {
+            WarnSweptOnce();
+
+            return;
+        }
+
         instance.LastHeartbeatAt = now;
         instance.CpuUsagePercent = snapshot?.CpuPercent;
         instance.MemoryWorkingSetBytes = snapshot?.WorkingSet;
 
         await context.SaveChangesAsync(ct);
+    }
+
+    // One statement. DateTime.UtcNow inside the update is the DATABASE's clock (GETUTCDATE() / now()), not this
+    // process's: deliberately, see the class summary. While a server from before 8.0 is alive the same statement
+    // writes this process's time instead (rule 2.20) — REMOVE that branch in the release after 8.x. Returns the
+    // rows updated: zero when the instance was swept.
+    private Task<int> BeatAtDatabaseTimeAsync(DbContext context, DateTime now, ProcessCpuTracker.Snapshot? snapshot, CancellationToken ct)
+    {
+        var cpuPercent = snapshot?.CpuPercent;
+        var workingSet = snapshot?.WorkingSet;
+        var servers = context.Set<Server>();
+
+        return context.Set<ApplicationInstance>()
+            .Where(x => x.Id == _instanceId)
+            .ExecuteUpdateAsync(
+                x => x
+                    .SetProperty(
+                        y => y.LastHeartbeatAt,
+                        y => servers.Any(z => z.CoordinationVersion == null) ? now : DateTime.UtcNow)
+                    .SetProperty(y => y.CpuUsagePercent, cpuPercent)
+                    .SetProperty(y => y.MemoryWorkingSetBytes, workingSet),
+                ct);
+    }
+
+    // Swept while this process was unresponsive. A later tick deliberately does not recreate the row — the process
+    // is treated as gone, so there is nothing to refresh. Warn ONCE so operators can see this happened without
+    // spamming the log every tick for the rest of the process life.
+    private void WarnSweptOnce()
+    {
+        if (_staleSweptWarned)
+        {
+            return;
+        }
+
+        _staleSweptWarned = true;
+        _logger.LogWarning(
+            "Application instance {InstanceId} was stale-swept (heartbeat lost / process unresponsive past ApplicationInstanceStaleGrace). The row is not recreated, so this process will not reappear on the Applications view until it is restarted.",
+            _instanceId);
     }
 
     private async Task DeregisterAsync()

@@ -127,7 +127,17 @@ internal sealed class RunningJobMonitor
                 _sinceRenewal = TimeSpan.Zero;
             }
 
-            await TickAsync(running, renew).ConfigureAwait(false);
+            try
+            {
+                await TickAsync(running, renew).ConfigureAwait(false);
+            }
+            catch (Exception e)
+            {
+                // Anything the tick does not handle itself (creating the scope or the context) must not end
+                // the loop: it would stay registered as running, so the group's jobs would get no more
+                // keep-alives and long ones would be taken back by StaleJobRecovery while they ran.
+                _logger.LogWarning(e, "Running-job monitor tick failed; the next tick retries");
+            }
         }
     }
 

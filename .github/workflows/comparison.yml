@@ -1,0 +1,116 @@
+name: Comparison
+
+# Warp against Hangfire, run by hand (Actions > Comparison > Run workflow, or `gh workflow run comparison.yml`).
+# Every arm runs on the same runner, against the same PostgreSQL, with the same server and worker count; each run
+# gets a fresh database and the arms' order rotates from round to round. The method is in
+# src/benchmarks/Warp.Comparison/README.md; the summary is written to this run's page.
+
+on:
+  workflow_dispatch:
+    inputs:
+      jobs:
+        description: 'Jobs per run'
+        required: false
+        default: '20000'
+        type: string
+      servers:
+        description: 'Servers per arm'
+        required: false
+        default: '1'
+        type: string
+      workers:
+        description: 'Workers per server'
+        required: false
+        default: '10'
+        type: string
+      rounds:
+        description: 'Runs of each arm (the summary gives the median and the range)'
+        required: false
+        default: '3'
+        type: string
+      engines:
+        description: 'Arms: warp (default settings), warp-dispatcher (UseDispatcher = true), hangfire'
+        required: false
+        default: 'warp warp-dispatcher hangfire'
+        type: string
+      kinds:
+        description: 'Job kinds: noop (empty job), work (reads and updates one row)'
+        required: false
+        default: 'noop work'
+        type: string
+
+env:
+  DOTNET_VERSION: '10.0'
+
+concurrency:
+  group: comparison-${{ github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    name: Warp vs Hangfire (${{ inputs.servers || '1' }} x ${{ inputs.workers || '10' }}, ${{ inputs.jobs || '20000' }} jobs)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      # The same PostgreSQL the Performance workflow uses: 2 CPUs and 4 GB, pg_stat_statements on.
+      - name: Start PostgreSQL
+        run: bash .github/scripts/start-bench-postgres.sh "postgres:18.7"
+
+      - name: Build
+        env:
+          NuGetAudit: 'false'
+        run: dotnet build src/benchmarks/Warp.Comparison/Warp.Comparison.csproj -c Release
+
+      - name: Run
+        run: |
+          set -euo pipefail
+          bin=src/benchmarks/Warp.Comparison/bin/Release/net10.0/Warp.Comparison
+          mkdir -p results
+          set -- ${{ inputs.engines || 'warp warp-dispatcher hangfire' }}
+          count=$#
+          for round in $(seq 1 ${{ inputs.rounds || '3' }}); do
+            # Rotate the arms' order each round, so none always runs first on a cold machine.
+            shift_by=$(( (round - 1) % count ))
+            order=$(echo ${{ inputs.engines || 'warp warp-dispatcher hangfire' }} | tr ' ' '\n' | awk -v s=$shift_by -v n=$count '{a[NR-1]=$0} END {for (i=0;i<n;i++) print a[(i+s)%n]}')
+            for kind in ${{ inputs.kinds || 'noop work' }}; do
+              for engine in $order; do
+                db="cmp_r${round}_${kind}_${engine//-/_}"
+                docker exec warpbench psql -U postgres -qc "CREATE DATABASE $db"
+                echo "::group::round $round · $kind · $engine"
+                "$bin" run --engine=$engine --job=$kind --jobs=${{ inputs.jobs || '20000' }} --servers=${{ inputs.servers || '1' }} --workers=${{ inputs.workers || '10' }} \
+                  --conn="Host=localhost;Port=5432;Username=postgres;Password=postgres;Database=$db" \
+                  --out="results/r${round}-${kind}-${engine}.json"
+                echo "::endgroup::"
+                docker exec warpbench psql -U postgres -qc "DROP DATABASE $db WITH (FORCE)"
+              done
+            done
+          done
+
+      - name: Summarize
+        if: always()
+        run: |
+          bin=src/benchmarks/Warp.Comparison/bin/Release/net10.0/Warp.Comparison
+          if ls results/*.json > /dev/null 2>&1; then
+            "$bin" summarize --results=results --out=summary.md
+            {
+              cat summary.md
+              echo "Method: \`src/benchmarks/Warp.Comparison/README.md\`. Runner: GitHub \`ubuntu-24.04\`, PostgreSQL in a container capped at 2 CPUs and 4 GB on the same machine."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: comparison-results
+          path: |
+            results
+            summary.md

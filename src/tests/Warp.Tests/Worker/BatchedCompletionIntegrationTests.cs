@@ -14,7 +14,7 @@ using Warp.Worker;
 
 namespace Warp.Tests.Worker;
 
-[GenerateDatabaseTests]
+[GenerateDatabaseTests(SerializeInCollection = "HeavyIntegration")]
 public abstract class BatchedCompletionIntegrationTestsBase : IntegrationTestBase
 {
     protected BatchedCompletionIntegrationTestsBase(IDatabaseFixture fixture)

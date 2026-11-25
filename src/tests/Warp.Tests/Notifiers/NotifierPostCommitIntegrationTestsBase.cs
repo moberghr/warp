@@ -1,3 +1,4 @@
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Shouldly;
 using Warp.Core.Data.Entities;
@@ -47,7 +48,17 @@ public abstract class NotifierPostCommitIntegrationTestsBase : IntegrationTestBa
             configure: cfg => cfg.DisableWorker(),
             configureServices: services => services.AddSingleton<IWarpNotifier>(spy));
 
-        await server.RunServerTaskThroughLoopAsync<ExpirationCleanup<TestContext>>(ct);
+        // The host's own first pass sweeps the same stale row (tasks are claimed from the first pass, rule
+        // 6.23) and this run takes no lease, so the two can overlap: the one that loses the delete finds no
+        // row. That is this test's doing, not the task's, since a lease keeps two real runs apart.
+        try
+        {
+            await server.RunServerTaskThroughLoopAsync<ExpirationCleanup<TestContext>>(ct);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            // The host's pass deleted the row first; its dispatch is the one asserted below.
+        }
 
         // Post-commit, via OnCommittedAsync (not a direct ExecuteAsync). Wait for the spy: the host's own
         // background server-task loop can race the explicit run for the task's lock, so whichever run wins

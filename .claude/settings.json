@@ -1,0 +1,43 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(**/.env)",
+      "Read(**/.env.*)",
+      "Read(**/*.pem)",
+      "Read(**/*.key)",
+      "Read(**/*.pfx)",
+      "Read(**/*.p12)",
+      "Read(**/*.jks)",
+      "Read(**/*.keystore)",
+      "Read(**/*.kdbx)",
+      "Read(**/id_rsa)",
+      "Read(**/id_rsa.*)",
+      "Read(**/id_dsa)",
+      "Read(**/id_dsa.*)",
+      "Read(**/id_ecdsa)",
+      "Read(**/id_ecdsa.*)",
+      "Read(**/id_ed25519)",
+      "Read(**/id_ed25519.*)",
+      "Read(**/.npmrc)",
+      "Read(**/.netrc)",
+      "Read(**/.pgpass)",
+      "Read(**/credentials)",
+      "Read(**/secrets/**)",
+      "Read(**/secrets.*)",
+      "Read(**/*.secret)",
+      "Read(**/*.secrets)"
+    ],
+    "ask": [
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
+      "Bash(git push * --force*)",
+      "Bash(git push * -f*)",
+      "Bash(git push * +*)",
+      "Bash(git reset --hard*)",
+      "Bash(git reset * --hard*)",
+      "Bash(git clean -*f*)",
+      "Bash(dotnet ef database drop*)"
+    ]
+  },
+  "autoCompactWindow": 300000
+}

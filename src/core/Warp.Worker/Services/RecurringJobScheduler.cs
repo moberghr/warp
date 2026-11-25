@@ -1,5 +1,6 @@
 using Cronos;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Warp.Core;
 using Warp.Core.Data.Entities;
@@ -38,7 +39,7 @@ public sealed class RecurringJobScheduler<TContext> : IServerTask
 
     public RecurringJobScheduler(
         IWarpServerContext serverContext,
-        TimeProvider time,
+        [FromKeyedServices(DatabaseClock.Key)] TimeProvider time,
         IWarpNotificationTransport notificationTransport,
         ServerTaskSignals<TContext> signals,
         IOptions<WarpServerConfiguration> configuration)

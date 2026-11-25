@@ -32,8 +32,10 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
     private readonly string _renewRunningJobsSql;
     private readonly string _lockStaleProcessingJobsSql;
     private readonly string _lockJobByIdWaitSql;
+    private readonly string _lockJobsByIdWaitSql;
     private readonly string _lockAllServersSql;
     private readonly string _heartbeatSql;
+    private readonly string _heartbeatLocalTimeSql;
     private readonly string _activateScheduledJobsSql;
     private readonly string _lockLeaseByServiceNameSql;
     private readonly string _lockDefinitionByServiceNameSql;
@@ -107,7 +109,8 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
             UPDATE {table} AS t
             SET ""{_n.CurrentState}"" = {(int)State.Processing},
                 ""{_n.CurrentWorkerId}"" = {{0}},
-                ""{_n.LastKeepAlive}"" = {{1}}
+                ""{_n.LastKeepAlive}"" = {{1}},
+                ""{_n.RunId}"" = gen_random_uuid()
             WHERE t.""{_n.Id}"" = ANY(ARRAY(
                 SELECT ""{_n.Id}""
                 FROM {table}
@@ -125,7 +128,8 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
             UPDATE {table} AS t
             SET ""{_n.CurrentState}"" = {(int)State.Processing},
                 ""{_n.CurrentWorkerId}"" = {{0}},
-                ""{_n.LastKeepAlive}"" = {{1}}
+                ""{_n.LastKeepAlive}"" = {{1}},
+                ""{_n.RunId}"" = gen_random_uuid()
             WHERE t.""{_n.Id}"" = ANY(ARRAY(
                 SELECT ""{_n.Id}""
                 FROM {table}
@@ -164,7 +168,8 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
         // statement. The arrays are unnested back into rows; the log rows are inserted only for jobs
         // the update found, so a job whose row was deleted while it ran takes its log rows with it
         // and cannot fail the insert on the foreign key. A row is updated only while it is still
-        // Processing and still this run's (JobRunOwner): renewed by its worker, or as its claim left it.
+        // Processing and still this run's (JobRunOwner): the run's own run id (#347), and renewed by its
+        // worker or as its claim left it. The run id is cleared on the way out of Processing.
         // A run whose job StaleJobRecovery took back and another claim took is skipped the same way,
         // instead of finishing the new run's row.
         var log = _n.JobLog ?? throw new InvalidOperationException("The JobLog table names were not resolved from the model.");
@@ -179,13 +184,15 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
                     ""{_n.ExpireAt}"" = c.expire,
                     ""{_n.HandlerType}"" = c.handler,
                     ""{_n.ScheduleTime}"" = c.schedule,
-                    ""{_n.Metadata}"" = c.metadata
+                    ""{_n.Metadata}"" = c.metadata,
+                    ""{_n.RunId}"" = NULL
                 FROM unnest(
                         @ids, @states, @cancels, @workers, @keepalives, @expires, @handlers, @schedules, @metadatas,
-                        @owners, @claimers, @claimed_keepalives)
-                    AS c(id, state, cancel, worker, keepalive, expire, handler, schedule, metadata, owner, claimer, claimed_keepalive)
+                        @owners, @claimers, @claimed_keepalives, @runs)
+                    AS c(id, state, cancel, worker, keepalive, expire, handler, schedule, metadata, owner, claimer, claimed_keepalive, run)
                 WHERE t.""{_n.Id}"" = c.id
                   AND t.""{_n.CurrentState}"" = {(int)State.Processing}
+                  AND t.""{_n.RunId}"" IS NOT DISTINCT FROM c.run
                   AND (t.""{_n.CurrentWorkerId}"" = c.owner
                        OR (t.""{_n.CurrentWorkerId}"" = c.claimer AND t.""{_n.LastKeepAlive}"" = c.claimed_keepalive))
                 RETURNING t.""{_n.Id}"" AS id
@@ -211,9 +218,10 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
             UPDATE {table} AS t
             SET ""{_n.LastKeepAlive}"" = @now,
                 ""{_n.CurrentWorkerId}"" = beat.worker
-            FROM unnest(@ids, @workers, @claimers, @claimed_keepalives) AS beat(id, worker, claimer, claimed_keepalive)
+            FROM unnest(@ids, @workers, @claimers, @claimed_keepalives, @runs) AS beat(id, worker, claimer, claimed_keepalive, run)
             WHERE t.""{_n.Id}"" = beat.id
               AND t.""{_n.CurrentState}"" = {(int)State.Processing}
+              AND t.""{_n.RunId}"" IS NOT DISTINCT FROM beat.run
               AND (t.""{_n.CurrentWorkerId}"" = beat.worker
                    OR (t.""{_n.CurrentWorkerId}"" = beat.claimer AND t.""{_n.LastKeepAlive}"" = beat.claimed_keepalive))
             RETURNING t.""{_n.Id}"" AS ""Id"", t.""{_n.CancellationMode}"" AS ""Mode""";
@@ -230,6 +238,14 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
             SELECT * FROM {table}
             WHERE ""{_n.Id}"" = {{0}}
             FOR NO KEY UPDATE";
+
+        // Row locks for a set-based write that follows (BulkRequeueJobs), taken in id order.
+        _lockJobsByIdWaitSql = $@"
+            SELECT count(*) FROM (
+                SELECT 1 FROM {table}
+                WHERE ""{_n.Id}"" = ANY(@ids)
+                ORDER BY ""{_n.Id}""
+                FOR NO KEY UPDATE) AS locked";
 
         // FOR UPDATE (not NO KEY): ServerCleanup deletes a stale server's
         // BackgroundServiceInstance / BackgroundServiceLease children and then the server in one
@@ -257,10 +273,16 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
         var leaseTable = QualifiedBackgroundServiceLeaseTable();
         var ttlSeconds = _n.LeaseTtlSeconds;
 
-        _heartbeatSql = $@"
+        // Every time written is the database's own (statement_timestamp(), one value for the whole
+        // statement): a server whose clock is wrong cannot make itself or its leases look alive or dead to
+        // the others (#350). {{1}} is the server's own clock, used only to store how far it is off — except
+        // in the variant for a cluster with a server from before 8.0 alive (rule 2.20), which writes and
+        // compares {{1}} as 7.7 did. REMOVE that variant in the release after 8.x.
+        string HeartbeatSql(string written) => $@"
             WITH heartbeat AS (
                 UPDATE {serverTable}
-                SET ""{_n.ServerLastHeartbeatTime}"" = {{1}},
+                SET ""{_n.ServerLastHeartbeatTime}"" = {written},
+                    ""{_n.ServerClockOffsetMs}"" = EXTRACT(EPOCH FROM (statement_timestamp() - {{1}})) * 1000,
                     ""{_n.ServerMemoryWorkingSetBytes}"" = COALESCE({{2}}, ""{_n.ServerMemoryWorkingSetBytes}""),
                     ""{_n.ServerCpuUsagePercent}"" = COALESCE({{3}}, ""{_n.ServerCpuUsagePercent}"")
                 WHERE ""{_n.ServerId}"" = {{0}}
@@ -268,22 +290,26 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
             ),
             instance_bump AS (
                 UPDATE {instanceTable}
-                SET ""{_n.BackgroundServiceInstanceLastHeartbeatAt}"" = {{1}}
+                SET ""{_n.BackgroundServiceInstanceLastHeartbeatAt}"" = {written}
                 WHERE ""{_n.BackgroundServiceInstanceServerId}"" = {{0}}
             ),
             lease_renewed AS (
                 UPDATE {leaseTable}
-                SET ""{_n.BackgroundServiceLeaseExpiresAt}"" = {{1}} + interval '{ttlSeconds} seconds'
+                SET ""{_n.BackgroundServiceLeaseExpiresAt}"" = {written} + interval '{ttlSeconds} seconds'
                 WHERE ""{_n.BackgroundServiceLeaseHolderServerId}"" = {{0}}
-                  AND ""{_n.BackgroundServiceLeaseExpiresAt}"" > {{1}}
+                  AND ""{_n.BackgroundServiceLeaseExpiresAt}"" > {written}
                 RETURNING ""{_n.BackgroundServiceLeaseServiceName}"" AS service_name
             )
             SELECT h.paused_at AS server_paused_at,
                    w.""{_n.WorkerGroupId}"" AS group_id,
                    w.""{_n.WorkerGroupPausedAt}"" AS group_paused_at,
-                   (SELECT array_agg(service_name) FROM lease_renewed) AS renewed_leases
+                   (SELECT array_agg(service_name) FROM lease_renewed) AS renewed_leases,
+                   statement_timestamp() AS database_now
             FROM heartbeat h
             LEFT JOIN {QualifiedWorkerGroupTable()} w ON w.""{_n.WorkerGroupServerId}"" = h.id";
+
+        _heartbeatSql = HeartbeatSql("statement_timestamp()");
+        _heartbeatLocalTimeSql = HeartbeatSql("{1}");
 
         // Atomic activation: UPDATE ... RETURNING queue flips due rows AND streams back the
         // queue names so the caller can fire one JobEnqueued notification per distinct queue.
@@ -396,6 +422,19 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
             .FirstOrDefaultAsync(ct);
     }
 
+    public async Task LockJobsByIdWaitAsync(DbContext context, IReadOnlyList<Guid> jobIds, CancellationToken ct)
+    {
+        if (jobIds.Count == 0)
+        {
+            return;
+        }
+
+        await context.Database.ExecuteSqlRawAsync(
+            _lockJobsByIdWaitSql,
+            [new NpgsqlParameter<Guid[]>("ids", [.. jobIds])],
+            ct);
+    }
+
     public async Task<List<Server>> LockAllServersAsync(DbContext context, CancellationToken ct)
     {
         return await context.Set<Server>()
@@ -409,6 +448,7 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
         DateTime now,
         long? memoryBytes,
         double? cpuPercent,
+        bool writeLocalTime,
         CancellationToken ct)
     {
         // Raw ADO.NET: the CTE+JOIN returns a flat (server_paused_at, group_id, group_paused_at
@@ -429,7 +469,7 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
             await using var cmd = conn.CreateCommand();
 
             cmd.Transaction = context.Database.CurrentTransaction?.GetDbTransaction();
-            cmd.CommandText = _heartbeatSql
+            cmd.CommandText = (writeLocalTime ? _heartbeatLocalTimeSql : _heartbeatSql)
                 .Replace("{0}", "@p0", StringComparison.Ordinal)
                 .Replace("{1}", "@p1", StringComparison.Ordinal)
                 .Replace("{2}", "@p2", StringComparison.Ordinal)
@@ -443,10 +483,12 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
             DateTime? serverPausedAt = null;
             var groupPaused = new Dictionary<Guid, bool>();
             var renewedLeases = new List<string>();
+            DateTime? databaseNow = null;
             var anyRow = false;
             while (await reader.ReadAsync(ct))
             {
                 anyRow = true;
+                databaseNow ??= DateTime.SpecifyKind(reader.GetDateTime(4), DateTimeKind.Utc);
                 if (!await reader.IsDBNullAsync(0, ct))
                 {
                     serverPausedAt = reader.GetDateTime(0);
@@ -472,7 +514,7 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
                 }
             }
 
-            return anyRow ? new HeartbeatResult(serverPausedAt, groupPaused, renewedLeases) : null;
+            return anyRow ? new HeartbeatResult(serverPausedAt, groupPaused, renewedLeases) { DatabaseUtcNow = databaseNow } : null;
         }
         finally
         {
@@ -572,6 +614,7 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
             cmd.Parameters.Add(new NpgsqlParameter<Guid[]>("owners", [.. owners.Select(x => x.WorkerId)]));
             cmd.Parameters.Add(new NpgsqlParameter<Guid?[]>("claimers", [.. owners.Select(x => x.ClaimedBy)]));
             cmd.Parameters.Add(Timestamps("claimed_keepalives", owners.Select(x => x.ClaimedKeepAlive)));
+            cmd.Parameters.Add(new NpgsqlParameter<Guid?[]>("runs", [.. owners.Select(x => x.RunId)]));
 
             cmd.Parameters.Add(new NpgsqlParameter<Guid[]>("log_ids", [.. logs.Select(x => x.Id)]));
             cmd.Parameters.Add(new NpgsqlParameter<Guid[]>("log_jobs", [.. logs.Select(x => x.JobId)]));
@@ -624,6 +667,7 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
                 new NpgsqlParameter<Guid[]>("workers", [.. runs.Select(x => x.WorkerId)]),
                 new NpgsqlParameter<Guid?[]>("claimers", [.. runs.Select(x => x.ClaimedBy)]),
                 Timestamps("claimed_keepalives", runs.Select(x => x.ClaimedKeepAlive)),
+                new NpgsqlParameter<Guid?[]>("runs", [.. runs.Select(x => x.RunId)]),
                 new NpgsqlParameter<DateTime>("now", DateTime.SpecifyKind(now, DateTimeKind.Utc)))
             .ToListAsync(ct);
 
@@ -644,6 +688,7 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
 
         var tasks = new List<ClusterTaskState>(names.Count);
         var legacy = false;
+        var others = false;
         await ReadAsync(
             context,
             ClusterTaskSql(context).Claim,
@@ -654,12 +699,13 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
             ],
             x =>
             {
-                tasks.Add(new ClusterTaskState(x.GetString(0), x.GetBoolean(1), TimeSpan.FromSeconds(x.GetDouble(2))));
+                tasks.Add(new ClusterTaskState(x.GetString(0), x.GetBoolean(1), TimeSpan.FromSeconds(x.GetDouble(2))) { Scheduled = x.GetBoolean(5) });
                 legacy |= x.GetBoolean(3);
+                others |= x.GetBoolean(4);
             },
             ct);
 
-        return new ClusterTaskClaims(tasks, legacy);
+        return new ClusterTaskClaims(tasks, legacy) { OtherServersAlive = others };
     }
 
     public async Task<bool> RequestClusterTaskRunAsync(DbContext context, string name, Guid serverId, CancellationToken ct)
@@ -694,9 +740,11 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
         return renewed;
     }
 
-    public async Task CompleteClusterTaskAsync(DbContext context, ClusterTaskCompletion completion, CancellationToken ct)
+    public async Task<bool> CompleteClusterTaskAsync(DbContext context, ClusterTaskCompletion completion, CancellationToken ct)
     {
-        await context.Database.ExecuteSqlRawAsync(
+        var dueNow = false;
+        await ReadAsync(
+            context,
             ClusterTaskSql(context).Complete,
             [
                 new NpgsqlParameter<string>("name", completion.Name),
@@ -708,6 +756,27 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
                 new NpgsqlParameter("message", (object?)completion.Message ?? DBNull.Value) { DataTypeName = "text" },
                 new NpgsqlParameter<double>("durationMs", completion.DurationMs),
             ],
+            x => dueNow = x.GetBoolean(0),
+            ct);
+
+        return dueNow;
+    }
+
+    public async Task RegisterClusterTasksAsync(DbContext context, IReadOnlyList<ClusterTaskRegistration> tasks, CancellationToken ct)
+    {
+        if (tasks.Count == 0)
+        {
+            return;
+        }
+
+        await ReadAsync(
+            context,
+            ClusterTaskSql(context).Register,
+            [
+                new NpgsqlParameter<string[]>("names", [.. tasks.Select(x => x.Name)]),
+                new NpgsqlParameter<double[]>("intervals", [.. tasks.Select(x => x.IntervalSeconds)]),
+            ],
+            _ => { },
             ct);
     }
 

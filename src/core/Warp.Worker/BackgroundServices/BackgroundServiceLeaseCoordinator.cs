@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Warp.Core;
 using Warp.Core.BackgroundServices;
@@ -20,7 +21,7 @@ public sealed class BackgroundServiceLeaseCoordinator<TContext> : IBackgroundSer
 
     public BackgroundServiceLeaseCoordinator(
         IWarpServerContext serverContext,
-        TimeProvider time,
+        [FromKeyedServices(DatabaseClock.Key)] TimeProvider time,
         IOptions<WarpServerConfiguration> options,
         IWarpSqlQueries<TContext> sqlQueries)
     {

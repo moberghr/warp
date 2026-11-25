@@ -30,6 +30,12 @@ public class Server
 
     public double? CpuUsagePercent { get; set; }
 
+    /// <summary>
+    /// The database clock minus this server's own clock in milliseconds, measured by its last heartbeat
+    /// (#350). The server corrects for it; the dashboard shows it so a drifting clock gets fixed at the source.
+    /// </summary>
+    public double? ClockOffsetMs { get; set; }
+
     public long? MemoryWorkingSetBytes { get; set; }
 
     public DateTime? PausedAt { get; set; }

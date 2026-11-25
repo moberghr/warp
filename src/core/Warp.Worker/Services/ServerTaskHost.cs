@@ -32,7 +32,7 @@ public sealed class ServerTaskHost<TContext> : BackgroundService
     public ServerTaskHost(
         IServiceScopeFactory scopes,
         IWarpLockProvider lockProvider,
-        TimeProvider time,
+        [FromKeyedServices(DatabaseClock.Key)] TimeProvider time,
         ILoggerFactory loggerFactory,
         IOptions<WarpServerConfiguration> configuration,
         ServerTaskSignals<TContext> signals)
@@ -71,7 +71,8 @@ public sealed class ServerTaskHost<TContext> : BackgroundService
                 configuration.Value.ServerId,
                 loggerFactory.CreateLogger<ClusterTaskScheduler<TContext>>(),
                 signalInterval,
-                configuration.Value.HealthCheckTimeout);
+                configuration.Value.HealthCheckTimeout,
+                (time as DatabaseClock)?.LegacyServers);
 
             foreach (var (name, channels) in _scheduler.Subscriptions)
             {

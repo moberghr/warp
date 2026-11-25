@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Warp.Core;
@@ -45,7 +46,7 @@ public sealed class ErrorGroupAggregator<TContext> : IServerTask
     public ErrorGroupAggregator(
         IWarpServerContext serverContext,
         IOptions<WarpServerConfiguration> configuration,
-        TimeProvider timeProvider,
+        [FromKeyedServices(DatabaseClock.Key)] TimeProvider timeProvider,
         WarpNotifierDispatcher notifierDispatcher,
         ILogger<ErrorGroupAggregator<TContext>> logger)
     {

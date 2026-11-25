@@ -96,6 +96,10 @@ public static class PostgreSqlServiceConfiguration
         // registered one, else the connection string), inheriting auth/SSL settings.
         builder.Services.TryAddSingleton<IWarpServerContextConfigurator>(new PostgresServerContextConfigurator<TContext>());
 
+        // A process refuses to start when Warp's time columns are not timestamp with time zone (legacy mode).
+        builder.Services.TryAddEnumerable(ServiceDescriptor.Singleton<Microsoft.Extensions.Hosting.IHostedService, PostgresTimestampCheckService<TContext>>());
+        builder.Services.TryAddEnumerable(ServiceDescriptor.Singleton<Microsoft.Extensions.Hosting.IHostedService, PostgresVersionCheckService<TContext>>());
+
         return builder;
     }
 

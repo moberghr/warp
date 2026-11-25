@@ -13,6 +13,9 @@ namespace Warp.Tests.Worker;
 [GenerateDatabaseTests]
 public abstract class HeartbeatSqlQueryTestsBase : IAsyncLifetime
 {
+    private static readonly TimeSpan Skew = TimeSpan.FromHours(3);
+    private static readonly TimeSpan Tolerance = TimeSpan.FromSeconds(30);
+
     private readonly IDatabaseFixture _fixture;
 
     protected HeartbeatSqlQueryTestsBase(IDatabaseFixture fixture) => _fixture = fixture;
@@ -29,7 +32,7 @@ public abstract class HeartbeatSqlQueryTestsBase : IAsyncLifetime
         var now = DateTime.UtcNow;
 
         await using var ctx = _fixture.CreateContext();
-        var result = await queries.HeartbeatAsync(ctx, serverId, now, memoryBytes: 1234L, cpuPercent: 42.0, default);
+        var result = await queries.HeartbeatAsync(ctx, serverId, now, memoryBytes: 1234L, cpuPercent: 42.0, writeLocalTime: false, default);
 
         result.ShouldNotBeNull();
         result.ServerPausedAt.ShouldBeNull();
@@ -51,7 +54,7 @@ public abstract class HeartbeatSqlQueryTestsBase : IAsyncLifetime
         var queries = TestTasks.QueriesFor(_fixture.CreateContext());
 
         await using var ctx = _fixture.CreateContext();
-        var result = await queries.HeartbeatAsync(ctx, serverId, DateTime.UtcNow, memoryBytes: null, cpuPercent: null, default);
+        var result = await queries.HeartbeatAsync(ctx, serverId, DateTime.UtcNow, memoryBytes: null, cpuPercent: null, writeLocalTime: false, default);
 
         result.ShouldNotBeNull();
         result.ServerPausedAt.ShouldNotBeNull();
@@ -64,7 +67,7 @@ public abstract class HeartbeatSqlQueryTestsBase : IAsyncLifetime
         var queries = TestTasks.QueriesFor(_fixture.CreateContext());
 
         await using var ctx = _fixture.CreateContext();
-        var result = await queries.HeartbeatAsync(ctx, Guid.NewGuid(), DateTime.UtcNow, memoryBytes: null, cpuPercent: null, default);
+        var result = await queries.HeartbeatAsync(ctx, Guid.NewGuid(), DateTime.UtcNow, memoryBytes: null, cpuPercent: null, writeLocalTime: false, default);
 
         result.ShouldBeNull();
     }
@@ -76,7 +79,7 @@ public abstract class HeartbeatSqlQueryTestsBase : IAsyncLifetime
         var queries = TestTasks.QueriesFor(_fixture.CreateContext());
 
         await using var ctx = _fixture.CreateContext();
-        await queries.HeartbeatAsync(ctx, serverId, DateTime.UtcNow, memoryBytes: null, cpuPercent: null, default);
+        await queries.HeartbeatAsync(ctx, serverId, DateTime.UtcNow, memoryBytes: null, cpuPercent: null, writeLocalTime: false, default);
 
         await using var readCtx = _fixture.CreateContext();
         var persisted = await readCtx.Set<Server>().AsNoTracking().FirstAsync(s => s.Id == serverId);
@@ -93,7 +96,7 @@ public abstract class HeartbeatSqlQueryTestsBase : IAsyncLifetime
 
         var queries = TestTasks.QueriesFor(_fixture.CreateContext());
         await using var ctx = _fixture.CreateContext();
-        var result = await queries.HeartbeatAsync(ctx, serverId, DateTime.UtcNow, null, null, default);
+        var result = await queries.HeartbeatAsync(ctx, serverId, DateTime.UtcNow, null, null, writeLocalTime: false, default);
 
         result.ShouldNotBeNull();
         result.GroupPaused.Count.ShouldBe(2);
@@ -110,10 +113,101 @@ public abstract class HeartbeatSqlQueryTestsBase : IAsyncLifetime
 
         var queries = TestTasks.QueriesFor(_fixture.CreateContext());
         await using var ctx = _fixture.CreateContext();
-        var result = await queries.HeartbeatAsync(ctx, myServer, DateTime.UtcNow, null, null, default);
+        var result = await queries.HeartbeatAsync(ctx, myServer, DateTime.UtcNow, null, null, writeLocalTime: false, default);
 
         result.ShouldNotBeNull();
         result.GroupPaused.ShouldBeEmpty();
+    }
+
+    [TimedFact]
+    public async Task HeartbeatAsync_DatabaseTime_WritesTheDatabasesClockNotTheOneItIsPassed()
+    {
+        // Arrange — this process's clock is three hours ahead of the database's.
+        var serverId = await SeedServerAsync(pausedAt: null);
+        await SeedServiceAsync(serverId, "ClockSvc", leaseExpiresAt: DateTime.UtcNow.AddSeconds(10));
+        var queries = TestTasks.QueriesFor(_fixture.CreateContext());
+        var local = DateTime.UtcNow.Add(Skew);
+
+        // Act
+        await using var ctx = _fixture.CreateContext();
+        var result = await queries.HeartbeatAsync(ctx, serverId, local, null, null, writeLocalTime: false, default);
+
+        // Assert — every time written is the database's; the offset is stored either way.
+        result.ShouldNotBeNull();
+        result.RenewedBackgroundServiceLeases.ShouldContain("ClockSvc");
+        var (server, instance, lease) = await ReadWrittenTimesAsync(serverId, "ClockSvc");
+        server.LastHeartbeatTime.ShouldBe(DateTime.UtcNow, Tolerance);
+        server.ClockOffsetMs!.Value.ShouldBe(-Skew.TotalMilliseconds, Tolerance.TotalMilliseconds);
+        instance.ShouldBe(DateTime.UtcNow, Tolerance);
+        lease.ShouldBe(DateTime.UtcNow.AddSeconds(30), Tolerance);
+    }
+
+    [TimedFact]
+    public async Task HeartbeatAsync_LocalTimeWhileAServerFromBefore80IsAlive_WritesTheClockItIsPassedAs77Did()
+    {
+        // Arrange — rule 2.20: a 7.7 server compares its own clock, so the heartbeat writes this process's, three
+        // hours ahead, for the server, its instances and its leases (a lease due on that clock in 10 s).
+        var serverId = await SeedServerAsync(pausedAt: null);
+        var local = DateTime.UtcNow.Add(Skew);
+        await SeedServiceAsync(serverId, "ClockSvc", leaseExpiresAt: local.AddSeconds(10));
+        var queries = TestTasks.QueriesFor(_fixture.CreateContext());
+
+        // Act
+        await using var ctx = _fixture.CreateContext();
+        var result = await queries.HeartbeatAsync(ctx, serverId, local, null, null, writeLocalTime: true, default);
+
+        // Assert — the local time is written, while the offset and the database's clock are still measured.
+        result.ShouldNotBeNull();
+        result.RenewedBackgroundServiceLeases.ShouldContain("ClockSvc");
+        result.DatabaseUtcNow!.Value.ShouldBe(DateTime.UtcNow, Tolerance);
+        var (server, instance, lease) = await ReadWrittenTimesAsync(serverId, "ClockSvc");
+        server.LastHeartbeatTime.ShouldBe(local, TimeSpan.FromSeconds(1));
+        server.ClockOffsetMs!.Value.ShouldBe(-Skew.TotalMilliseconds, Tolerance.TotalMilliseconds);
+        instance.ShouldBe(local, TimeSpan.FromSeconds(1));
+        lease.ShouldBe(local.AddSeconds(30), TimeSpan.FromSeconds(1));
+    }
+
+    private async Task SeedServiceAsync(Guid serverId, string name, DateTime leaseExpiresAt)
+    {
+        await using var ctx = _fixture.CreateContext();
+        ctx.Set<BackgroundServiceDefinition>().Add(new BackgroundServiceDefinition
+        {
+            Name = name,
+            DeclaredScope = Warp.Core.BackgroundServices.ServiceScope.Singleton,
+            FirstSeenAt = DateTime.UtcNow,
+            LastSeenAt = DateTime.UtcNow,
+        });
+        ctx.Set<BackgroundServiceInstance>().Add(new BackgroundServiceInstance
+        {
+            ServerId = serverId,
+            ServiceName = name,
+            Status = Warp.Core.BackgroundServices.BackgroundServiceStatus.Running,
+            StartedAt = DateTime.UtcNow.AddMinutes(-1),
+            LastHeartbeatAt = DateTime.UtcNow.AddMinutes(-1),
+        });
+        ctx.Set<BackgroundServiceLease>().Add(new BackgroundServiceLease
+        {
+            ServiceName = name,
+            HolderServerId = serverId,
+            LeaseExpiresAt = leaseExpiresAt,
+        });
+        await ctx.SaveChangesAsync();
+    }
+
+    private async Task<(Server Server, DateTime Instance, DateTime Lease)> ReadWrittenTimesAsync(Guid serverId, string name)
+    {
+        await using var ctx = _fixture.CreateContext();
+        var server = await ctx.Set<Server>().AsNoTracking().FirstAsync(x => x.Id == serverId);
+        var instance = await ctx.Set<BackgroundServiceInstance>()
+            .Where(x => x.ServerId == serverId)
+            .Select(x => x.LastHeartbeatAt)
+            .FirstAsync();
+        var lease = await ctx.Set<BackgroundServiceLease>()
+            .Where(x => x.ServiceName == name)
+            .Select(x => x.LeaseExpiresAt)
+            .FirstAsync();
+
+        return (server, instance, lease);
     }
 
     private async Task<Guid> SeedServerAsync(DateTime? pausedAt, long? memoryBytes = null, double? cpuPercent = null)

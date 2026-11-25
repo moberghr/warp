@@ -130,6 +130,7 @@ public class ServerTaskHostTests
         services.AddSingleton<IServerTask>(task);
         services.AddSingleton<IWarpLockProvider>(new FakeLockProvider());
         services.AddSingleton(TimeProvider.System);
+        services.AddKeyedSingleton(DatabaseClock.Key, TimeProvider.System);
         services.AddSingleton<ILoggerFactory>(_ => NullLoggerFactory.Instance);
         services.AddSingleton(Options.Create(new WarpServerConfiguration { ServerId = Guid.NewGuid() }));
         services.AddSingleton(signals ?? new ServerTaskSignals<StubContext>());

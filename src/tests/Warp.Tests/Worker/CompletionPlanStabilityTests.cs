@@ -38,7 +38,7 @@ public abstract class CompletionPlanStabilityTestsBase : IAsyncLifetime
         await using var context = _fixture.CreateContext();
         if (context.Database.ProviderName?.Contains("SqlServer", StringComparison.Ordinal) != true)
         {
-            return;
+            Assert.Skip("SQL Server plan shape; PostgreSQL's completion is a different statement.");
         }
 
         // Arrange

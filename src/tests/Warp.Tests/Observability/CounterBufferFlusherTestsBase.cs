@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -146,6 +147,41 @@ public abstract class CounterBufferFlusherTestsBase : IAsyncLifetime
         rows.Single(x => string.Equals(x.Key, "stats:failed", StringComparison.Ordinal)).Value.ShouldBe(1);
     }
 
+    /// <summary>
+    /// A host that stops while the periodic flush is writing must not count that interval twice. The flush ran on
+    /// the stopping token: a write that had already committed could still surface the cancellation, the increments
+    /// went back into the buffer as if the write had failed, and the final flush of the stop wrote them again.
+    /// Seen on CI (SQL Server 2025) as every counter of a job exactly doubled.
+    /// </summary>
+    [TimedFact]
+    public async Task Stop_WhileAPeriodicFlushHasCommitted_DoesNotWriteItsIncrementsAgain()
+    {
+        // Arrange: a context whose save commits, waits for the test, then observes its token like a real save does.
+        var buffer = new WarpCounterBuffer();
+        buffer.Add("stats:succeeded", 3);
+        using var committed = new SemaphoreSlim(0);
+        using var release = new SemaphoreSlim(0);
+        var options = _fixture.CreateContext().GetService<IDbContextOptions>();
+        var services = new ServiceCollection();
+        services.AddScoped<IWarpServerContext>(_ => new TestServerContext(new CommitThenObserveTokenContext((DbContextOptions<TestContext>)options, committed, release)));
+        var flusher = new CounterBufferFlusher<TestContext>(
+            services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>(),
+            buffer,
+            Options.Create(new WarpServerConfiguration { CounterBufferFlushInterval = TimeSpan.FromMilliseconds(20) }),
+            NullLogger<CounterBufferFlusher<TestContext>>.Instance);
+        await flusher.StartAsync(Ct);
+        (await committed.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue("the periodic flush never wrote");
+
+        // Act: stop while that write is still inside the save, then let the save go on.
+        var stopping = flusher.StopAsync(Ct);
+        release.Release(10);
+        await stopping;
+
+        // Assert
+        var rows = await ReadCounters();
+        rows.Sum(x => x.Value).ShouldBe(3);
+    }
+
     private async Task<List<Counter>> ReadCounters() =>
         await _fixture.CreateContext()
             .Set<Counter>()
@@ -163,5 +199,19 @@ public abstract class CounterBufferFlusherTestsBase : IAsyncLifetime
             buffer,
             Options.Create(new WarpServerConfiguration()),
             NullLogger<CounterBufferFlusher<TestContext>>.Instance);
+    }
+
+    private sealed class CommitThenObserveTokenContext(DbContextOptions<TestContext> options, SemaphoreSlim committed, SemaphoreSlim release)
+        : TestContext(options)
+    {
+        public override async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+        {
+            var written = await base.SaveChangesAsync(CancellationToken.None);
+            committed.Release();
+            await release.WaitAsync(CancellationToken.None);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            return written;
+        }
     }
 }

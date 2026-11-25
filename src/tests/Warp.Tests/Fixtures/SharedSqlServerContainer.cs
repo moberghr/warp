@@ -13,6 +13,9 @@ namespace Warp.Tests.Fixtures;
 // the test process exits. This mirrors the original per-fixture behavior under dotnet test.
 internal static class SharedSqlServerContainer
 {
+    private const int DatabaseInUse = 3702;
+    private const int MaxDropAttempts = 5;
+
     // Held so the container object is kept alive for the process lifetime. Testcontainers'
     // Ryuk daemon reaps the Docker container on process exit; we only need to stop this
     // field from being eligible for GC while tests are still running.
@@ -82,6 +85,26 @@ internal static class SharedSqlServerContainer
                    DROP DATABASE [{databaseName}];
                END",
             conn);
+
+        // SINGLE_USER frees the database for ONE connection, and this batch runs from master, so the slot is
+        // open to whoever connects first: a pool of a server that is still stopping reconnected between the
+        // ALTER and the DROP on CI ("Cannot drop database ... because it is currently in use", error 3702).
+        // Running the batch again KILLs that session too. Each attempt follows the last at once; the race
+        // needs a reconnect inside a few milliseconds, so it does not repeat.
+        for (var attempt = 1; attempt < MaxDropAttempts; attempt++)
+        {
+            try
+            {
+                await cmd.ExecuteNonQueryAsync(ct);
+
+                return;
+            }
+            catch (SqlException e) when (e.Number == DatabaseInUse)
+            {
+                TestLifecycleTrace.Record($"DropDatabaseAsync: {databaseName} in use, attempt {attempt}");
+            }
+        }
+
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -97,8 +120,10 @@ internal static class SharedSqlServerContainer
         {
             if (_masterConnectionString == null)
             {
+                // WARP_TEST_SQLSERVER_IMAGE pins the server version (CI runs the suite once per supported
+                // SQL Server version); a local run keeps the default.
                 var container = new MsSqlBuilder()
-                    .WithImage("mcr.microsoft.com/mssql/server:2022-latest")
+                    .WithImage(Environment.GetEnvironmentVariable("WARP_TEST_SQLSERVER_IMAGE") is { Length: > 0 } image ? image : "mcr.microsoft.com/mssql/server:2022-latest")
                     .Build();
                 await container.StartAsync(ct);
                 _container = container;

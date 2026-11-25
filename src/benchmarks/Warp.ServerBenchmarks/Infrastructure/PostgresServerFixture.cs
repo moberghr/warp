@@ -12,6 +12,7 @@ using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Handlers;
+using Warp.Core.Logging;
 using Warp.Provider.PostgreSql;
 using Warp.Provider.SqlServer;
 using Warp.Worker;
@@ -52,19 +53,32 @@ public class PostgresServerFixture : IAsyncDisposable
             .WithImage("postgres:latest")
 
             // Loaded at startup so statement counts can be read. shared_preload_libraries cannot be
-            // switched on later; it needs a restart.
+            // switched on later; it needs a restart. Planning time is tracked too, so "DB ms" is execution +
+            // planning like CI's (start-bench-postgres.sh), and full-page writes are off as there, so WAL/job
+            // does not depend on where checkpoints fall.
             .WithCommand(
                 "-c",
                 "shared_preload_libraries=pg_stat_statements",
                 "-c",
-                "pg_stat_statements.track=top")
+                "pg_stat_statements.track=top",
+                "-c",
+                "pg_stat_statements.track_planning=on",
+                "-c",
+                "full_page_writes=off")
             .Build()
         : null;
 
     private MsSqlContainer? _sqlContainer;
     private IHost? _host;
+
+    // Servers beyond the first, sharing its database: what a cluster costs (the idle two-server scenario).
+    private readonly List<IHost> _otherHosts = [];
     private string _connectionString = null!;
+
+    // The harness's own connection (Harness): on SQL Server a different language, which Query Store keeps apart.
+    private string _harnessConnectionString = null!;
     private BenchmarkProvider _provider = BenchmarkProvider.PostgreSql;
+    private bool _captureHandlerLogs;
 
     public bool IsInitialized => _host != null;
 
@@ -80,79 +94,25 @@ public class PostgresServerFixture : IAsyncDisposable
         TimeSpan? completionFlushInterval = null,
         bool addConcurrency = false,
         BenchmarkProvider provider = BenchmarkProvider.PostgreSql,
-        Action<WarpServerBuilder<TestContext>>? configure = null)
+        Action<WarpServerBuilder<TestContext>>? configure = null,
+        int serverCount = 1,
+        bool captureHandlerLogs = false)
     {
         _provider = provider;
+        _captureHandlerLogs = captureHandlerLogs;
         ExceptionTally.StartIfRequested();
+        RoundTripCounter.Start();
         _connectionString = await ResolveConnectionStringAsync();
+        _harnessConnectionString = HarnessConnectionString(_connectionString);
 
-        // Boot full Warp server
-        _host = Microsoft.Extensions.Hosting.Host.CreateDefaultBuilder()
-            .ConfigureLogging(logging => logging
-                .SetMinimumLevel(Microsoft.Extensions.Logging.LogLevel.Warning)
-
-                // The worker loop swallows a DbUpdateConcurrencyException at Debug and claims again.
-                // Raised here so that path is visible if it is what orphans claimed jobs.
-                .AddFilter("Warp.Worker.WarpWorker", Microsoft.Extensions.Logging.LogLevel.Debug)
-
-                // Filters match by prefix, so the rule above also caught WarpWorkerService, which logs
-                // every job it runs. The longer prefix wins.
-                .AddFilter("Warp.Worker.WarpWorkerService", Microsoft.Extensions.Logging.LogLevel.Warning))
-            .ConfigureServices(services =>
-            {
-                services.AddDbContext<TestContext>(options => ConfigureProvider(options));
-
-                services.AddWarpServer<TestContext>(config =>
-                {
-                    // Registers IWarpLockProvider and IWarpSqlQueries. Without it ServerTaskHost
-                    // cannot be activated, every benchmark using this fixture reports NA, and the
-                    // failure is quiet - BenchmarkDotNet prints a table of NA rather than failing.
-                    if (_provider == BenchmarkProvider.SqlServer)
-                    {
-                        config.UseSqlServer();
-                    }
-                    else
-                    {
-                        config.UsePostgreSql();
-                    }
-
-                    // Opt-in addon (rule 8.6): without this, WithMutex stamps metadata that no
-                    // behaviour reads, so a concurrency benchmark measures the plain baseline and
-                    // reports it as the addon's cost. That is exactly what it did before this
-                    // parameter existed - 14.05 statements per job against the lab's 37.0.
-                    if (addConcurrency)
-                    {
-                        config.AddConcurrency();
-                    }
-
-                    config.WorkerCount = workerCount;
-                    config.Queues = ["default"];
-
-                    // Intervals are left at their PRODUCTION defaults on purpose. They used to be
-                    // driven 20-100x faster here (polling 100ms against 10s, orchestration 100ms
-                    // against 10s, heartbeat 200ms against 5s) for quick turnaround, and the cost was
-                    // that every background tick landed in the statement count: this fixture reported
-                    // 42 statements per job where the lab, on defaults, measured 13.6 for the same
-                    // shape of work. A/B comparisons survived that, but the absolute number was an
-                    // artefact of the harness and not comparable to anything published.
-                    //
-                    // Defaults are affordable because a same-process enqueue signals the workers
-                    // directly (SignalJobEnqueued, rule 6.3), so a drain does not wait out
-                    // PollingInterval.
-                    config.UseDispatcher = useDispatcher;
-                    config.CompletionBatchSize = completionBatchSize;
-                    config.CompletionFlushInterval = completionFlushInterval ?? TimeSpan.FromMilliseconds(100);
-
-                    // Last, so a scenario can add an addon or override any default above.
-                    configure?.Invoke(config);
-                });
-            })
-            .Build();
+        _host = BuildServerHost(workerCount, useDispatcher, completionBatchSize, completionFlushInterval, addConcurrency, configure);
 
         // Use DI-resolved context for schema creation (includes Warp entity configurations)
-        await using var scope = _host.Services.CreateAsyncScope();
-        var ctx = scope.ServiceProvider.GetRequiredService<TestContext>();
-        await ctx.Database.EnsureCreatedAsync();
+        await using (var scope = _host.Services.CreateAsyncScope())
+        {
+            var ctx = scope.ServiceProvider.GetRequiredService<TestContext>();
+            await ctx.Database.EnsureCreatedAsync();
+        }
 
         if (_provider == BenchmarkProvider.PostgreSql && Environment.GetEnvironmentVariable(ClaimAuditVariable) is not null)
         {
@@ -160,6 +120,15 @@ public class PostgresServerFixture : IAsyncDisposable
         }
 
         await _host.StartAsync();
+
+        // Each further server is its own process in production: its own host, server id and pools, on the
+        // same database. Started after the first, so the schema exists.
+        for (var i = 1; i < serverCount; i++)
+        {
+            var other = BuildServerHost(workerCount, useDispatcher, completionBatchSize, completionFlushInterval, addConcurrency, configure);
+            _otherHosts.Add(other);
+            await other.StartAsync();
+        }
     }
 
     /// <summary>
@@ -167,7 +136,11 @@ public class PostgresServerFixture : IAsyncDisposable
     /// </summary>
     public async Task InitializeWithoutHostedServicesAsync()
     {
+        // Counted here too: the publish scenario runs on this path, and without it its commands column was empty.
+        ExceptionTally.StartIfRequested();
+        RoundTripCounter.Start();
         _connectionString = await ResolveConnectionStringAsync();
+        _harnessConnectionString = HarnessConnectionString(_connectionString);
 
         // Build a host but don't start it — only use its DI container
         _host = Microsoft.Extensions.Hosting.Host.CreateDefaultBuilder()
@@ -222,21 +195,20 @@ public class PostgresServerFixture : IAsyncDisposable
     }
 
     /// <summary>
-    /// Polls until all jobs reach a terminal state.
+    /// Polls until all jobs reach a terminal state. Harness work (<see cref="Harness"/>): not counted as Warp's.
     /// </summary>
     public async Task WaitForCompletion(TimeSpan? timeout = null)
     {
         var deadline = DateTime.UtcNow + (timeout ?? TimeSpan.FromMinutes(5));
         while (DateTime.UtcNow < deadline)
         {
-            await using var scope = Host.Services.CreateAsyncScope();
-            var ctx = scope.ServiceProvider.GetRequiredService<TestContext>();
-            var activeJobs = await ctx.Set<Job>()
-                .CountAsync(x =>
-                    x.CurrentState == State.Enqueued ||
-                    x.CurrentState == State.Processing ||
-                    x.CurrentState == State.Awaiting ||
-                    x.CurrentState == State.Scheduled);
+            var activeJobs = await HarnessAsync(x => x.Set<Job>()
+                .TagWith(Harness.Tag)
+                .CountAsync(y =>
+                    y.CurrentState == State.Enqueued ||
+                    y.CurrentState == State.Processing ||
+                    y.CurrentState == State.Awaiting ||
+                    y.CurrentState == State.Scheduled));
 
             if (activeJobs == 0)
             {
@@ -599,11 +571,8 @@ public class PostgresServerFixture : IAsyncDisposable
     /// Deletes the jobs created after <paramref name="createdAfter"/>, or every job when it is null, so a
     /// scenario that seeds a standing history can clear each iteration's jobs without deleting it.
     /// </summary>
-    public async Task CleanJobTables(DateTime? createdAfter)
+    public Task CleanJobTables(DateTime? createdAfter) => HarnessAsync(async ctx =>
     {
-        await using var scope = Host.Services.CreateAsyncScope();
-        var ctx = scope.ServiceProvider.GetRequiredService<TestContext>();
-
         // Through EF rather than raw SQL, because the two providers do not name these tables the same
         // way: PostgreSQL runs under the snake_case convention and SQL Server keeps Warp's default. The
         // raw `DELETE FROM warp.job_log` this replaces worked on one and failed on the other, and it
@@ -611,17 +580,83 @@ public class PostgresServerFixture : IAsyncDisposable
         // an error, so every SQL Server arm looked like a benchmark that would not run.
         //
         // Order matters: job_log and counter reference nothing, but job is the parent of job_log.
-        await ctx.Set<JobLog>().ExecuteDeleteAsync();
-        await ctx.Set<Counter>().ExecuteDeleteAsync();
+        //
+        // Harness work: it runs inside the measured window (IterationCleanup) and is not Warp's (Harness).
+        await ctx.Set<JobLog>().TagWith(Harness.Tag).ExecuteDeleteAsync();
+        await ctx.Set<Counter>().TagWith(Harness.Tag).ExecuteDeleteAsync();
         if (createdAfter is { } since)
         {
-            await ctx.Set<Job>().Where(x => x.CreateTime > since).ExecuteDeleteAsync();
+            await ctx.Set<Job>().TagWith(Harness.Tag).Where(x => x.CreateTime > since).ExecuteDeleteAsync();
 
-            return;
+            return true;
         }
 
-        await ctx.Set<Job>().ExecuteDeleteAsync();
+        await ctx.Set<Job>().TagWith(Harness.Tag).ExecuteDeleteAsync();
+
+        return true;
+    });
+
+    private async Task<T> RunHarnessAsync<T>(Func<TestContext, Task<T>> work)
+    {
+        using var harness = Harness.Begin();
+        await using var scope = Host.Services.CreateAsyncScope();
+        var context = scope.ServiceProvider.GetRequiredService<TestContext>();
+        context.Database.SetConnectionString(_harnessConnectionString);
+
+        return await work(context);
     }
+
+    private static bool IsDeadlock(Exception exception)
+    {
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is SqlException { Number: 1205 } or PostgresException { SqlState: PostgresErrorCodes.DeadlockDetected })
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Runs harness work (<see cref="Harness"/>) against the benchmark database: on a context of its own, on the
+    /// harness's connection, inside a harness scope, so none of it is reported as Warp's. Each statement it sends
+    /// must carry <c>TagWith(Harness.Tag)</c> for PostgreSQL to tell it apart.
+    /// <para>
+    /// Retried when the database picks it as a deadlock victim. The server keeps running beside it (its counter
+    /// flusher, aggregator and workers hold locks the harness's whole-table reads and deletes run into), and on
+    /// SQL Server under locking read committed a drain poll or a cleanup delete was chosen as the victim:
+    /// uncaught, it failed the iteration or the setup and BenchmarkDotNet reported the case as NA. Harness work
+    /// reads, or deletes with statements that each commit on their own, so running it again is safe.
+    /// </para>
+    /// </summary>
+    public async Task<T> HarnessAsync<T>(Func<TestContext, Task<T>> work)
+    {
+        const int maxAttempts = 5;
+        var attempt = 1;
+        while (true)
+        {
+            try
+            {
+                return await RunHarnessAsync(work);
+            }
+            catch (Exception ex) when (attempt < maxAttempts && IsDeadlock(ex))
+            {
+                Console.WriteLine($"// Harness work was a deadlock victim (attempt {attempt}); running it again.");
+                attempt++;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The server ids of every host this fixture runs, in the order the benchmark's per-server counts use
+    /// (<see cref="RoundTripCounter.Slot.FirstServerJobs"/>): ordered by id.
+    /// </summary>
+    public IReadOnlyList<Guid> ServerIds =>
+        [.. new[] { Host }.Concat(_otherHosts)
+            .Select(x => x.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<WarpServerConfiguration>>().Value.ServerId)
+            .Order(),];
 
     /// <summary>
     /// Uses the externally-provided database when there is one, otherwise starts a container.
@@ -641,6 +676,11 @@ public class PostgresServerFixture : IAsyncDisposable
 
         options.UseNpgsql(_connectionString).UseSnakeCaseNamingConvention();
     }
+
+    private string HarnessConnectionString(string connectionString) =>
+        _provider == BenchmarkProvider.SqlServer
+            ? new SqlConnectionStringBuilder(connectionString) { CurrentLanguage = Harness.SqlServerLanguage }.ConnectionString
+            : new NpgsqlConnectionStringBuilder(connectionString) { ApplicationName = Harness.Tag }.ConnectionString;
 
     private async Task<string> ResolveConnectionStringAsync()
     {
@@ -684,7 +724,9 @@ public class PostgresServerFixture : IAsyncDisposable
             _sqlContainer = new MsSqlBuilder().Build();
             await _sqlContainer.StartAsync();
 
-            return _sqlContainer.GetConnectionString();
+            // A fresh database on the container too, not its master: Service Broker (below) cannot be
+            // enabled on master, and DB push on SQL Server needs it.
+            external = _sqlContainer.GetConnectionString();
         }
 
         var builder = new SqlConnectionStringBuilder(external);
@@ -695,7 +737,21 @@ public class PostgresServerFixture : IAsyncDisposable
         {
             await admin.OpenAsync();
             await using var create = admin.CreateCommand();
-            create.CommandText = $"CREATE DATABASE [{database}]";
+
+            // Service Broker on, so a scenario can run DB push (UseDatabasePush) on SQL Server: the transport
+            // refuses to start without it and does not enable it itself (it needs exclusive access). On a
+            // database nothing is connected to yet it is instant, and with no push it costs nothing.
+            //
+            // Query Store on, capturing everything, because it is what DatabaseStatementsDiagnoser counts
+            // SQL Server statements from: unlike the plan cache it keeps a query's count across recompiles.
+            // It is on by default for new databases from SQL Server 2022, but not with capture mode ALL, and
+            // size-based cleanup off so it never deletes counts inside a window (a full store goes read-only
+            // instead, which the diagnoser reports as an invalid reading).
+            create.CommandText = $@"CREATE DATABASE [{database}];
+                ALTER DATABASE [{database}] SET ENABLE_BROKER WITH ROLLBACK IMMEDIATE;
+                ALTER DATABASE [{database}] SET QUERY_STORE = ON (
+                    OPERATION_MODE = READ_WRITE, QUERY_CAPTURE_MODE = ALL, INTERVAL_LENGTH_MINUTES = 1,
+                    MAX_STORAGE_SIZE_MB = 2048, SIZE_BASED_CLEANUP_MODE = OFF);";
             await create.ExecuteNonQueryAsync();
         }
 
@@ -708,6 +764,13 @@ public class PostgresServerFixture : IAsyncDisposable
     {
         GC.SuppressFinalize(this);
         ExceptionTally.Report();
+        RoundTripCounter.Stop();
+        foreach (var other in _otherHosts)
+        {
+            await other.StopAsync();
+            other.Dispose();
+        }
+
         if (_host != null)
         {
             await _host.StopAsync();
@@ -723,5 +786,89 @@ public class PostgresServerFixture : IAsyncDisposable
         {
             await _sqlContainer.DisposeAsync();
         }
+    }
+
+    private IHost BuildServerHost(
+        int workerCount,
+        bool useDispatcher,
+        int completionBatchSize,
+        TimeSpan? completionFlushInterval,
+        bool addConcurrency,
+        Action<WarpServerBuilder<TestContext>>? configure)
+    {
+        return Microsoft.Extensions.Hosting.Host.CreateDefaultBuilder()
+            .ConfigureLogging(logging =>
+            {
+                logging
+                    .SetMinimumLevel(Microsoft.Extensions.Logging.LogLevel.Warning)
+
+                    // The worker loop swallows a DbUpdateConcurrencyException at Debug and claims again.
+                    // Raised here so that path is visible if it is what orphans claimed jobs.
+                    .AddFilter("Warp.Worker.WarpWorker", Microsoft.Extensions.Logging.LogLevel.Debug)
+
+                    // Filters match by prefix, so the rule above also caught WarpWorkerService, which logs
+                    // every job it runs. The longer prefix wins.
+                    .AddFilter("Warp.Worker.WarpWorkerService", Microsoft.Extensions.Logging.LogLevel.Warning);
+
+                // Handler log lines are stored as JobLog rows by JobLoggerProvider, which only sees what the
+                // minimum level above lets through. A scenario measuring the log flush lowers it for that
+                // provider alone, so handler Information lines are stored without reaching the console. Only
+                // then: a provider-specific rule replaces every rule above for that provider, which would
+                // change what the other scenarios store.
+                if (_captureHandlerLogs)
+                {
+                    logging.AddFilter<JobLoggerProvider>(null, Microsoft.Extensions.Logging.LogLevel.Information);
+                }
+            })
+            .ConfigureServices(services =>
+            {
+                services.AddDbContext<TestContext>(options => ConfigureProvider(options));
+
+                services.AddWarpServer<TestContext>(config =>
+                {
+                    // Registers IWarpLockProvider and IWarpSqlQueries. Without it ServerTaskHost
+                    // cannot be activated, every benchmark using this fixture reports NA, and the
+                    // failure is quiet - BenchmarkDotNet prints a table of NA rather than failing.
+                    if (_provider == BenchmarkProvider.SqlServer)
+                    {
+                        config.UseSqlServer();
+                    }
+                    else
+                    {
+                        config.UsePostgreSql();
+                    }
+
+                    // Opt-in addon (rule 8.6): without this, WithMutex stamps metadata that no
+                    // behaviour reads, so a concurrency benchmark measures the plain baseline and
+                    // reports it as the addon's cost. That is exactly what it did before this
+                    // parameter existed - 14.05 statements per job against the lab's 37.0.
+                    if (addConcurrency)
+                    {
+                        config.AddConcurrency();
+                    }
+
+                    config.WorkerCount = workerCount;
+                    config.Queues = ["default"];
+
+                    // Intervals are left at their PRODUCTION defaults on purpose. They used to be
+                    // driven 20-100x faster here (polling 100ms against 10s, orchestration 100ms
+                    // against 10s, heartbeat 200ms against 5s) for quick turnaround, and the cost was
+                    // that every background tick landed in the statement count: this fixture reported
+                    // 42 statements per job where the lab, on defaults, measured 13.6 for the same
+                    // shape of work. A/B comparisons survived that, but the absolute number was an
+                    // artefact of the harness and not comparable to anything published.
+                    //
+                    // Defaults are affordable because a same-process enqueue signals the workers
+                    // directly (SignalJobEnqueued, rule 6.3), so a drain does not wait out
+                    // PollingInterval.
+                    config.UseDispatcher = useDispatcher;
+                    config.CompletionBatchSize = completionBatchSize;
+                    config.CompletionFlushInterval = completionFlushInterval ?? TimeSpan.FromMilliseconds(100);
+
+                    // Last, so a scenario can add an addon or override any default above.
+                    configure?.Invoke(config);
+                });
+            })
+            .Build();
     }
 }

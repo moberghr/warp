@@ -32,7 +32,7 @@ public sealed class MessageRouter<TContext> : IServerTask
 
     public MessageRouter(
         IWarpServerContext serverContext,
-        TimeProvider time,
+        [FromKeyedServices(DatabaseClock.Key)] TimeProvider time,
         IServiceScopeFactory scopeFactory,
         IWarpSqlQueries<TContext> sqlQueries,
         IWarpNotificationTransport notificationTransport,

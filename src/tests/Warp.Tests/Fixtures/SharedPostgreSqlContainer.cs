@@ -80,8 +80,10 @@ internal static class SharedPostgreSqlContainer
         {
             if (_adminConnectionString == null)
             {
+                // WARP_TEST_POSTGRES_IMAGE pins the server version (CI runs the suite once per supported
+                // PostgreSQL version); a local run keeps the default.
                 var container = new PostgreSqlBuilder()
-                    .WithImage("postgres:latest")
+                    .WithImage(Environment.GetEnvironmentVariable("WARP_TEST_POSTGRES_IMAGE") is { Length: > 0 } image ? image : "postgres:latest")
                     .WithCommand("-c", "max_connections=500")
                     .Build();
                 await container.StartAsync(ct);

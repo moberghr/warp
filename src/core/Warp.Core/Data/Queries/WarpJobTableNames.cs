@@ -48,6 +48,8 @@ public sealed class WarpJobTableNames
 
     public required string LastKeepAlive { get; init; }
 
+    public required string RunId { get; init; }
+
     public required string TraceId { get; init; }
 
     public required string SpawnedByJobId { get; init; }
@@ -69,6 +71,8 @@ public sealed class WarpJobTableNames
     public required string ServerMemoryWorkingSetBytes { get; init; }
 
     public required string ServerCpuUsagePercent { get; init; }
+
+    public required string ServerClockOffsetMs { get; init; }
 
     public required string ServerPausedAt { get; init; }
 
@@ -194,6 +198,7 @@ public sealed class WarpJobTableNames
             ServerLastHeartbeatTime = ServerCol(nameof(Server.LastHeartbeatTime)),
             ServerMemoryWorkingSetBytes = ServerCol(nameof(Server.MemoryWorkingSetBytes)),
             ServerCpuUsagePercent = ServerCol(nameof(Server.CpuUsagePercent)),
+            ServerClockOffsetMs = ServerCol(nameof(Server.ClockOffsetMs)),
             ServerPausedAt = ServerCol(nameof(Server.PausedAt)),
             WorkerGroupSchema = groupEntity.GetSchema(),
             WorkerGroupTable = groupEntity.GetTableName()
@@ -214,6 +219,7 @@ public sealed class WarpJobTableNames
             HandlerType = Col(nameof(Job.HandlerType)),
             ExpireAt = Col(nameof(Job.ExpireAt)),
             LastKeepAlive = Col(nameof(Job.LastKeepAlive)),
+            RunId = Col(nameof(Job.RunId)),
             TraceId = Col(nameof(Job.TraceId)),
             SpawnedByJobId = Col(nameof(Job.SpawnedByJobId)),
             JobCount = Col(nameof(Job.JobCount)),

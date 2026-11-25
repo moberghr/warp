@@ -103,7 +103,7 @@ public abstract class LeaseRenewalTestsBase : IAsyncLifetime
 
         var queries = TestTasks.QueriesFor(_fixture.CreateContext());
         await using var ctx = _fixture.CreateContext();
-        var result = await queries.HeartbeatAsync(ctx, MyServerId, DateTime.UtcNow, null, null, Ct);
+        var result = await queries.HeartbeatAsync(ctx, MyServerId, DateTime.UtcNow, null, null, writeLocalTime: false, Ct);
 
         result.ShouldNotBeNull();
         result.RenewedBackgroundServiceLeases.ShouldContain("RenewalSvc");
@@ -131,7 +131,7 @@ public abstract class LeaseRenewalTestsBase : IAsyncLifetime
 
         var queries = TestTasks.QueriesFor(_fixture.CreateContext());
         await using var ctx = _fixture.CreateContext();
-        var result = await queries.HeartbeatAsync(ctx, MyServerId, DateTime.UtcNow, null, null, Ct);
+        var result = await queries.HeartbeatAsync(ctx, MyServerId, DateTime.UtcNow, null, null, writeLocalTime: false, Ct);
 
         result.ShouldNotBeNull();
         result.RenewedBackgroundServiceLeases.ShouldNotContain("OtherHolderSvc");
@@ -160,7 +160,7 @@ public abstract class LeaseRenewalTestsBase : IAsyncLifetime
 
         var queries = TestTasks.QueriesFor(_fixture.CreateContext());
         await using var ctx = _fixture.CreateContext();
-        var result = await queries.HeartbeatAsync(ctx, MyServerId, DateTime.UtcNow, null, null, Ct);
+        var result = await queries.HeartbeatAsync(ctx, MyServerId, DateTime.UtcNow, null, null, writeLocalTime: false, Ct);
 
         result.ShouldNotBeNull();
         result.RenewedBackgroundServiceLeases.ShouldNotContain(
@@ -175,7 +175,7 @@ public abstract class LeaseRenewalTestsBase : IAsyncLifetime
 
         var queries = TestTasks.QueriesFor(_fixture.CreateContext());
         await using var ctx = _fixture.CreateContext();
-        var result = await queries.HeartbeatAsync(ctx, MyServerId, DateTime.UtcNow, null, null, Ct);
+        var result = await queries.HeartbeatAsync(ctx, MyServerId, DateTime.UtcNow, null, null, writeLocalTime: false, Ct);
 
         result.ShouldNotBeNull();
         result.RenewedBackgroundServiceLeases.ShouldBeEmpty();

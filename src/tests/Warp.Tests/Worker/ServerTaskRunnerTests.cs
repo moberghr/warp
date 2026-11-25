@@ -6,6 +6,7 @@ using Warp.Core.Data.Entities;
 using Warp.Core.Data.Queries;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Events;
 using Warp.Tests.Fixtures;
 using Warp.Tests.Helpers;
 using Warp.Worker.Services;
@@ -177,8 +178,97 @@ public abstract class ServerTaskRunnerTestsBase : IAsyncLifetime
         hookCalled.ShouldBeFalse("a rolled-back iteration must not run the post-commit hook");
     }
 
+    [TimedFact]
+    public async Task RunAsync_WorkRolledBackAfterTheOrchestratorReturned_GivesItsParentsBack()
+    {
+        // A commit that fails, or a run cancelled for a lost lease, comes after the Orchestrator's
+        // ExecuteAsync returned: its work is rolled back, and the parents the wakes named were taken by
+        // that pass. They have to come back, or those parents wait for the next sweep (rule 6.11).
+        var parent = Guid.NewGuid();
+        var signals = SignalsNamingAParent(parent);
+        await using var provider = OrchestratorServices(signals, failAfterExecute: true);
+        var runner = new ServerTaskRunner<TestContext>(provider.GetRequiredService<IServiceScopeFactory>(), new NoopLockProvider());
+
+        // Act
+        await Should.ThrowAsync<InvalidOperationException>(
+            () => runner.RunAsync(OrchestratorInfo<FailsAfterTheOrchestrator>(), underLegacyLock: false, Xunit.TestContext.Current.CancellationToken));
+
+        // Assert
+        signals.TakeFinalizedParents(TimeSpan.FromDays(1)).Parents.ShouldBe([parent]);
+    }
+
+    [TimedFact]
+    public async Task RunAsync_OrchestratorPassCommitted_KeepsNoParentsToRepeat()
+    {
+        var signals = SignalsNamingAParent(Guid.NewGuid());
+        await using var provider = OrchestratorServices(signals, failAfterExecute: false);
+        var runner = new ServerTaskRunner<TestContext>(provider.GetRequiredService<IServiceScopeFactory>(), new NoopLockProvider());
+
+        // Act
+        await runner.RunAsync(OrchestratorInfo<Orchestrator<TestContext>>(), underLegacyLock: false, Xunit.TestContext.Current.CancellationToken);
+
+        // Assert
+        var (parents, sweep) = signals.TakeFinalizedParents(TimeSpan.FromDays(1));
+        parents.ShouldBeEmpty();
+        sweep.ShouldBeFalse();
+    }
+
+    private static ServerTaskSignals<TestContext> SignalsNamingAParent(Guid parent)
+    {
+        var signals = new ServerTaskSignals<TestContext>();
+        signals.TakeFinalizedParents(TimeSpan.FromDays(1));
+        signals.SignalJobFinalized(parent);
+
+        return signals;
+    }
+
+    private static ServerTaskInfo OrchestratorInfo<TTask>() =>
+        new(typeof(TTask), "Orchestration", "warp:test:orchestration-" + Guid.NewGuid().ToString("N"), LocksWithTransaction: true, TimeSpan.FromDays(1), RerunImmediately: false, LogOnSuccess: false, []);
+
+    // A real container, so the scope disposes the task it created, as the server's does.
+    private ServiceProvider OrchestratorServices(ServerTaskSignals<TestContext> signals, bool failAfterExecute)
+    {
+        var services = new ServiceCollection();
+        services.AddScoped(_ => _fixture.CreateContext());
+        services.AddTestServerContext<TestContext>();
+        services.AddScoped(x => TestTasks.CreateOrchestrator(
+            x.GetRequiredService<TestContext>(),
+            TimeProvider.System,
+            TimeSpan.FromDays(1),
+            signals: signals,
+            orchestrationInterval: TimeSpan.FromDays(1)));
+        if (failAfterExecute)
+        {
+            services.AddScoped<IServerTask>(x => new FailsAfterTheOrchestrator(x.GetRequiredService<Orchestrator<TestContext>>()));
+        }
+        else
+        {
+            services.AddScoped<IServerTask>(x => x.GetRequiredService<Orchestrator<TestContext>>());
+        }
+
+        return services.BuildServiceProvider();
+    }
+
     private ServerTaskRunner<TestContext> BuildRunner(StubTask stub) =>
         new(new TaskAwareScopeFactory(_fixture, stub), new NoopLockProvider());
+
+    // Runs the Orchestrator's pass to its end and then fails, as a failed commit does: by then the
+    // Orchestrator's own ExecuteAsync has returned.
+    private sealed class FailsAfterTheOrchestrator(Orchestrator<TestContext> inner) : IServerTask
+    {
+        public string Name => inner.Name;
+
+        public string? LockKey => inner.LockKey;
+
+        public TimeSpan? DefaultInterval => inner.DefaultInterval;
+
+        public async Task<string?> ExecuteAsync(CancellationToken ct)
+        {
+            await inner.ExecuteAsync(ct);
+
+            throw new InvalidOperationException("the commit failed");
+        }
+    }
 
     // Test-side IServerTask. Body closure is the test's hook into the scoped DbContext
     // the production code creates inside ServerTaskRunner. Mirrors the production task

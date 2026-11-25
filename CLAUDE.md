@@ -30,10 +30,10 @@
 
 - **Active stack:** dotnet (`net10.0` + `netstandard2.0` for source generators)
 - **Build:** `dotnet build src/Warp.slnx`
-- **Test (all):** `dotnet test --project src/tests/Warp.Tests/Warp.Tests.csproj` (~9-11 min, ~4,300 tests)
-- **Test (no DB):** `... -- --filter-trait "Category=NoDb"` (~1,520 tests)
-- **Test (PG):** `... -- --filter-trait "Category=PostgreSql"` (~1,394 tests)
-- **Test (SQL Server):** `... -- --filter-trait "Category=SqlServer"` (~1,384 tests)
+- **Test (all):** `dotnet test --project src/tests/Warp.Tests/Warp.Tests.csproj` (about 4–5 min locally, ~6,000 tests)
+- **Test (no DB):** `... -- --filter-trait "Category=NoDb"` (~2,170 tests)
+- **Test (PG):** `... -- --filter-trait "Category=PostgreSql"` (~1,910 tests)
+- **Test (SQL Server):** `... -- --filter-trait "Category=SqlServer"` (~1,910 tests)
 - **Format:** `dotnet format --verbosity quiet`
 - **Frontend (from `src/ui/`):** `npm install && npm run dev` (Vite on :5173, proxies `/api` → :5000)
 
@@ -44,10 +44,10 @@ For framework-specific guidance, see `.claude/skills/tech-stack-dotnet/SKILL.md`
 ## Project Profile
 
 - **Framework:** .NET 10 (with netstandard2.0 source generators)
-- **Solution:** `src/Warp.slnx` — 19 projects across `core/`, `core/providers/`, `tests/`, `benchmarks/`, `demo/`
+- **Solution:** `src/Warp.slnx` — 21 projects across `core/`, `core/providers/`, `tests/`, `benchmarks/`, `demo/`
 - **Data layer:** EF Core 10 (Postgres via Npgsql, SQL Server via Microsoft.EntityFrameworkCore.SqlServer); EFCore.NamingConventions for snake_case
 - **Distributed locking:** transaction-scoped by default (`RunUnderTransactionLockAsync`, pooler-safe); Medallion `DistributedLock.Postgres` + `DistributedLock.SqlServer` behind `IWarpLockProvider` for the few session-scoped sites, which need a **session-mode** connection (§2.16). Releasing a lock never throws (§2.17)
-- **Patterns:** Custom mediator (Warp's own, source-generated dispatch), unified `IRequest<T>` hierarchy, `IPipelineBehavior` chain, opt-in addons (Retry, Timeout, Concurrency, RateLimit, CircuitBreaker, NoRestart, Sagas, DatabasePush, DashboardPush, Adapters, EndpointObservability, ClientObservability — browser/frontend ingest §8.27, Webhooks, Notifiers — `AddNotifier<T>` operational-event seam §8.25, custom application metrics — `AddMetrics`, `System.Diagnostics.Metrics` collector, §8.34); `WarpBackgroundService`, queue metrics (queue-wait + backlog SLIs, always-on, §8.26), and error grouping / Issues (fingerprinted error groups across jobs/endpoints/adapters/client, always-on, §8.29), and metrics retention tiers (5-min → hourly → daily `StatisticRollup` downsampling, always-on, §8.30) are first-class base features (not addons)
+- **Patterns:** Custom mediator (source-generated dispatch), unified `IRequest<T>` hierarchy, `IPipelineBehavior` chain, opt-in addons (§2.11); background services, queue metrics, error grouping and metrics retention tiers are base features, not addons.
 - **Test stack:** xUnit v3 (`xunit.v3.mtp-v2`), Shouldly, Moq, Respawn, Testcontainers (Postgres + MSSQL), `Microsoft.AspNetCore.TestHost` for dashboard auth
 - **Frontend:** Vite + React 19 + TypeScript, Tailwind + shadcn/ui, Zustand, TanStack Query (React Query) + TanStack Table, Axios
 - **Analyzers (enforced as errors):** StyleCop, Roslynator, SonarAnalyzer, Meziantou (`TreatWarningsAsErrors=true` in `src/Directory.Build.props`)
@@ -69,26 +69,29 @@ Detailed rules in `.claude/rules/` (auto-loaded by Claude Code):
 | File | Covers | Section |
 |---|---|---|
 | `security.md` | Secrets, PII in logs, transactions, row locking | §1.x |
-| `architecture.md` | Unified data model, worker/server-task split, addons, type hierarchy, DB push | §2.x |
+| `architecture.md` | Unified data model, worker/server-task split, addons, server context, lock shapes | §2.x |
+| `architecture-infra.md` | DB push, dashboard push, PostgreSQL lock pool, database clock (path-scoped) | §2.9, §2.10, §2.18, §2.20 |
 | `coding-style.md` | `var`, braces, LINQ chaining, naming, project-specific style | §3.x |
 | `testing.md` | xUnit v3, `[TimedFact]`, source-generated DB tests, fixtures, integration patterns | §4.x |
 | `data-layer.md` | EF Core, no raw SQL, `AsNoTracking`, `Select` over `Include`, schema | §5.x |
-| `performance.md` | Worker hot path, Counter rows, signal-driven wakeup | §6.x |
+| `performance.md` | Worker hot path, Counter rows, signal-driven wakeup | §6.1–§6.8 |
+| `performance-worker.md` | Claiming, finalization, job monitor, Orchestrator queries, cluster-task leases, perf CI (path-scoped) | §6.9–§6.25 |
 | `git-workflow.md` | Hierarchical branches, imperative commits, analyzer-clean builds | §7.x |
-| `project-specific.md` | Recurring jobs, cancellation, addons, metadata conventions, enums-from-1 | §8.x |
+| `project-specific.md` | Job lifecycle, cancellation, concurrency/timeout, metadata conventions, enums-from-1, notifier post-commit rule, append-only outcome stats | §8.1–§8.7, §8.11–§8.16, §8.25, §8.33 |
+| `addons.md` | Rate limit + policy resolution, recurring jobs, source generators, sagas, background services (path-scoped) | §8.8–§8.10, §8.17, §8.18 |
+| `observability.md` | Adapters, webhooks, endpoints, multi-app, sinks, queue metrics, client, trace, issues, retention tiers, SLOs, custom metrics, outbound adapters §2.15 (path-scoped: loads only when touching those areas) | §8.19–§8.34 |
 
 Reference docs (read on-demand by skills and review agents):
 
 - `.claude/references/architecture-principles.md` — 16 core principles (curated)
 - `.claude/references/coding-guidelines.md` — Moberg C# coding style
 - `.claude/references/quick-check-list.md` — Reviewer fast-check list
+- `.claude/references/design-notes/` — full rationale, history, measurements and rot-guard lists behind the condensed §2.x, §6.x and §8.x rules (one file per section)
 
 ---
 
 ## Build & PR Hygiene
 
-- **Branches:** hierarchical with `/` (`feat/`, `fix/`, `chore/`, `docs/`, `test/`, `bug/`).
-- **Commits:** imperative mood, describe the "what". PR titles describe the user-visible change.
 - **Tests on both DBs:** every new behavior asserts on both Postgres and SQL Server via `[GenerateDatabaseTests]` source generator.
 - **Build must be analyzer-clean** — `TreatWarningsAsErrors=true` is non-negotiable.
 

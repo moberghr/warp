@@ -1,11 +1,12 @@
 # Warp
 
-> Distributed job processing, message queue, and in-memory mediator library for .NET 10. Three patterns, one unified pipeline, a real-time dashboard.
+> Distributed job processing, message queue, and in-memory mediator library for .NET 10. Four patterns, one unified pipeline, a real-time dashboard.
 
 Warp ships as core packages — Moberg.Warp.Core (publishing; also includes always-on durable outbound webhook delivery), Moberg.Warp.Worker (processing), Moberg.Warp.Dashboard (dashboard) — plus optional add-ons: Moberg.Warp.Http (exposes IRequest<T> / IStreamRequest<T> handlers as ASP.NET endpoints, and observes inbound calls to them), Moberg.Warp.Adapters.Http and Moberg.Warp.Adapters.Refit (observe outbound calls your app makes to other services). Supports PostgreSQL and SQL Server. Uses the transactional outbox pattern — jobs are committed atomically with your business data.
 
 ## Docs
 
+- [Why Warp](https://moberghr.github.io/warp/docs/why-warp): What Warp is, what it replaces, when another tool fits better
 - [Getting Started](https://moberghr.github.io/warp/docs/getting-started): Installation, DbContext setup, service registration, first handler
 - [Messages](https://moberghr.github.io/warp/docs/patterns/messages): Pub/sub IMessage with multiple handlers, fan-out routing
 - [Jobs](https://moberghr.github.io/warp/docs/patterns/jobs): IJob with scheduling, retries, continuations, batches, named queues, mutex
@@ -33,6 +34,10 @@ Warp ships as core packages — Moberg.Warp.Core (publishing; also includes alwa
 - [Endpoint Observability](https://moberghr.github.io/warp/docs/features/endpoint-observability): Observe inbound requests to your Warp HTTP endpoints — caller, duration, status, bodies (AddEndpointObservability)
 - [Outbound Adapters](https://moberghr.github.io/warp/docs/features/adapters): Observe outbound calls to other services, cluster-shared rate limiting, capture on failure (AddAdapters)
 - [Durable Webhooks](https://moberghr.github.io/warp/docs/features/webhooks): Durable outbound webhook delivery — retries, signing, redelivery, exhaustion (built into Core, always on; AddWebhooks only for optional custom signer / exhausted-handler)
+- [Performance](https://moberghr.github.io/warp/docs/performance): Per-job cost, how Warp keeps database load low, settings for throughput
+- [Warp vs Hangfire](https://moberghr.github.io/warp/docs/performance/warp-vs-hangfire): Measured throughput, statements, CPU, WAL and allocation per job on PostgreSQL
+- [Migrating from Hangfire](https://moberghr.github.io/warp/docs/operations/migrating-from-hangfire): API mapping, what changes in how a job is written, gradual migration
+- [Migrating from Wolverine](https://moberghr.github.io/warp/docs/operations/migrating-from-wolverine): API mapping and wiring differences
 - [Configuration](https://moberghr.github.io/warp/docs/operations/configuration): Worker, polling, retention (age + count), dispatcher mode, worker groups, schema, naming conventions
 - [EF Core Integration](https://moberghr.github.io/warp/docs/operations/ef-core-integration): DbContext setup, server-internal context, migrations, naming conventions
 - [Connection Pooling](https://moberghr.github.io/warp/docs/operations/connection-pooling): Warp needs a session-mode connection — transaction-mode poolers (Neon -pooler, Supabase 6543, Azure 6432) break advisory locks and LISTEN/NOTIFY

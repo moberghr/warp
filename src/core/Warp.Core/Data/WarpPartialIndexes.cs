@@ -37,11 +37,13 @@ internal static class WarpPartialIndexes
 
         string Column(string property) => $"\"{job.FindProperty(property)!.GetColumnName()}\"";
 
+        // The property lists are WarpJobIndexes', which the providers' online index helpers read back.
         var state = Column(nameof(Job.CurrentState));
-        SetFilter(job, [nameof(Job.Kind), nameof(Job.CurrentState), nameof(Job.Queue), nameof(Job.ScheduleTime)], $"{state} = {(int)State.Enqueued}");
-        SetFilter(job, [nameof(Job.CurrentState), nameof(Job.ScheduleTime)], $"{state} = {(int)State.Scheduled}");
-        SetFilter(job, [nameof(Job.ParentJobId), nameof(Job.CurrentState)], $"{Column(nameof(Job.ParentJobId))} IS NOT NULL");
-        SetFilter(job, [nameof(Job.ExpireAt)], $"{Column(nameof(Job.ExpireAt))} IS NOT NULL");
+        var properties = WarpJobIndexes.PartialIndexProperties;
+        SetFilter(job, properties[0], $"{state} = {(int)State.Enqueued}");
+        SetFilter(job, properties[1], $"{state} = {(int)State.Scheduled}");
+        SetFilter(job, properties[2], $"{Column(nameof(Job.ParentJobId))} IS NOT NULL");
+        SetFilter(job, properties[3], $"{Column(nameof(Job.ExpireAt))} IS NOT NULL");
     }
 
     private static void SetFilter(IMutableEntityType job, string[] properties, string filter)

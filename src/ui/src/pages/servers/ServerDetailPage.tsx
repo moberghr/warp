@@ -13,6 +13,7 @@ import { useHeartbeatStale, useServerStatusDotColor } from '@/hooks/useTicking';
 import { ChevronDown, ChevronRight, RefreshCw, Pause, Play } from 'lucide-react';
 import type { ServerModel, WorkerModel, ServerTaskSummary, ServerLogModel, PagedList } from '@/types';
 import * as api from '@/api';
+import { clockSkewLabel } from '@/pages/applications/instanceModel';
 import { Hint } from '@/components/ui/tooltip';
 
 const statusColors: Record<string, string> = {
@@ -94,6 +95,11 @@ export default function ServerDetailPage() {
           <CardContent className="space-y-2 text-sm">
             <div><span className="text-muted-foreground">Workers:</span> {server.serviceCount}</div>
             <div><span className="text-muted-foreground">CPU:</span> {server.cpuUsagePercent != null ? `${server.cpuUsagePercent}%` : 'N/A'}</div>
+            {clockSkewLabel(server.clockOffsetMs) && (
+              <div className="text-amber-600">
+                <span className="text-muted-foreground">Clock:</span> {clockSkewLabel(server.clockOffsetMs)} of the database (Warp corrects for it; fix the clock with NTP)
+              </div>
+            )}
             <div><span className="text-muted-foreground">Memory:</span> {server.memoryWorkingSetBytes != null ? formatBytes(server.memoryWorkingSetBytes) : 'N/A'}</div>
             <div><span className="text-muted-foreground">Started:</span> <RelativeTime date={server.startedTime} /></div>
             <div><span className="text-muted-foreground">Heartbeat:</span> <RelativeTime date={server.lastHeartbeatTime} /></div>

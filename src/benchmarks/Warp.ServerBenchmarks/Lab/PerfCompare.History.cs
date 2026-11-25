@@ -92,13 +92,18 @@ public static partial class PerfCompare
             .ToList();
         var skipped = releases.Count - comparable.Count;
 
-        var points = comparable.ConvertAll(x => (Label: x.Release, Cases: x.Cases.ToDictionary(y => y.FullName, StringComparer.Ordinal)));
+        // Keyed by database versions AND case, so one release's PostgreSQL 17 and 18 numbers stay two rows.
+        var points = comparable.ConvertAll(x => (Label: x.Release, Cases: x.Cases.ToDictionary(HistoryKey, StringComparer.Ordinal)));
 
         if (exportsPath is not null && Directory.Exists(exportsPath))
         {
             var current = Directory.GetFiles(exportsPath, "export.json", SearchOption.AllDirectories)
                 .SelectMany(x => JsonSerializer.Deserialize<List<ReleaseCase>>(File.ReadAllText(x), HistoryOptions) ?? [])
-                .ToDictionary(x => x.FullName, StringComparer.Ordinal);
+
+                // A run with repeats has each case several times: the history takes one of them (the medians
+                // table is where the repeats are read together).
+                .GroupBy(HistoryKey, StringComparer.Ordinal)
+                .ToDictionary(x => x.Key, x => x.First(), StringComparer.Ordinal);
             if (current.Count > 0)
             {
                 points.Add((label ?? "this run", current));
@@ -138,8 +143,9 @@ public static partial class PerfCompare
     }
 
     /// <summary>
-    /// Each case's change in statements per job since the latest release, for the cases both sides measured
-    /// on the same measurement version. Empty when there is no comparable release.
+    /// Each case's change in statements per job (per second for an idle case) since the latest release, for the
+    /// cases both sides measured on the same measurement version and in the same unit. Empty when there is no
+    /// comparable release.
     /// </summary>
     private static Dictionary<string, double> SinceRelease(List<BdnCase> cases, Dictionary<string, BdnResult> headRun, ReleaseBenchmarks? release)
     {
@@ -149,12 +155,18 @@ public static partial class PerfCompare
             return changes;
         }
 
-        var baseline = release.Cases.ToDictionary(x => x.FullName, StringComparer.Ordinal);
+        // Like with like: only the release's cases measured on this run's database versions.
+        var baseline = release.Cases
+            .Where(x => string.Equals(x.Database, DatabaseLabel, StringComparison.Ordinal))
+            .ToDictionary(x => x.FullName, StringComparer.Ordinal);
         foreach (var name in cases.Select(x => x.FullName))
         {
-            if (headRun.TryGetValue(name, out var head) && !head.PerSecond
+            // Per-second (idle) cases compare too, when the release measured them per second as well: they were
+            // left out, so the idle scenarios read "no case in common" against a release that had them.
+            if (headRun.TryGetValue(name, out var head)
                 && head.StatementsPerJob is { } now
-                && baseline.TryGetValue(name, out var then) && then.StatementsPerJob is { } before && before > 0)
+                && baseline.TryGetValue(name, out var then) && then.PerSecond == head.PerSecond
+                && then.StatementsPerJob is { } before && before > 0)
             {
                 changes[name] = (now - before) / before * 100;
             }
@@ -190,7 +202,8 @@ public static partial class PerfCompare
         {
             var change = changes[benchmark.FullName];
             var drifted = change > ReleaseCreepPct;
-            var text = string.Create(CultureInfo.InvariantCulture, $"{CaseLabelOf(benchmark)} stmt {change:+0.0;−0.0;0.0}%");
+            var unit = headRun[benchmark.FullName].PerSecond ? "stmt/s" : "stmt";
+            var text = string.Create(CultureInfo.InvariantCulture, $"{CaseLabelOf(benchmark)} {unit} {change:+0.0;−0.0;0.0}%");
             parts.Add(drifted ? "⚠️ **" + text + "**" : "✅ " + text);
 
             if (drifted)
@@ -209,7 +222,7 @@ public static partial class PerfCompare
     {
         var scenarios = points
             .SelectMany(x => x.Cases.Values)
-            .GroupBy(x => x.Scenario, StringComparer.Ordinal)
+            .GroupBy(x => x.Database is null ? x.Scenario : $"{x.Scenario} · {x.Database}", StringComparer.Ordinal)
             .OrderBy(x => x.Key, StringComparer.Ordinal);
 
         foreach (var scenario in scenarios)
@@ -217,7 +230,7 @@ public static partial class PerfCompare
             // One row per benchmark case, keyed on its full name. The label is display only and can change
             // between releases (a clearer case name), so the most recent one wins rather than splitting the row.
             var names = scenario
-                .GroupBy(x => x.FullName, StringComparer.Ordinal)
+                .GroupBy(HistoryKey, StringComparer.Ordinal)
                 .Select(x => (FullName: x.Key, Case: x.Last().Case))
                 .OrderBy(x => x.FullName, StringComparer.Ordinal)
                 .ToList();
@@ -242,20 +255,26 @@ public static partial class PerfCompare
             {
                 foreach (var (fullName, caseName) in names)
                 {
-                    var values = points.ConvertAll(x => x.Cases.TryGetValue(fullName, out var c) ? c.StatementsPerJob : null);
-                    if (values.Count(x => x is not null) < 2)
+                    // Only the points that measured this case. Mermaid's line has no gaps, and a missing value drawn
+                    // as 0 read as a release that made the case free.
+                    var measured = points
+                        .Select(x => (x.Label, Value: x.Cases.TryGetValue(fullName, out var c) ? c.StatementsPerJob : null))
+                        .Where(x => x.Value is not null)
+                        .Select(x => (x.Label, Value: x.Value!.Value))
+                        .ToList();
+                    if (measured.Count < 2)
                     {
                         continue;
                     }
 
-                    var top = Math.Ceiling((values.Max() ?? 1) * 1.2);
+                    var top = Math.Ceiling(measured.Max(x => x.Value) * 1.2);
                     report.AppendLine();
                     report.AppendLine("```mermaid");
                     report.AppendLine("xychart-beta");
                     report.AppendLine(CultureInfo.InvariantCulture, $"    title \"{scenario.Key}: {caseName}\"");
-                    report.AppendLine("    x-axis [" + string.Join(", ", points.Select(x => "\"" + x.Label + "\"")) + "]");
+                    report.AppendLine("    x-axis [" + string.Join(", ", measured.Select(x => "\"" + x.Label + "\"")) + "]");
                     report.AppendLine(CultureInfo.InvariantCulture, $"    y-axis \"{unit}\" 0 --> {top:0}");
-                    report.AppendLine("    line [" + string.Join(", ", values.Select(x => (x ?? 0).ToString("0.00", CultureInfo.InvariantCulture))) + "]");
+                    report.AppendLine("    line [" + string.Join(", ", measured.Select(x => x.Value.ToString("0.00", CultureInfo.InvariantCulture))) + "]");
                     report.AppendLine("```");
                 }
             }
@@ -266,8 +285,7 @@ public static partial class PerfCompare
 
     private static ReleaseCase ToReleaseCase(BdnCase benchmark, BdnResult result)
     {
-        var jobs = JobCountOf(benchmark);
-        double? rate = jobs is null || result.Mean <= 0 ? null : jobs.Value / (result.Mean / 1e9);
+        var rate = RateOf(result, benchmark);
 
         return new ReleaseCase(
             benchmark.FullName,
@@ -278,7 +296,14 @@ public static partial class PerfCompare
             result.WalBytesPerJob,
             result.BuffersPerJob,
             rate,
-            result.Bytes);
+            result.Bytes,
+            DatabaseLabel,
+            result.DbTimePerJob,
+            result.RoundTripsPerJob,
+            result.TransactionsPerJob,
+            result.LockWaitMsPerJob,
+            result.PeakConnections,
+            result.IdleConnections);
     }
 
     private static string ScenarioTitleOf(BdnCase benchmark) =>
@@ -306,6 +331,9 @@ public static partial class PerfCompare
             ? jobs.ToString("N0", CultureInfo.InvariantCulture) + " jobs"
             : "single case";
     }
+
+    // A history row: the case on one set of database versions.
+    private static string HistoryKey(ReleaseCase x) => x.Database is null ? x.FullName : x.Database + "|" + x.FullName;
 
     private static ReleaseBenchmarks? ReadRelease(string path)
     {
@@ -339,5 +367,16 @@ public static partial class PerfCompare
         double? WalBytesPerJob,
         double? BuffersPerJob,
         double? JobsPerSecond,
-        long? AllocatedBytes);
+        long? AllocatedBytes,
+
+        // Added with the database-version matrix and the load columns: absent (null) in records made before,
+        // so they read "—" and are never compared. Database is the matrix entry's versions, e.g.
+        // "pg17+mssql2022"; a case is only compared with a case measured on the same ones.
+        string? Database = null,
+        double? DbTimePerJob = null,
+        double? RoundTripsPerJob = null,
+        double? TransactionsPerJob = null,
+        double? LockWaitMsPerJob = null,
+        double? PeakConnections = null,
+        double? IdleConnections = null);
 }

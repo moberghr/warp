@@ -22,6 +22,16 @@ namespace Warp.Provider.SqlServer;
 /// and the wakes waiting in it. <see cref="ListenAsync"/> holds a
 /// dedicated long-lived connection and loops <c>WAITFOR (RECEIVE ...)</c> with a 30s timeout heartbeat,
 /// ending each conversation it receives in the same batch.
+/// <para>
+/// Rolling deploy from 7.7 (the bridge, rule 2.9): 7.7 sends to and listens on ONE shared service and queue
+/// (<c>{channel}/service</c>, <c>{channel}/queue</c>), created by a 7.7 process when it starts. While that service
+/// exists, <see cref="PublishAsync"/> also sends there so 7.7 listeners wake, and every listener runs a second
+/// loop on a connection of its own that receives from the shared queue and re-sends what a 7.7 process sent to
+/// every per-process service (never back to the shared one, so nothing loops). This release sends from a service
+/// of its own (<c>{channel}/sender/service</c>), which is how the relay tells its own copies, already delivered,
+/// from a 7.7 process's: the shared objects exist only where a 7.7 process ran, and nothing here creates them.
+/// REMOVE the bridge in the release after 8.x, with <c>LegacyTaskLock</c>.
+/// </para>
 /// </summary>
 public sealed class SqlServerNotificationTransport : IWarpNotificationTransport
 {
@@ -31,6 +41,8 @@ public sealed class SqlServerNotificationTransport : IWarpNotificationTransport
     private readonly string _contractValue;
     private readonly string _queueValue;
     private readonly string _serviceValue;
+    private readonly string _legacyQueueValue;
+    private readonly string _legacyServiceValue;
     private readonly string _listenerServicePrefix;
     private readonly string _ownQueueValue;
     private readonly string _ownServiceValue;
@@ -53,6 +65,17 @@ public sealed class SqlServerNotificationTransport : IWarpNotificationTransport
     /// </summary>
     internal TimeSpan SweepInterval { get; init; } = TimeSpan.FromMinutes(1);
 
+    /// <summary>
+    /// How often a listener looks for 7.7's shared queue while it does not exist, and retries after the relay
+    /// failed (rule 2.9 bridge). REMOVE with the bridge in the release after 8.x.
+    /// </summary>
+    internal TimeSpan LegacyQueueCheckInterval { get; init; } = TimeSpan.FromMinutes(1);
+
+    // How many wakes a stopping relay sends into 7.7's shared queue at most, and how far apart (WakeLegacyRelayAsync).
+    private const int MaxRelayWakes = 25;
+
+    private static readonly TimeSpan RelayWakeInterval = TimeSpan.FromMilliseconds(200);
+
     /// <summary>This process's listener service, for tests.</summary>
     internal string ListenerServiceName => _ownServiceValue;
 
@@ -74,10 +97,16 @@ public sealed class SqlServerNotificationTransport : IWarpNotificationTransport
         _messageTypeValue = $"{_channelName}/msg";
         _contractValue = $"{_channelName}/contract";
 
-        // The shared service is the SENDER of every notification, since a dialog needs an initiator service.
-        // Nothing listens on its queue any more: it only receives the end-of-dialog acknowledgements.
-        _queueValue = $"{_channelName}/queue";
-        _serviceValue = $"{_channelName}/service";
+        // The sender of every notification, since a dialog needs an initiator service. Nothing listens on its
+        // queue: it only receives the end-of-dialog acknowledgements. Not 7.7's shared service: the relay tells
+        // what 7.7 sent from what this release sent by the initiator (the class summary), and only a 7.7 process
+        // then creates the shared objects.
+        _queueValue = $"{_channelName}/sender/queue";
+        _serviceValue = $"{_channelName}/sender/service";
+
+        // 7.7's shared queue and service (the rule 2.9 bridge; REMOVE in the release after 8.x).
+        _legacyQueueValue = $"{_channelName}/queue";
+        _legacyServiceValue = $"{_channelName}/service";
 
         // This process's own listener queue and service.
         var id = Guid.NewGuid().ToString("N");
@@ -98,11 +127,13 @@ public sealed class SqlServerNotificationTransport : IWarpNotificationTransport
 
             var payload = Encoding.UTF8.GetBytes(Encode(kind, queue));
 
-            // One batch, one round trip: a message to every listening process's service.
+            // One batch, one round trip: a message to every listening process's service, and to 7.7's shared
+            // service when a 7.7 process created it, so 7.7 listeners wake during a rolling deploy (the bridge,
+            // REMOVE in the release after 8.x).
             var sql = $@"
                 DECLARE @target NVARCHAR(256), @conv UNIQUEIDENTIFIER;
                 DECLARE targets CURSOR LOCAL FAST_FORWARD FOR
-                    SELECT name FROM sys.services WHERE LEFT(name, LEN(@prefix)) = @prefix;
+                    SELECT name FROM sys.services WHERE LEFT(name, LEN(@prefix)) = @prefix OR name = @legacy;
                 OPEN targets;
                 FETCH NEXT FROM targets INTO @target;
                 WHILE @@FETCH_STATUS = 0
@@ -125,6 +156,7 @@ public sealed class SqlServerNotificationTransport : IWarpNotificationTransport
             await using var cmd = new SqlCommand(sql, conn);
             cmd.Parameters.Add("@payload", System.Data.SqlDbType.VarBinary, payload.Length).Value = payload;
             cmd.Parameters.Add("@prefix", System.Data.SqlDbType.NVarChar, 256).Value = _listenerServicePrefix;
+            cmd.Parameters.Add("@legacy", System.Data.SqlDbType.NVarChar, 256).Value = _legacyServiceValue;
             await cmd.ExecuteNonQueryAsync(ct);
             WarpTelemetry.NotificationsPublished.Add(1, new KeyValuePair<string, object?>("transport", "sqlserver"), new KeyValuePair<string, object?>("kind", kind.ToString()));
         }
@@ -166,11 +198,23 @@ public sealed class SqlServerNotificationTransport : IWarpNotificationTransport
         await SweepStaleQueuesAsync(conn, ct);
         var lastSweep = System.Diagnostics.Stopwatch.GetTimestamp();
 
+        // What a 7.7 process sends reaches this release through the relay, started once this process's queue
+        // exists so a relayed wake reaches it too (the bridge, REMOVE in the release after 8.x).
+        using var relayStop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var relay = RelayLegacyQueueAsync(relayStop.Token);
+
         // Service Broker setup is the slow part and this process's queue now exists. From this point a
         // publish reaches it and the WAITFOR loop is the listener. Tests use this signal to gate the first
         // publish so it can't be dropped by a host-startup vs. listener-startup race. It latches once, and
         // reconnects rely on the listener task's drain-on-reconnect to catch up.
         _listenerReady.TrySetResult();
+
+        // SQL Server 2025 ignores a cancel that reaches a WAITFOR (RECEIVE) as it starts until the WAITFOR times
+        // out (measured: the full 30 s; 2022 stops at once), and a second cancel does not help. A wake sent into
+        // this process's own queue ends that WAITFOR whatever state it is in. Sent only on stop, off the cancelling
+        // thread, and awaited before the queue is dropped.
+        Task? ownWake = null;
+        var wakeOnStop = ct.Register(() => ownWake = Task.Run(() => SendWakeAsync(_ownServiceValue), CancellationToken.None));
 
         try
         {
@@ -223,6 +267,7 @@ public sealed class SqlServerNotificationTransport : IWarpNotificationTransport
 
                         if (await reader.IsDBNullAsync(1, ct))
                         {
+                            // A wake (SendWakeAsync) carries no body: it only ends the WAITFOR.
                             continue;
                         }
 
@@ -253,7 +298,224 @@ public sealed class SqlServerNotificationTransport : IWarpNotificationTransport
         }
         finally
         {
+            await relayStop.CancelAsync();
+            await relay;
+
+            // Disposing waits for a callback already running, so a wake it started is visible here. The wake must
+            // land before the queue is dropped, or its send would fail on a missing service.
+            await wakeOnStop.DisposeAsync();
+            if (ownWake != null)
+            {
+                await ownWake;
+            }
+
             await DropOwnQueueAsync();
+        }
+    }
+
+    // The rule 2.9 bridge's receiving half (REMOVE in the release after 8.x): while 7.7's shared queue exists, receive
+    // from it on a connection of its own and re-send what a 7.7 process sent to every listener's service. A queue
+    // hands each message to one receiver, so of several 8.0 listeners draining it concurrently one takes each message
+    // and re-sends it to all of them, itself included. Never throws: a failure is logged and retried later.
+    private async Task RelayLegacyQueueAsync(CancellationToken ct)
+    {
+        // The WAITFOR on the shared queue has the SQL Server 2025 cancel problem of the listener's own (ListenAsync),
+        // so a stop wakes the shared queue too, but only while this relay is waiting on it.
+        var waiting = new StrongBox<int>();
+        Task? wake = null;
+        var wakeOnStop = ct.Register(() => wake = Task.Run(() => WakeLegacyRelayAsync(waiting), CancellationToken.None));
+        SqlConnection? conn = null;
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                try
+                {
+                    if (conn == null)
+                    {
+                        conn = new SqlConnection(_connectionString);
+                        await conn.OpenAsync(ct);
+                    }
+
+                    if (await LegacyQueueExistsAsync(conn, ct))
+                    {
+                        await RelayLegacyBatchAsync(conn, waiting, ct);
+                        continue;
+                    }
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    // The shared queue dropped mid-receive (its last 7.7 process gone and an operator cleaning up),
+                    // or a lost connection: open a fresh one after the interval.
+                    _logger?.LogDebug(ex, "Relaying 7.7's shared Service Broker queue for channel {Channel} failed; retrying", _channelName);
+                    if (conn != null)
+                    {
+                        await conn.DisposeAsync();
+                        conn = null;
+                    }
+                }
+
+                try
+                {
+                    await Task.Delay(LegacyQueueCheckInterval, ct);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    return;
+                }
+            }
+        }
+        finally
+        {
+            await wakeOnStop.DisposeAsync();
+            if (wake != null)
+            {
+                await wake;
+            }
+
+            if (conn != null)
+            {
+                await conn.DisposeAsync();
+            }
+        }
+    }
+
+    // The shared queue hands each message to ONE receiver, and other relays and 7.7 listeners receive from it too, so
+    // one wake may end someone else's WAITFOR instead (harmless: they discard it). Wakes are sent until this relay's
+    // wait has ended, at most MaxRelayWakes of them; past that the WAITFOR ends at its own timeout.
+    private async Task WakeLegacyRelayAsync(StrongBox<int> waiting)
+    {
+        for (var attempt = 0; attempt < MaxRelayWakes && Volatile.Read(ref waiting.Value) == 1; attempt++)
+        {
+            await SendWakeAsync(_legacyServiceValue);
+            await Task.Delay(RelayWakeInterval);
+        }
+    }
+
+    // One body-less message to a service, from this release's sender service: it ends a WAITFOR (RECEIVE) on the
+    // service's queue and is never a notification. The listener skips a message without a body, the relay keeps only
+    // bodies a 7.7 process sent (a wake has neither), and 7.7 skips a message without a body too. A body-less message
+    // of the existing type rather than a type of its own, because a new type needs a contract on 7.7's shared service.
+    // Best effort and never throws: it runs from a cancellation callback.
+    internal async Task SendWakeAsync(string targetService)
+    {
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await using var conn = new SqlConnection(_connectionString);
+            await conn.OpenAsync(timeout.Token);
+            var sql = $@"
+                DECLARE @conv UNIQUEIDENTIFIER;
+                BEGIN DIALOG @conv
+                    FROM SERVICE [{_serviceValue}]
+                    TO SERVICE @target
+                    ON CONTRACT [{_contractValue}]
+                    WITH ENCRYPTION = OFF, LIFETIME = 60;
+                SEND ON CONVERSATION @conv MESSAGE TYPE [{_messageTypeValue}];
+                END CONVERSATION @conv;";
+            await using var cmd = new SqlCommand(sql, conn);
+            cmd.Parameters.Add("@target", System.Data.SqlDbType.NVarChar, 256).Value = targetService;
+            await cmd.ExecuteNonQueryAsync(timeout.Token);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Waking the Service Broker service {Service} on stop failed; its WAITFOR ends at its timeout", targetService);
+        }
+    }
+
+    private async Task<bool> LegacyQueueExistsAsync(SqlConnection conn, CancellationToken ct)
+    {
+        await using var cmd = new SqlCommand("SELECT COUNT(*) FROM sys.service_queues WHERE name = @queue;", conn);
+        cmd.Parameters.Add("@queue", System.Data.SqlDbType.NVarChar, 256).Value = _legacyQueueValue;
+
+        return (int)(await cmd.ExecuteScalarAsync(ct))! > 0;
+    }
+
+    // One WAITFOR on the shared queue, then in the same batch: keep only what a 7.7 process sent (its conversation's
+    // far service is the shared service; what this release sent there comes from its sender service and already
+    // reached every listener directly, so it is dropped, never delivered twice), end every conversation received,
+    // and send the kept messages to every listener's service, one conversation each. Never to the shared service.
+    private async Task RelayLegacyBatchAsync(SqlConnection conn, StrongBox<int> waiting, CancellationToken ct)
+    {
+        var sql = $@"
+            DECLARE @received TABLE (handle UNIQUEIDENTIFIER, type_name NVARCHAR(256), body VARBINARY(MAX));
+            WAITFOR (
+                RECEIVE TOP(10)
+                    conversation_handle,
+                    message_type_name,
+                    message_body
+                FROM [{_legacyQueueValue}]
+                INTO @received
+            ), TIMEOUT 30000;
+
+            DECLARE @relay TABLE (id INT IDENTITY(1, 1), body VARBINARY(MAX));
+            INSERT INTO @relay (body)
+            SELECT r.body
+            FROM @received r
+            JOIN sys.conversation_endpoints e ON e.conversation_handle = r.handle
+            WHERE r.type_name = @type AND r.body IS NOT NULL AND e.far_service = @legacy;
+
+            DECLARE @handle UNIQUEIDENTIFIER;
+            DECLARE ended CURSOR LOCAL FAST_FORWARD FOR SELECT DISTINCT handle FROM @received;
+            OPEN ended;
+            FETCH NEXT FROM ended INTO @handle;
+            WHILE @@FETCH_STATUS = 0
+            BEGIN
+                END CONVERSATION @handle;
+                FETCH NEXT FROM ended INTO @handle;
+            END
+            CLOSE ended;
+            DEALLOCATE ended;
+
+            IF EXISTS (SELECT 1 FROM @relay)
+            BEGIN
+                DECLARE @target NVARCHAR(256), @conv UNIQUEIDENTIFIER, @id INT, @body VARBINARY(MAX);
+                DECLARE targets CURSOR LOCAL FAST_FORWARD FOR
+                    SELECT name FROM sys.services WHERE LEFT(name, LEN(@prefix)) = @prefix;
+                OPEN targets;
+                FETCH NEXT FROM targets INTO @target;
+                WHILE @@FETCH_STATUS = 0
+                BEGIN
+                    BEGIN DIALOG @conv
+                        FROM SERVICE [{_serviceValue}]
+                        TO SERVICE @target
+                        ON CONTRACT [{_contractValue}]
+                        WITH ENCRYPTION = OFF, LIFETIME = 60;
+                    SET @id = 0;
+                    WHILE 1 = 1
+                    BEGIN
+                        SELECT TOP (1) @id = id, @body = body FROM @relay WHERE id > @id ORDER BY id;
+                        IF @@ROWCOUNT = 0
+                            BREAK;
+                        SEND ON CONVERSATION @conv
+                            MESSAGE TYPE [{_messageTypeValue}] (@body);
+                    END
+                    END CONVERSATION @conv;
+                    FETCH NEXT FROM targets INTO @target;
+                END
+                CLOSE targets;
+                DEALLOCATE targets;
+            END";
+
+        await using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 60 };
+        cmd.Parameters.Add("@type", System.Data.SqlDbType.NVarChar, 256).Value = _messageTypeValue;
+        cmd.Parameters.Add("@legacy", System.Data.SqlDbType.NVarChar, 256).Value = _legacyServiceValue;
+        cmd.Parameters.Add("@prefix", System.Data.SqlDbType.NVarChar, 256).Value = _listenerServicePrefix;
+
+        // Marked waiting BEFORE the token is checked, so a stop either sees the mark and wakes, or is seen here.
+        Volatile.Write(ref waiting.Value, 1);
+        try
+        {
+            ct.ThrowIfCancellationRequested();
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        finally
+        {
+            Volatile.Write(ref waiting.Value, 0);
         }
     }
 

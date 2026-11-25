@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Warp.Core;
 using Warp.Core.Data.Entities;
@@ -17,9 +18,9 @@ namespace Warp.Worker.Services;
 /// <see cref="ServerTaskSignals{TContext}.SignalJobFinalized()"/>.
 /// <para>
 /// A wake names the parents of the jobs that finished, and a pass checks those. Every parent in flight
-/// is checked only on a sweep: once per <c>OrchestrationInterval</c>, and whenever a wake could not
-/// name its parents. The sweep is the backstop for a wake that never arrived (a crashed process, a
-/// delete from a process with no server while database push is off).
+/// is checked only on a sweep: on every run its schedule started (once per <c>OrchestrationInterval</c>),
+/// and whenever a wake could not name its parents. The sweep is the backstop for a wake that never
+/// arrived (a crashed process, a delete from a process with no server while database push is off).
 /// </para>
 /// <para>
 /// Activating a continuation is an enqueue site (rule 6.3): it flips rows from Awaiting to Enqueued, so it
@@ -30,7 +31,7 @@ namespace Warp.Worker.Services;
 /// in five batch-and-continuation pairs took ~22 s against ~3 s for the same jobs published directly.
 /// </para>
 /// </summary>
-public sealed class Orchestrator<TContext> : IServerTask
+public sealed class Orchestrator<TContext> : IServerTask, IScheduledRunAware, IDisposable
     where TContext : DbContext
 {
     private readonly DbContext _context;
@@ -40,9 +41,17 @@ public sealed class Orchestrator<TContext> : IServerTask
     private readonly ServerTaskSignals<TContext> _signals;
     private readonly List<Notification> _pendingNotifications = [];
 
+    // What this pass took from the signals, until its work is known to be committed.
+    private Guid[] _takenParents = [];
+    private Guid[] _takenSettledJobs = [];
+    private bool _takenSweep;
+
+    // Set by the runner: the scheduler started this run because its tick came, so it sweeps every parent.
+    private bool _scheduledRun;
+
     public Orchestrator(
         IWarpServerContext serverContext,
-        TimeProvider time,
+        [FromKeyedServices(DatabaseClock.Key)] TimeProvider time,
         IOptions<WarpServerConfiguration> configuration,
         IWarpNotificationTransport transport,
         ServerTaskSignals<TContext> signals)
@@ -62,6 +71,8 @@ public sealed class Orchestrator<TContext> : IServerTask
 
     public IEnumerable<ServerTaskSignal> Signals => [ServerTaskSignal.JobFinalized];
 
+    void IScheduledRunAware.BeginRun(bool scheduled) => _scheduledRun = scheduled;
+
     public async Task<string?> ExecuteAsync(CancellationToken ct)
     {
         var workDone = await RunOrchestrationCoreAsync(ct);
@@ -73,6 +84,7 @@ public sealed class Orchestrator<TContext> : IServerTask
     // rollback, which leaves the buffer to die with this scoped instance.
     public async Task OnCommittedAsync(CancellationToken ct)
     {
+        ForgetTakenWork();
         if (_pendingNotifications.Count == 0)
         {
             return;
@@ -90,19 +102,45 @@ public sealed class Orchestrator<TContext> : IServerTask
     {
         // Which parents to look at: the ones a finished job named, and all of them when a sweep is due.
         // A pass that throws gives the work back, since the signal that brought it will not come again.
-        var (hintedParents, sweep) = _signals.TakeFinalizedParents(_configuration.OrchestrationInterval);
+        // So does one whose work is rolled back after it returned (see Dispose).
+        var (hintedParents, sweep) = _signals.TakeFinalizedParents(_configuration.OrchestrationInterval, _scheduledRun);
         var settledJobs = _signals.TakeSettledJobs();
+        _takenParents = [.. _takenParents, .. hintedParents];
+        _takenSettledJobs = [.. _takenSettledJobs, .. settledJobs];
+        _takenSweep |= sweep;
         try
         {
             return await RunOrchestrationCoreAsync(hintedParents, settledJobs, sweep, ct);
         }
         catch
         {
-            _signals.ReturnFinalizedParents(hintedParents, sweep);
-            _signals.NoteFinalized([], settledJobs);
+            ReturnTakenWork();
 
             throw;
         }
+    }
+
+    /// <summary>
+    /// Gives back the work of a pass that was never committed. The task host runs
+    /// <see cref="ExecuteAsync"/> inside a transaction and calls <see cref="OnCommittedAsync"/> only after
+    /// the commit, then disposes the pass's scope. A commit that fails, or a run cancelled because its
+    /// lease was lost, comes after <see cref="ExecuteAsync"/> returned: the work is rolled back, and the
+    /// parents it was told about would otherwise be forgotten until the next sweep.
+    /// </summary>
+    public void Dispose() => ReturnTakenWork();
+
+    private void ReturnTakenWork()
+    {
+        _signals.ReturnFinalizedParents(_takenParents, _takenSweep);
+        _signals.NoteFinalized([], _takenSettledJobs);
+        ForgetTakenWork();
+    }
+
+    private void ForgetTakenWork()
+    {
+        _takenParents = [];
+        _takenSettledJobs = [];
+        _takenSweep = false;
     }
 
     private async Task<bool> RunOrchestrationCoreAsync(Guid[] hintedParents, Guid[] settledJobs, bool sweep, CancellationToken ct)
@@ -116,8 +154,19 @@ public sealed class Orchestrator<TContext> : IServerTask
         var finalized = 0;
         foreach (var chunk in hintedParents.Chunk(ParentIdsPerStatement))
         {
-            var readyHinted = await HintedReadyParentsQuery(_context, chunk).ToListAsync(ct);
-            finalized += await FinalizeParentsAsync(readyHinted, settled, jobExpirationTimeout, ct);
+            var childStates = await ChildStatesOfQuery(_context, chunk).ToListAsync(ct);
+            var readyIds = ParentsWithSettledChildren(childStates);
+            if (readyIds.Count == 0)
+            {
+                continue;
+            }
+
+            // By primary key alone; kind and state are checked here, not in the statement (see ParentsByIdQuery).
+            var readyHinted = (await ParentsByIdQuery(_context, readyIds).ToListAsync(ct))
+                .Where(x => x.Kind is JobKind.Message or JobKind.Batch)
+                .Where(x => x.CurrentState is State.Awaiting or State.Processing)
+                .ToList();
+            finalized += await FinalizeParentsAsync(readyHinted, childStates, settled, jobExpirationTimeout, ct);
             _context.ChangeTracker.Clear();
         }
 
@@ -133,7 +182,10 @@ public sealed class Orchestrator<TContext> : IServerTask
                 _signals.RequestParentSweep();
             }
 
-            finalized += await FinalizeParentsAsync(readySwept, settled, jobExpirationTimeout, ct);
+            var sweptChildStates = readySwept.Count == 0
+                ? []
+                : await ChildStatesOfQuery(_context, readySwept.ConvertAll(x => x.Id)).ToListAsync(ct);
+            finalized += await FinalizeParentsAsync(readySwept, sweptChildStates, settled, jobExpirationTimeout, ct);
             _context.ChangeTracker.Clear();
         }
 
@@ -182,17 +234,53 @@ public sealed class Orchestrator<TContext> : IServerTask
             .Take(batchSize);
     }
 
-    // The same readiness check for the parents a finished job named (rule 6.11), found by primary key.
-    // The sweep above reads every parent in flight to find the ready ones, about 11 pages each on
-    // PostgreSQL, and it ran on every job completion: 10,924 pages per pass with 1,000 messages in
-    // flight and none ready. This reads the named parents only, whatever else is in flight.
-    internal static IQueryable<Job> HintedReadyParentsQuery(DbContext context, IReadOnlyCollection<Guid> parentIds) =>
-        WhereChildrenSettled(
-            context,
-            context.Set<Job>()
-                .Where(p => parentIds.Contains(p.Id))
-                .Where(p => p.Kind == JobKind.Message || p.Kind == JobKind.Batch)
-                .Where(p => p.CurrentState == State.Awaiting || p.CurrentState == State.Processing));
+    // The readiness check for the parents a finished job named (rule 6.11), in two statements that can each
+    // be served only one way, and that is the point (the lesson of rules 6.9 and 6.11 again).
+    //
+    // It was ONE statement: parents WHERE id = ANY(named) AND kind IN (..) AND state IN (..) AND NOT EXISTS
+    // (a child with kind = Job still pending) AND EXISTS (a child with kind = Job AND state IN (settled)).
+    // Every extra predicate offered PostgreSQL another index, and after a burst the statistics said each
+    // matched one row, so it took them: the settled child through (kind, state, create_time), which is every
+    // finished job in the table, read once per named parent and discarded by the join filter; the pending
+    // child through a BitmapAnd with kind = Job, every job's index entry per parent; the parents themselves
+    // through (kind, state) with the ids as a filter. Measured on the message-routing benchmark: 28,608 pages
+    // for 26 named parents and 177,258 for 60, on almost every job completion, against a few hundred when
+    // the plan happened to be right. Message routing read 110 to 1,317 pages per job on identical code.
+    //
+    // 1. the children's (kind, state) of the named parents, by parent id and nothing else: the
+    //    (ParentJobId, CurrentState) index is the only one the predicate can use
+    // 2. readiness is decided here, in memory (ParentsWithSettledChildren)
+    // 3. the ready parents by primary key and nothing else (ParentsByIdQuery)
+    //
+    // Internal and static so OrchestratorReadyParentsPlanTests measures the pages THESE read, not a copy.
+    internal static IQueryable<ChildState> ChildStatesOfQuery(DbContext context, IReadOnlyCollection<Guid> parentIds) =>
+        context.Set<Job>()
+            .Where(c => c.ParentJobId != null && parentIds.Contains(c.ParentJobId.Value))
+            .Select(c =>
+                new ChildState
+                {
+                    ParentId = c.ParentJobId!.Value,
+                    Kind = c.Kind,
+                    CurrentState = c.CurrentState,
+                })
+            .Distinct();
+
+    // No kind or state predicate, deliberately: with one, PostgreSQL found 26 named parents through the
+    // (kind, state, create_time) index and filtered 696 rows by id. The caller checks both in memory; the
+    // rows are the few parents whose children have all settled.
+    internal static IQueryable<Job> ParentsByIdQuery(DbContext context, IReadOnlyCollection<Guid> parentIds) =>
+        context.Set<Job>().Where(p => parentIds.Contains(p.Id));
+
+    // The parents all of whose job children are settled, with at least one that is. The same rule as
+    // WhereChildrenSettled (which the sweep still runs in SQL): Completed, Failed and Deleted are settled,
+    // Awaiting is a continuation that has not started and is neither, anything else is still pending.
+    internal static List<Guid> ParentsWithSettledChildren(IEnumerable<ChildState> childStates) =>
+        [.. childStates
+            .Where(x => x.Kind == JobKind.Job)
+            .GroupBy(x => x.ParentId)
+            .Where(x => x.All(y => y.CurrentState is State.Completed or State.Failed or State.Deleted or State.Awaiting))
+            .Where(x => x.Any(y => y.CurrentState is State.Completed or State.Failed or State.Deleted))
+            .Select(x => x.Key),];
 
     // Deleted counts as SETTLED on both sides of the readiness check: a deleted child is
     // deliberately-skipped work (a Skip-mode [Mutex]/[RateLimit] rejecting a routed handler job, or an
@@ -345,7 +433,7 @@ public sealed class Orchestrator<TContext> : IServerTask
         return ([.. slice], cursor);
     }
 
-    private async Task<int> FinalizeParentsAsync(List<Job> readyParents, List<Guid> settled, TimeSpan jobExpirationTimeout, CancellationToken ct)
+    private async Task<int> FinalizeParentsAsync(List<Job> readyParents, List<ChildState> childStates, List<Guid> settled, TimeSpan jobExpirationTimeout, CancellationToken ct)
     {
         if (readyParents.Count == 0)
         {
@@ -354,22 +442,12 @@ public sealed class Orchestrator<TContext> : IServerTask
 
         settled.AddRange(readyParents.Select(x => x.Id));
 
-        // Two-step fetch (§5.2): one follow-up query collects the distinct (parent, settled state) pairs
-        // instead of an `_context.Set<Job>().Any(...)` subquery inside the Select projection (which EF
-        // Core has translated unreliably across versions). One round-trip yields every per-state id-set.
-        var parentIds = readyParents.ConvertAll(p => p.Id);
-        var settledChildStates = await _context.Set<Job>()
-            .Where(c => c.Kind == JobKind.Job)
-            .Where(c => c.CurrentState == State.Failed || c.CurrentState == State.Completed || c.CurrentState == State.Deleted)
-            .Where(c => c.ParentJobId != null && parentIds.Contains(c.ParentJobId.Value))
-            .Select(c =>
-                new
-                {
-                    ParentId = c.ParentJobId!.Value,
-                    c.CurrentState,
-                })
-            .Distinct()
-            .ToListAsync(ct);
+        // The children's states come from ChildStatesOfQuery, read by parent id alone. They were read here by
+        // a statement that also named kind = Job and the settled states, which let PostgreSQL walk every
+        // finished job in the table to find them (1,239 pages a call on the message-routing benchmark).
+        var settledChildStates = childStates
+            .Where(x => x.Kind == JobKind.Job)
+            .ToList();
         var failedParentIdSet = settledChildStates
             .Where(x => x.CurrentState == State.Failed)
             .Select(x => x.ParentId)
@@ -594,6 +672,16 @@ public sealed class Orchestrator<TContext> : IServerTask
         _signals.NoteFinalized([], failed);
 
         return orphaned.Count;
+    }
+
+    // One (kind, state) a parent's children are in.
+    internal sealed class ChildState
+    {
+        public Guid ParentId { get; init; }
+
+        public JobKind Kind { get; init; }
+
+        public State CurrentState { get; init; }
     }
 
     // A parent some awaiting row is waiting on: what decides whether that row may move.

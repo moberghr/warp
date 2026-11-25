@@ -383,3 +383,7 @@ tasks/todo.md
 
 # MTK session telemetry
 .claude/observability/
+
+# macOS and local agent scratch
+.DS_Store
+.dashboard/

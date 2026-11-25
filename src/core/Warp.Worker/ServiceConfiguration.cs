@@ -220,6 +220,17 @@ public static class ServiceConfiguration
         // also called AddWarp separately for their own addon opt-ins.
         services.AddWarp<TContext>();
 
+        // The database's clock as this process sees it (#350): every server component resolves its
+        // TimeProvider under DatabaseClock.Key, so a time another server reads or compares is never decided by
+        // this server's own clock. It wraps whatever TimeProvider the host registered, a test's fake
+        // included, and the heartbeat measures the offset.
+        // While a server from before 8.0 is alive the correction is suspended (rule 2.20); registration and every
+        // cluster-task claim report it. Starts as alive, until registration has looked.
+        services.TryAddSingleton(_ => new LegacyServerPresence(alive: true));
+        services.TryAddSingleton(sp => new DatabaseClock(sp.GetRequiredService<TimeProvider>(), sp.GetRequiredService<LegacyServerPresence>()));
+        services.TryAddKeyedSingleton<TimeProvider>(DatabaseClock.Key, (sp, _) => sp.GetRequiredService<DatabaseClock>());
+        services.TryAddSingleton<ClockSkewState>();
+
         // The Warp server context: a runtime-only mirror of the Warp model used for all autonomous
         // server-internal DB work (worker fetch/complete, server tasks, background-service host), with
         // its own logger so server polling doesn't pollute the user's command logs. The connection is

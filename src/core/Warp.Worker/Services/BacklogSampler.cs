@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Warp.Core;
 using Warp.Core.Data.Entities;
@@ -29,7 +30,7 @@ public sealed class BacklogSampler<TContext> : IServerTask
 
     public BacklogSampler(
         IWarpServerContext serverContext,
-        TimeProvider time,
+        [FromKeyedServices(DatabaseClock.Key)] TimeProvider time,
         IOptions<WarpServerConfiguration> configuration)
     {
         _context = serverContext.Context;

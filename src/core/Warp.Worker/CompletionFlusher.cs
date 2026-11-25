@@ -46,8 +46,16 @@ internal sealed class CompletionFlusher<TContext> : IDisposable
 
     private const int FinalFlushBudgetSeconds = 5;
 
+    // Completed when a write ends, then replaced: a worker that found the group holding too many unwritten
+    // completions waits on the one current when it added (#348).
+    private TaskCompletionSource _writeEnded = NewWriteEnded();
+
     // Cancelled when StopAsync's token fires with a write still running.
     private readonly CancellationTokenSource _lifetime = new();
+
+    // Read once: a handler that outlived the shutdown adds its completion after the host has disposed
+    // this flusher, and reading the token of a disposed source throws before anything is written.
+    private readonly CancellationToken _lifetimeToken;
     private readonly Lock _stopGate = new();
     private bool _stopped;
 
@@ -60,6 +68,7 @@ internal sealed class CompletionFlusher<TContext> : IDisposable
         ILogger logger,
         KeyValuePair<string, object?> diagnosticsTag)
     {
+        _lifetimeToken = _lifetime.Token;
         _batch = batch;
         _diagnosticsTag = diagnosticsTag;
         _availability = availability;
@@ -80,16 +89,28 @@ internal sealed class CompletionFlusher<TContext> : IDisposable
     /// Buffers a finished job; the first completion of a buffer starts its timer. After
     /// <see cref="StopAsync"/> has made its final flush (a handler that outlived the shutdown), the
     /// completion is written at once instead, since nothing would write the buffer any more.
+    /// <para>
+    /// Backpressure (#348): when the group already holds <see cref="CompletionBatch.BackpressureThreshold"/>
+    /// unwritten completions, the worker waits for the write in flight to end before it takes its next
+    /// job, still holding its slot, so the group claims nothing more meanwhile. A slow or hung database
+    /// then stops the group instead of growing the number of finished jobs a crash would run again. Under
+    /// normal load the buffer never gets there and this is one comparison. The wait ends early on
+    /// <paramref name="cancellationToken"/>: the completion is buffered, and the final flush writes it.
+    /// </para>
     /// </summary>
-    public ValueTask AddAsync(PendingCompletion completion)
+    public ValueTask AddAsync(PendingCompletion completion, CancellationToken cancellationToken = default)
     {
         lock (_stopGate)
         {
             if (!_stopped)
             {
+                // Taken before adding: a write that ends in between completes it, and the worker goes on.
+                var writeEnded = Volatile.Read(ref _writeEnded).Task;
                 Buffer(completion);
 
-                return default;
+                return _batch.Count < _batch.BackpressureThreshold
+                    ? default
+                    : WaitForWriteAsync(writeEnded, cancellationToken);
             }
 
             _batch.Add(completion, out _);
@@ -97,6 +118,23 @@ internal sealed class CompletionFlusher<TContext> : IDisposable
 
         return new ValueTask(FlushSafelyAsync());
     }
+
+    private static TaskCompletionSource NewWriteEnded() => new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    private static async ValueTask WaitForWriteAsync(Task writeEnded, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await writeEnded.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Stopping: the completion is buffered and the final flush writes it.
+        }
+    }
+
+    // Releases the workers waiting on the write that just ended, and starts the next one's wait.
+    private void EndWrite() => Interlocked.Exchange(ref _writeEnded, NewWriteEnded()).TrySetResult();
 
     private void Buffer(PendingCompletion completion)
     {
@@ -172,6 +210,10 @@ internal sealed class CompletionFlusher<TContext> : IDisposable
         {
             _logger.LogError(ex, "Final batch flush on shutdown failed");
         }
+        finally
+        {
+            EndWrite();
+        }
     }
 
     private void Wake() => _wake.Writer.TryWrite(true);
@@ -180,7 +222,7 @@ internal sealed class CompletionFlusher<TContext> : IDisposable
     {
         try
         {
-            await Task.Delay(_batch.FlushInterval, _timeProvider, _lifetime.Token).ConfigureAwait(false);
+            await Task.Delay(_batch.FlushInterval, _timeProvider, _lifetimeToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -235,7 +277,7 @@ internal sealed class CompletionFlusher<TContext> : IDisposable
     {
         try
         {
-            return await _wake.Reader.WaitToReadAsync(_lifetime.Token).ConfigureAwait(false);
+            return await _wake.Reader.WaitToReadAsync(_lifetimeToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -261,18 +303,22 @@ internal sealed class CompletionFlusher<TContext> : IDisposable
                 }
             }
 
-            var flushed = await _batch.FlushAsync(_lifetime.Token);
+            var flushed = await _batch.FlushAsync(_lifetimeToken);
             if (timed)
             {
                 DispatcherDiagnostics.FlushDuration.Record(DispatcherDiagnostics.Since(start), _diagnosticsTag);
             }
 
-            await AnnounceAsync(flushed, _lifetime.Token);
+            await AnnounceAsync(flushed, _lifetimeToken);
         }
         catch (Exception ex)
         {
             // The drained jobs stay Processing; StaleJobRecovery requeues them.
             _logger.LogError(ex, "Failed to flush completion batch");
+        }
+        finally
+        {
+            EndWrite();
         }
     }
 

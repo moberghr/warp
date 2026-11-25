@@ -8,7 +8,7 @@ namespace Warp.Worker.BackgroundServices;
 
 /// <summary>
 /// Per-instance singleton that buffers captured log entries and flushes them to the database
-/// on a timer (~1s interval, same cadence as <c>JobLogCollector</c> / <c>RunJobMonitor</c>).
+/// on a timer (~1s interval, same cadence as <c>JobLogCollector</c> / <c>RunningJobMonitor</c>).
 /// Enforces a level filter, a rate cap (100 entries/sec → 10s drop window), and message
 /// truncation at 4096 bytes.
 /// </summary>

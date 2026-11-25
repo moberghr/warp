@@ -116,6 +116,203 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task PassAsync_SignalOnAnotherServerAfterAnIdleScheduledRun_RunsTheTaskThereAtOnce()
+    {
+        // Two servers, signals in-process only. The first wins the tick and finds nothing; a job then
+        // finishes on the second. The first's lease runs to the next tick, and a held lease turns the
+        // second's signal into a request nobody reads before then: the idle run has to free it. The first
+        // idle run records itself (a completion either way), so the case is the second one.
+        var task = new SignaledTask(TimeSpan.FromHours(1));
+        using var first = await BuildAsync(task);
+        using var second = await BuildAsync(task);
+        await RunOnceAsync(first, SignaledTask.TaskName);
+        await MakeDueAsync(first, SignaledTask.TaskName);
+        await RunOnceAsync(first, SignaledTask.TaskName);
+        task.Runs.ShouldBe(2);
+
+        // Act
+        second.Signal(SignaledTask.TaskName);
+        await RunOnceAsync(second, SignaledTask.TaskName);
+
+        // Assert: run on the second server, although the first claimed the task until an hour from now.
+        task.Runs.ShouldBe(3);
+    }
+
+    [TimedFact]
+    public async Task RunningTask_IdleRunOfASignalTaskThatOnlyFreesItsLease_DoesNotWakeTheLoop()
+    {
+        // The release leaves the task due when it was, so a claim right after it would find nothing:
+        // the idle run of a signal task costs its one release, not a release and a claim.
+        var task = new SignaledTask(TimeSpan.FromSeconds(10));
+        using var scheduler = await BuildAsync(task);
+        await AddServerAsync();
+        await RunOnceAsync(scheduler, SignaledTask.TaskName);
+        await MakeDueAsync(scheduler, SignaledTask.TaskName);
+        var before = scheduler.Wakes;
+
+        // Act
+        await RunOnceAsync(scheduler, SignaledTask.TaskName);
+
+        // Assert
+        task.Runs.ShouldBe(2);
+        scheduler.Wakes.ShouldBe(before);
+        (await ReadAsync(SignaledTask.TaskName)).LeaseUntil.ShouldBeNull();
+        (await scheduler.PassAsync(Ct)).ShouldBeGreaterThan(TimeSpan.FromSeconds(4), "the pass after it should sleep until the next tick");
+    }
+
+    [TimedFact]
+    public async Task RunningTask_IdleRunOfASignalTaskOnALoneServer_KeepsItsLease()
+    {
+        // The release is only for another server's signal; with no other server alive nobody else can claim
+        // the task, so the idle run writes nothing (the idle benchmark read the release as +6% statements).
+        var task = new SignaledTask(TimeSpan.FromSeconds(10));
+        using var scheduler = await BuildAsync(task);
+        await RunOnceAsync(scheduler, SignaledTask.TaskName);
+        await MakeDueAsync(scheduler, SignaledTask.TaskName);
+
+        // Act
+        await RunOnceAsync(scheduler, SignaledTask.TaskName);
+
+        // Assert: still leased to the next tick, and a signal here still runs it at once.
+        task.Runs.ShouldBe(2);
+        (await ReadAsync(SignaledTask.TaskName)).LeaseUntil.ShouldNotBeNull();
+        scheduler.Signal(SignaledTask.TaskName);
+        await RunOnceAsync(scheduler, SignaledTask.TaskName);
+        task.Runs.ShouldBe(3);
+    }
+
+    [TimedFact]
+    public async Task PassAsync_RunClaimedOnItsSchedule_TellsTheTaskItIsAScheduledRun()
+    {
+        // The Orchestrator sweeps every parent on a run its schedule started (rule 6.11), and only checks
+        // the named parents on a run a signal started.
+        var task = new ScheduleAwareTask();
+        using var scheduler = await BuildAsync(task);
+
+        // Act: the first run is the claim's (due at once); the second a signal's.
+        await RunOnceAsync(scheduler, ScheduleAwareTask.TaskName);
+        scheduler.Signal(ScheduleAwareTask.TaskName);
+        await RunOnceAsync(scheduler, ScheduleAwareTask.TaskName);
+
+        // Assert
+        task.Runs.ShouldBe([true, false]);
+    }
+
+    [TimedFact]
+    public async Task PassAsync_SignalBeforeTheFirstClaimWhileAnOldServerHoldsTheOldLock_TaskDoesNotRun()
+    {
+        // A signal that arrived during registration is honoured by the first pass before any claim has
+        // said whether a server from before the lease is alive. That run must take the old lock too
+        // (rule 6.23): started without it, the task ran beside the old server's.
+        var task = new SignaledTask(TimeSpan.FromHours(1));
+        using var scheduler = await BuildAsync(task);
+        await using (var ctx = _fixture.CreateContext())
+        {
+            ctx.Set<Server>().Add(new Server { Id = Guid.NewGuid(), StartedTime = DateTime.UtcNow, LastHeartbeatTime = DateTime.UtcNow });
+            await ctx.SaveChangesAsync(Ct);
+        }
+
+        var barrier = new BarrierSignal();
+        var holderContext = _fixture.CreateContext();
+        var holder = TestTasks.QueriesFor(holderContext).RunUnderTransactionLockAsync(
+            holderContext,
+            TaskLockKey,
+            async (_, ct) =>
+            {
+                barrier.Running.Release();
+                await barrier.CanFinish.WaitAsync(ct);
+
+                return 0;
+            },
+            Ct);
+        (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue("the old server's lock was not taken");
+
+        try
+        {
+            // Act: the signal claims the task and starts it; with every task running, this pass sends no claim.
+            scheduler.Signal(SignaledTask.TaskName);
+            await RunOnceAsync(scheduler, SignaledTask.TaskName);
+
+            // Assert
+            task.Runs.ShouldBe(0);
+        }
+        finally
+        {
+            barrier.CanFinish.Release();
+            await holder;
+        }
+    }
+
+    [TimedFact]
+    public async Task PassAsync_MoreTimerTasksDueThanSlots_RunsTwoAtATime()
+    {
+        // Arrange: three timer-only tasks fall due together (the grid makes them), pinned in their run. Run all at
+        // once, each held a connection of its own and the pool kept them; two slots is the cap.
+        var barrier = new BarrierSignal();
+        var tasks = new[] { new SlotTask("slot-a", barrier), new SlotTask("slot-b", barrier), new SlotTask("slot-c", barrier) };
+        using var scheduler = await BuildAsync(tasks, TimeSpan.Zero);
+
+        try
+        {
+            // Act
+            await scheduler.PassAsync(Ct);
+
+            // Assert: two run, the third waits for a slot, and runs once one frees.
+            (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue("the first task did not start");
+            (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue("the second task did not start");
+            (await barrier.Running.WaitAsync(TimeSpan.FromMilliseconds(300), Ct)).ShouldBeFalse("a third timer task ran beside two");
+
+            barrier.CanFinish.Release();
+            (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue("the third task did not run once a slot freed");
+        }
+        finally
+        {
+            barrier.CanFinish.Release(3);
+            foreach (var task in tasks)
+            {
+                if (scheduler.RunningTask(task.Name) is { } running)
+                {
+                    await running;
+                }
+            }
+        }
+
+        tasks.Sum(x => x.Runs).ShouldBe(3);
+    }
+
+    [TimedFact]
+    public async Task PassAsync_TimerSlotsFull_SignalDrivenTaskStillRuns()
+    {
+        // Arrange: both timer slots held by pinned runs, and a signal-driven task (the Orchestrator's kind) due.
+        var barrier = new BarrierSignal();
+        var pinned = new[] { new SlotTask("slot-a", barrier), new SlotTask("slot-b", barrier) };
+        var signaled = new SignaledTask(TimeSpan.FromHours(1));
+        using var scheduler = await BuildAsync([.. pinned, signaled], TimeSpan.Zero);
+
+        try
+        {
+            // Act
+            await scheduler.PassAsync(Ct);
+            (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue("the first timer task did not start");
+            (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue("the second timer task did not start");
+
+            // Assert: it is on the job path and does not wait for a timer slot.
+            (await signaled.Ran.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue("the signal-driven task waited behind the timer tasks");
+        }
+        finally
+        {
+            barrier.CanFinish.Release(2);
+            foreach (var task in pinned)
+            {
+                if (scheduler.RunningTask(task.Name) is { } running)
+                {
+                    await running;
+                }
+            }
+        }
+    }
+
+    [TimedFact]
     public async Task PassAsync_SignalWhileTheTaskRunsHere_RunsItAgainRightAfter()
     {
         var task = new PinnedTask(TimeSpan.FromHours(1));
@@ -266,19 +463,32 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
 
         var provider = services.BuildServiceProvider();
 
+        // Each scheduler is a live server, so two of them see each other in the claim's liveness check.
+        var serverId = await AddServerAsync();
         var scopes = provider.GetRequiredService<IServiceScopeFactory>();
         var scheduler = new ClusterTaskScheduler<TestContext>(
             tasks.Select(ServerTaskInfo.From),
             new ServerTaskRunner<TestContext>(scopes, new NoopLockProvider()),
             scopes,
             time ?? TimeProvider.System,
-            Guid.NewGuid(),
+            serverId,
             NullLogger.Instance,
             signalInterval,
             TimeSpan.FromMinutes(5));
         await scheduler.RegisterAsync(Ct);
 
         return scheduler;
+    }
+
+    // A live server row (rule 6.23 liveness is read on the database clock; the window is five minutes).
+    private async Task<Guid> AddServerAsync()
+    {
+        var id = Guid.NewGuid();
+        await using var ctx = _fixture.CreateContext();
+        ctx.Set<Server>().Add(new Server { Id = id, StartedTime = DateTime.UtcNow, LastHeartbeatTime = DateTime.UtcNow, CoordinationVersion = ServerCoordination.LeaseVersion });
+        await ctx.SaveChangesAsync(Ct);
+
+        return id;
     }
 
     private static async Task RunOnceAsync(ClusterTaskScheduler<TestContext> scheduler, string name)
@@ -350,6 +560,31 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
         }
     }
 
+    // A timer-only task pinned in its run by a barrier shared with others, under a lock key of its own.
+    private sealed class SlotTask(string name, BarrierSignal barrier) : IServerTask
+    {
+        private int _runs;
+
+        public int Runs => Volatile.Read(ref _runs);
+
+        public string Name => name;
+
+        public string? LockKey => "warp:test:slot:" + name;
+
+        public TimeSpan? DefaultInterval => TimeSpan.FromHours(1);
+
+        public bool RerunImmediately => false;
+
+        public async Task<string?> ExecuteAsync(CancellationToken ct)
+        {
+            Interlocked.Increment(ref _runs);
+            barrier.Running.Release();
+            await barrier.CanFinish.WaitAsync(ct);
+
+            return null;
+        }
+    }
+
     private sealed class IdleTask(TimeSpan interval) : IServerTask
     {
         public const string TaskName = "idle";
@@ -394,6 +629,33 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
         {
             Interlocked.Increment(ref _runs);
             Ran.Release();
+
+            return Task.FromResult<string?>(null);
+        }
+    }
+
+    // Records, per run, whether the runner said its schedule started it.
+    private sealed class ScheduleAwareTask : IServerTask, IScheduledRunAware
+    {
+        public const string TaskName = "schedule-aware";
+
+        private bool _scheduled;
+
+        public ConcurrentQueue<bool> Runs { get; } = new();
+
+        public string Name => TaskName;
+
+        public string? LockKey => ClusterTaskSchedulerTestsBase.TaskLockKey;
+
+        public TimeSpan? DefaultInterval => TimeSpan.FromHours(1);
+
+        public IEnumerable<ServerTaskSignal> Signals => [ServerTaskSignal.JobFinalized];
+
+        public void BeginRun(bool scheduled) => _scheduled = scheduled;
+
+        public Task<string?> ExecuteAsync(CancellationToken ct)
+        {
+            Runs.Enqueue(_scheduled);
 
             return Task.FromResult<string?>(null);
         }

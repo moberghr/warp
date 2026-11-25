@@ -29,8 +29,10 @@ namespace Warp.Worker;
 /// <summary>
 /// Worker that receives pre-fetched jobs from a dispatcher channel.
 /// Pure executor — handles execution and completion only. Orchestration handled by Orchestrator.
-/// Completions go to the group's <see cref="CompletionFlusher{TContext}"/>, which writes them; the worker
-/// never waits on that write (rule 6.13).
+/// Completions go to the group's <see cref="CompletionFlusher{TContext}"/>, which writes them (rule 6.13). The
+/// worker does not wait on that write, except as backpressure: once the group holds
+/// <c>CompletionBatch.BackpressureThreshold</c> unwritten completions (4 x CompletionBatchSize, never
+/// fewer than 200), it waits for the write in flight before taking its next job.
 /// </summary>
 public class WarpDispatcherWorker<TContext> : BackgroundService
     where TContext : DbContext
@@ -146,7 +148,8 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         return Stopwatch.GetTimestamp();
     }
 
-    private ValueTask AddCompletionAsync(PendingCompletion completion) => _flusher.AddAsync(completion);
+    private ValueTask AddCompletionAsync(PendingCompletion completion, CancellationToken cancellationToken) =>
+        _flusher.AddAsync(completion, cancellationToken);
 
     private async Task ProcessJob(Job job, CancellationToken cancellationToken)
     {
@@ -325,7 +328,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
 
             var (counters, finalLogs) = BuildFinalization(job, null, durationMs, successOutcome, totalDeadlineUtc, incomingAttempts);
             var logs = CollectLogs(finalLogs, logCollector, progressCollector, processingLog).ToArray();
-            await AddCompletionAsync(new PendingCompletion(job, owner, counters, logs));
+            await AddCompletionAsync(new PendingCompletion(job, owner, counters, logs), cancellationToken);
         }
         catch (OperationCanceledException) when (jobCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
         {
@@ -350,6 +353,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             job.CancellationMode = CancellationMode.None;
             job.CurrentWorkerId = null;
             job.LastKeepAlive = null;
+            job.RunId = null;
 
             // Same as the success and failure arms: the policy stamped for this attempt (§8.8) lives only
             // in the handler-scope context until a finalizing write persists it. Dropping it here would
@@ -378,7 +382,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
                 WorkerId = _workerId,
             };
             var logs = CollectLogs([cancelLog], logCollector, progressCollector, processingLog).ToArray();
-            await AddCompletionAsync(new PendingCompletion(job, owner, cancelCounters, logs));
+            await AddCompletionAsync(new PendingCompletion(job, owner, cancelCounters, logs), cancellationToken);
         }
         catch (Exception e)
         {
@@ -457,7 +461,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
                 ? ErrorOccurrenceFactory.FromException(ErrorSource.Job, e, culprit, job.TraceId, _configuration.ApplicationName, _timeProvider.GetUtcNow().UtcDateTime, _configuration.ApplicationVersion, _configuration.ApplicationEnvironment)
                 : null;
 
-            await AddCompletionAsync(new PendingCompletion(job, owner, counters, logs, occurrence));
+            await AddCompletionAsync(new PendingCompletion(job, owner, counters, logs, occurrence), cancellationToken);
         }
         finally
         {
@@ -547,9 +551,11 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
         var claimedWorkerId = job.CurrentWorkerId;
         var claimedKeepAlive = job.LastKeepAlive;
+        var runId = job.RunId;
         var stillOurs = await context.Set<Job>()
             .Where(x => x.Id == job.Id)
             .Where(x => x.CurrentState == State.Processing)
+            .Where(x => x.RunId == runId)
             .Where(x => x.CurrentWorkerId == claimedWorkerId)
             .Where(x => x.LastKeepAlive == claimedKeepAlive)
             .ExecuteUpdateAsync(
@@ -595,6 +601,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         job.CancellationMode = CancellationMode.None;
         job.CurrentWorkerId = null;
         job.LastKeepAlive = null;
+        job.RunId = null;
 
         var now = _timeProvider.GetUtcNow().UtcDateTime;
         var hourSuffix = now.ToString("yyyy-MM-dd-HH", CultureInfo.InvariantCulture);

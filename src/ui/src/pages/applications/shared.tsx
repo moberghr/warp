@@ -4,7 +4,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { RelativeTime } from '@/components/RelativeTime';
 import { statusDotColor } from '@/lib/liveness';
 import { useInstanceLive } from '@/hooks/useTicking';
-import { formatCpu, formatMem, type NormalizedInstance } from './instanceModel';
+import { clockSkewLabel, formatCpu, formatMem, type NormalizedInstance } from './instanceModel';
 
 /**
  * Green when live, amber when paused, red when stale/dead — re-derived every second from the heartbeat
@@ -61,6 +61,11 @@ export function InstancesTable({ instances }: { instances: NormalizedInstance[] 
                 <StatusDot isLive={x.isLive} pausedAt={x.pausedAt} lastHeartbeatAt={x.lastHeartbeatAt} />
                 {x.machineName}
                 {x.pausedAt && <Badge variant="outline" className="text-amber-600 border-amber-300 text-xs">Paused</Badge>}
+                {clockSkewLabel(x.clockOffsetMs) && (
+                  <Badge variant="outline" className="text-amber-600 border-amber-300 text-xs" title="This server's clock is off from the database's. Warp corrects for it; fix the clock (NTP).">
+                    {clockSkewLabel(x.clockOffsetMs)}
+                  </Badge>
+                )}
               </Link>
             </TableCell>
             <TableCell><KindBadge isServer={x.isServer} /></TableCell>

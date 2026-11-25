@@ -96,6 +96,7 @@ Every event is a redaction-safe snapshot: **identity and metadata only, never a 
 | `WebhookDeliveryExhausted` | `WebhookDeliveryExhaustedEvent` | a webhook delivery exhausts its retry schedule without success | Warning |
 | `SagaForceCompleted` | `SagaForceCompletedEvent` | an operator force-completes (dead-letters) a saga | Info |
 | `InstanceDown` | `InstanceDownEvent` | an application instance or worker server is reaped by the stale sweep (`IsServer` distinguishes them) | Warning |
+| `ClockSkewDetected` | `ClockSkewDetectedEvent` | a server's heartbeat finds its clock further from the database's than `ClockSkewWarningThreshold` (once per excursion; `OffsetMs` is database minus server). Warp corrects for the offset, so this asks you to fix the clock, not the data | Warning |
 
 Two enum values are **reserved but not yet emitted** — a host can switch on them safely; they simply never arrive until a later release wires them:
 

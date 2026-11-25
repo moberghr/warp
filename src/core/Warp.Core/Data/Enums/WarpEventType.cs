@@ -31,6 +31,9 @@ public enum WarpEventType
 
     /// <summary>A lossy recording pipeline (adapter/endpoint/client) is dropping records because its channel is saturated — emitted per-process by the <c>DroppedRecordReporter</c>, throttled.</summary>
     RecordsDropped = 8,
+
+    /// <summary>A server's clock is further from the database's than <c>ClockSkewWarningThreshold</c> — raised by its heartbeat, once per excursion (#350).</summary>
+    ClockSkewDetected = 9,
 }
 
 /// <summary>

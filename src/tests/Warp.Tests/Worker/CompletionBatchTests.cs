@@ -231,6 +231,97 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task AddAsync_GroupHoldsTheBackpressureThreshold_WaitsUntilTheWriteInFlightEnds()
+    {
+        // Arrange — a threshold of four unwritten completions. The first is drained into
+        // a write that hangs; the next three are buffered behind it and return at once; the fourth brings the
+        // group to the threshold and must wait for the hung write, not grow the buffer further (#348).
+        var entered = new SemaphoreSlim(0);
+        var release = new TaskCompletionSource();
+        async Task<IReadOnlyCollection<Guid>> Hang(DbContext context, IReadOnlyList<Job> jobs, IReadOnlyList<JobRunOwner> owners, IReadOnlyList<JobLog> logs, CancellationToken ct)
+        {
+            entered.Release();
+            await release.Task.WaitAsync(ct);
+
+            return [];
+        }
+
+        var batch = new CompletionBatch(CreateScopeFactory(), _time, NullLogger.Instance, NoDeadlocks, batchSize: 1, flushInterval: TimeSpan.FromMinutes(5), _counterBuffer, Hang, backpressureThreshold: 4);
+        var availability = new DispatcherWorkerAvailability(workerCount: 4, prefetchCount: 0);
+        var flusher = new CompletionFlusher<TestContext>(batch, availability, _time, new ServerTaskSignals<TestContext>(), new NullNotificationTransport(), NullLogger.Instance, DispatcherDiagnostics.GroupTag(Guid.Empty));
+        flusher.Start();
+        try
+        {
+            await flusher.AddAsync(Phantom(), Xunit.TestContext.Current.CancellationToken);
+            (await entered.WaitAsync(TimeSpan.FromSeconds(5), Xunit.TestContext.Current.CancellationToken)).ShouldBeTrue("the write never started");
+            for (var i = 0; i < 3; i++)
+            {
+                // Below the threshold: returns without waiting for the hung write (a wait would time the test out).
+                await flusher.AddAsync(Phantom(), Xunit.TestContext.Current.CancellationToken);
+            }
+
+            // Act
+            var waiting = flusher.AddAsync(Phantom(), Xunit.TestContext.Current.CancellationToken).AsTask();
+
+            // Assert
+            waiting.IsCompleted.ShouldBeFalse("the worker took its next job with the group at the threshold");
+            release.TrySetResult();
+            (await Task.WhenAny(waiting, Task.Delay(TimeSpan.FromSeconds(5), Xunit.TestContext.Current.CancellationToken))).ShouldBe(waiting, "the worker was not released when the write ended");
+        }
+        finally
+        {
+            release.TrySetResult();
+            await flusher.StopAsync(Xunit.TestContext.Current.CancellationToken);
+        }
+    }
+
+    [TimedFact]
+    public async Task AddAsync_WaitingOnAHungWrite_ReturnsWhenTheWorkerStops()
+    {
+        // Arrange — the workers are stopped before the flusher, so a worker held by backpressure must let go
+        // on its stopping token, or a hung database would hang the shutdown. Its completion stays buffered.
+        var entered = new SemaphoreSlim(0);
+        var release = new TaskCompletionSource();
+        async Task<IReadOnlyCollection<Guid>> Hang(DbContext context, IReadOnlyList<Job> jobs, IReadOnlyList<JobRunOwner> owners, IReadOnlyList<JobLog> logs, CancellationToken ct)
+        {
+            entered.Release();
+            await release.Task.WaitAsync(ct);
+
+            return [];
+        }
+
+        var batch = new CompletionBatch(CreateScopeFactory(), _time, NullLogger.Instance, NoDeadlocks, batchSize: 1, flushInterval: TimeSpan.FromMinutes(5), _counterBuffer, Hang, backpressureThreshold: 4);
+        var availability = new DispatcherWorkerAvailability(workerCount: 4, prefetchCount: 0);
+        var flusher = new CompletionFlusher<TestContext>(batch, availability, _time, new ServerTaskSignals<TestContext>(), new NullNotificationTransport(), NullLogger.Instance, DispatcherDiagnostics.GroupTag(Guid.Empty));
+        flusher.Start();
+        using var stopping = new CancellationTokenSource();
+        try
+        {
+            await flusher.AddAsync(Phantom(), stopping.Token);
+            (await entered.WaitAsync(TimeSpan.FromSeconds(5), Xunit.TestContext.Current.CancellationToken)).ShouldBeTrue("the write never started");
+            for (var i = 0; i < 3; i++)
+            {
+                await flusher.AddAsync(Phantom(), stopping.Token);
+            }
+
+            var waiting = flusher.AddAsync(Phantom(), stopping.Token).AsTask();
+            waiting.IsCompleted.ShouldBeFalse();
+
+            // Act
+            await stopping.CancelAsync();
+
+            // Assert
+            (await Task.WhenAny(waiting, Task.Delay(TimeSpan.FromSeconds(5), Xunit.TestContext.Current.CancellationToken))).ShouldBe(waiting, "the stopping worker kept waiting on the hung write");
+            batch.Count.ShouldBe(4);
+        }
+        finally
+        {
+            release.TrySetResult();
+            await flusher.StopAsync(Xunit.TestContext.Current.CancellationToken);
+        }
+    }
+
+    [TimedFact]
     public async Task StopAsync_ShutdownTokenAlreadyFired_StillWritesWhatIsBuffered()
     {
         // Arrange — the host's token has often fired by the time the workers have stopped; the final flush

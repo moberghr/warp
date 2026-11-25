@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Warp.Core;
 using Warp.Core.Data.Entities;
@@ -77,7 +78,7 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
 
     public StaleJobRecovery(
         IWarpServerContext serverContext,
-        TimeProvider time,
+        [FromKeyedServices(DatabaseClock.Key)] TimeProvider time,
         IWarpSqlQueries<TContext> sqlQueries,
         IOptions<WarpServerConfiguration> configuration,
         IWarpNotificationTransport notificationTransport,
@@ -140,6 +141,7 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
         {
             job.CurrentWorkerId = null;
             job.LastKeepAlive = null;
+            job.RunId = null;
 
             if (job.CancellationMode != CancellationMode.None)
             {

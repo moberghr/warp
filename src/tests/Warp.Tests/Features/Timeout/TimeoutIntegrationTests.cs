@@ -186,9 +186,7 @@ public abstract class TimeoutIntegrationTestsBase : IntegrationTestBase
         await WaitForJobStateWithFakeTime(server, time, jobId, State.Deleted);
 
         var ctx = Fixture.CreateContext();
-        var processingLogs = await ctx.Set<JobLog>()
-            .CountAsync(x => x.JobId == jobId && x.EventType == "Processing", Xunit.TestContext.Current.CancellationToken);
-        processingLogs.ShouldBe(1);
+        await server.WaitForJobLogCount(jobId, "Processing", 1);
 
         // No retry → no per-retry Scheduled/Enqueued log was emitted by the worker.
         var requeuedLogs = await ctx.Set<JobLog>()
@@ -243,9 +241,7 @@ public abstract class TimeoutIntegrationTestsBase : IntegrationTestBase
         await WaitForJobStateWithFakeTime(server, time, jobId, State.Failed);
 
         var ctx = Fixture.CreateContext();
-        var processingLogs = await ctx.Set<JobLog>()
-            .CountAsync(x => x.JobId == jobId && x.EventType == "Processing", Xunit.TestContext.Current.CancellationToken);
-        processingLogs.ShouldBe(3);
+        await server.WaitForJobLogCount(jobId, "Processing", 3);
 
         // 2 retries → 2 per-retry Scheduled/Enqueued logs (RetryDelays = [0] → immediate, Enqueued).
         var requeuedLogs = await ctx.Set<JobLog>()
@@ -285,9 +281,7 @@ public abstract class TimeoutIntegrationTestsBase : IntegrationTestBase
         var job = await ctx.Set<Job>().FirstAsync(x => x.Id == jobId, Xunit.TestContext.Current.CancellationToken);
         job.CurrentState.ShouldBe(State.Failed);
 
-        var processingLogs = await ctx.Set<JobLog>()
-            .CountAsync(x => x.JobId == jobId && x.EventType == "Processing", Xunit.TestContext.Current.CancellationToken);
-        processingLogs.ShouldBe(3);
+        await server.WaitForJobLogCount(jobId, "Processing", 3);
 
         var failedLog = await ctx.Set<JobLog>()
             .Where(x => x.JobId == jobId && x.EventType == "Failed")

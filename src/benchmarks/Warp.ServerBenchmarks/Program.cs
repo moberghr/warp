@@ -307,6 +307,8 @@ else if (args.Length > 0 && string.Equals(args[0], "compare-bdn", StringComparis
         }
     }
 
+    PerfCompare.DatabaseLabel = Value(args, "--database=");
+    PerfCompare.BaseLabel = Value(args, "--base-label=");
     Environment.ExitCode = PerfCompare.RunBdn(bdnBase, bdnHead, bdnTolerance, bdnSummary, bdnRelease);
 }
 else if (args.Length > 0 && string.Equals(args[0], "export-bdn", StringComparison.OrdinalIgnoreCase))
@@ -314,6 +316,7 @@ else if (args.Length > 0 && string.Equals(args[0], "export-bdn", StringCompariso
     var results = Value(args, "--results=") ?? string.Empty;
     var output = Value(args, "--out=") ?? "export.json";
 
+    PerfCompare.DatabaseLabel = Value(args, "--database=");
     Environment.ExitCode = PerfCompare.ExportBdn(results, output);
 }
 else if (args.Length > 0 && string.Equals(args[0], "record-release", StringComparison.OrdinalIgnoreCase))
@@ -323,6 +326,12 @@ else if (args.Length > 0 && string.Equals(args[0], "record-release", StringCompa
         Value(args, "--release=") ?? string.Empty,
         Value(args, "--commit=") ?? string.Empty,
         Value(args, "--out=") ?? "benchmarks.json");
+}
+else if (args.Length > 0 && string.Equals(args[0], "medians-bdn", StringComparison.OrdinalIgnoreCase))
+{
+    Environment.ExitCode = PerfCompare.Medians(
+        Value(args, "--results=") ?? string.Empty,
+        Value(args, "--out=") ?? "medians.md");
 }
 else if (args.Length > 0 && string.Equals(args[0], "history-bdn", StringComparison.OrdinalIgnoreCase))
 {

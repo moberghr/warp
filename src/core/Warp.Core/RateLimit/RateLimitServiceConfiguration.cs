@@ -3,6 +3,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Warp.Core.Data;
 using Warp.Core.Handlers;
+using Warp.Core.Helper;
 
 namespace Warp.Core.RateLimit;
 
@@ -28,9 +29,17 @@ public static class RateLimitServiceConfiguration
 
         // The pipeline's store and resolver use Warp's own context, opened only for a job with a rate
         // limit (rule 6.17); the admin manager above stays on TContext for AddWarp-only hosts (#344).
+        // A host that registered its own IRateLimitManager decides the limit through it, as in 7.x (#349),
+        // resolved only when a job with a rate limit asks.
         builder.Services.TryAddScoped<DeferredWarpContext>();
         builder.Services.AddScoped<IRateLimitStore, RateLimitStore>();
-        builder.Services.AddScoped(x => new RateLimitResolver(x.GetRequiredService<DeferredWarpContext>()));
+        var manager = new ReplacedRegistration(
+            builder.Services,
+            typeof(IRateLimitManager),
+            typeof(GateInvalidatingRateLimitManager<TContext>));
+        builder.Services.AddScoped(x => manager.IsReplaced
+            ? new RateLimitResolver((name, ct) => x.GetRequiredService<IRateLimitManager>().GetLimit(name, ct))
+            : new RateLimitResolver(x.GetRequiredService<DeferredWarpContext>()));
 
         // Constraint-split shims: only job and message pipelines compose rate limiting.
         builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(RateLimitJobPipelineBehavior<,>));

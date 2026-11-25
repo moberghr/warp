@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Warp.Core;
 using Warp.Core.Data.Entities;
@@ -27,7 +28,7 @@ public sealed class ServerCleanup<TContext> : IServerTask
 
     public ServerCleanup(
         IWarpServerContext serverContext,
-        TimeProvider time,
+        [FromKeyedServices(DatabaseClock.Key)] TimeProvider time,
         IWarpSqlQueries<TContext> sqlQueries,
         IOptions<WarpServerConfiguration> configuration,
         WarpNotifierDispatcher notifier)

@@ -52,7 +52,12 @@ internal sealed class CounterBufferFlusher<TContext> : BackgroundService
             try
             {
                 await Task.Delay(interval, stoppingToken);
-                await FlushOnceAsync(stoppingToken);
+
+                // Not on the stopping token: a write that has already committed can still surface the
+                // cancellation, the increments then go back into the buffer as if it had failed, and the final
+                // flush in StopAsync writes them a second time (every counter of the interval doubled, seen on
+                // CI). The stop waits for this write instead; the command timeout bounds it.
+                await FlushOnceAsync(CancellationToken.None);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {

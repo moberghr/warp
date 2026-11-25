@@ -23,6 +23,9 @@ public sealed class InstanceView
 
     public double? CpuUsagePercent { get; init; }
 
+    /// <summary>Servers only: the database clock minus the server's clock, in ms, from its last heartbeat (#350). Null for a non-server instance.</summary>
+    public double? ClockOffsetMs { get; init; }
+
     public long? MemoryWorkingSetBytes { get; init; }
 
     /// <summary>True for a <c>Server</c> row (job worker / server-task host); false for a non-server <c>ApplicationInstance</c>.</summary>

@@ -1,23 +1,25 @@
 name: Performance
 
-# Compares THIS pull request against its merge base, both measured on the SAME runner in the SAME
-# job, interleaved. Never against a stored historical number: that comparison measures the runners.
+# Run by hand (Actions > Performance > Run workflow, or `gh workflow run perf.yml --ref <branch>`), when
+# numbers are wanted. NOT on pull requests: 38 cells with several gates each went red on most pushes for
+# reasons that were not regressions (a harness query picked as a deadlock victim, WAL moved by checkpoint
+# timing, one flaky cell among 38), and every push cancelled the run before it. A red check that does not
+# mean a regression teaches people to ignore it.
+#
+# Compares the chosen head against a base (default: its merge base with main), both measured on the SAME
+# runner in the SAME job, one after the other (each side on a fresh database), the order alternating from
+# run to run so neither side is always the one that runs on a warmer machine. Never against a stored
+# historical number: that comparison measures the runners.
 #
 # What is gated and what is not is a measurement question, not a policy preference — see
 # docs/plans/2026-09-22-performance-ci.md. Short version: counts are gated because they reproduce to
 # a few percent; server-arm timings are reported because their measured spread reached 417%.
 
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - 'src/core/**'
-      - 'src/benchmarks/**'
-      - '.github/workflows/perf.yml'
   workflow_dispatch:
     inputs:
       base_ref:
-        description: 'Baseline commit, tag or branch (default: the merge base)'
+        description: 'Baseline commit, tag or branch, e.g. 7.7.0 to compare everything since that release (default: the merge base with main)'
         required: false
         type: string
       head_ref:
@@ -28,6 +30,11 @@ on:
         description: 'Measure this release tag with the current benchmarks and attach the results to it (no comparison)'
         required: false
         type: string
+      repeats:
+        description: 'Measure every case this many times (1 to 5) and report the medians. 1 checks a change for a regression; 3 or more for numbers that will be published or for timings'
+        required: false
+        default: '1'
+        type: string
   # A published release is measured and its results attached to it as benchmarks.json, which never
   # expires. Every later run compares against the latest of those, and charts them release over release.
   release:
@@ -36,9 +43,11 @@ on:
 env:
   DOTNET_VERSION: '10.0'
 
+# Each run is asked for by hand, so one never cancels another (two comparisons of one branch, say against
+# main and against the last release, run side by side).
 concurrency:
-  group: perf-${{ github.ref }}
-  cancel-in-progress: true
+  group: perf-${{ github.run_id }}
+  cancel-in-progress: false
 
 jobs:
   # The two commits under comparison, resolved once. Every benchmark job measures the same pair, so
@@ -51,6 +60,10 @@ jobs:
       base: ${{ steps.refs.outputs.base }}
       record: ${{ steps.refs.outputs.record }}
       latest_release: ${{ steps.refs.outputs.latest_release }}
+      base_label: ${{ steps.refs.outputs.base_label }}
+      base_is_release: ${{ steps.refs.outputs.base_is_release }}
+      repeats: ${{ steps.refs.outputs.repeats }}
+      repeat_count: ${{ steps.refs.outputs.repeat_count }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -80,8 +93,6 @@ jobs:
 
           if [ -n "${{ inputs.base_ref }}" ]; then
             BASE_SHA=$(resolve "${{ inputs.base_ref }}")
-          elif [ -n "${{ github.base_ref }}" ]; then
-            BASE_SHA=$(git merge-base "origin/${{ github.base_ref }}" "$HEAD_SHA")
           else
             BASE_SHA=$(git merge-base origin/main "$HEAD_SHA")
           fi
@@ -90,10 +101,37 @@ jobs:
           echo "base=$BASE_SHA" >> "$GITHUB_OUTPUT"
           echo "record=$RECORD" >> "$GITHUB_OUTPUT"
 
+          # What the base is, named in every section heading and in the report header when it was
+          # chosen by hand (a release tag, another branch): "7.7.0 (74443f8c)". Empty for the default
+          # merge base, whose sections stay as they were.
+          if [ -n "${{ inputs.base_ref }}" ]; then
+            echo "base_label=${{ inputs.base_ref }} ($(git rev-parse --short=8 "$BASE_SHA"))" >> "$GITHUB_OUTPUT"
+          else
+            echo "base_label=" >> "$GITHUB_OUTPUT"
+          fi
+
           # The release a run is also compared with, for creep that each change's own gate misses.
           # Empty when there is none yet; the comparison is then simply absent.
           LATEST=$(gh release view --json tagName -q .tagName 2>/dev/null || true)
           echo "latest_release=$LATEST" >> "$GITHUB_OUTPUT"
+
+          # A run whose base IS the latest release (base_ref=7.7.0) already compares the head with that
+          # release, measured side by side on one runner, which is the better comparison: the recorded
+          # numbers came from another runner. The since-release lines would only repeat it less
+          # reliably, so they are left out and the report says why.
+          BASE_IS_RELEASE=false
+          if [ -n "$LATEST" ] && [ "$(git rev-parse --verify --quiet "$LATEST^{commit}" || true)" = "$BASE_SHA" ]; then
+            BASE_IS_RELEASE=true
+          fi
+          echo "base_is_release=$BASE_IS_RELEASE" >> "$GITHUB_OUTPUT"
+
+          # How many times every case is measured, as the list the benchmark matrix runs over. One in record
+          # mode whatever was asked: a release's record holds each case once.
+          REPEATS="${{ inputs.repeats }}"
+          case "$REPEATS" in 1|2|3|4|5) ;; "") REPEATS=1 ;; *) echo "::error::repeats must be 1 to 5, got '$REPEATS'"; exit 1 ;; esac
+          if [ -n "$RECORD" ]; then REPEATS=1; fi
+          echo "repeat_count=$REPEATS" >> "$GITHUB_OUTPUT"
+          echo "repeats=[$(seq -s, 1 "$REPEATS")]" >> "$GITHUB_OUTPUT"
         env:
           GH_TOKEN: ${{ github.token }}
 
@@ -101,9 +139,12 @@ jobs:
   # BenchmarkDotNet, gating what was calibrated to survive a shared runner: statements per job at 5%,
   # WAL bytes per job at 10% (PostgreSQL), and throughput only on a collapse to a third. Each line is
   # three to four times the worst noise from comparing main with itself over three runs. Allocations
-  # are reported (4.9% between identical builds). Buffers per job move up to 55% between identical
-  # builds, so they fail only on a blow-up of five times or more: every jump that size so far was a
-  # query plan gone wrong, which the other three gates let through. A benchmark that produced no
+  # and database time are reported (allocations moved 4.9% between identical builds; database time has
+  # not been calibrated). Buffers per job move up to 55% between identical builds, so they fail only on
+  # a blow-up of five times or more: every jump that size so far was a query plan gone wrong, which the
+  # other three gates let through. Measurements not yet calibrated by no-op runs (SQL Server's per-job
+  # rows, now counted from Query Store; the two-server, recurring and background-load scenarios) are
+  # shown and fail nothing (.claude/rules/performance.md lists them). A benchmark that produced no
   # measurement on either side fails the job instead of passing silently.
   #
   # PostgreSQL is shared between the two runs and named in the environment rather than started per
@@ -112,7 +153,7 @@ jobs:
   # that has to read pg_stat_statements from it.
   # ---------------------------------------------------------------------------------------------
   benchmarks:
-    name: Benchmarks (${{ matrix.benchmark.name }})
+    name: Benchmarks (${{ matrix.benchmark.name }}, ${{ matrix.benchmark.sqlserver && matrix.db.label || matrix.db.postgres_label }}${{ needs.refs.outputs.repeat_count != '1' && format(', run {0}', matrix.repeat) || '' }})
     needs: refs
 
     # Pinned, not ubuntu-latest. This workflow measures, and the latest label migrates to Ubuntu 26 in
@@ -126,19 +167,30 @@ jobs:
     # job took 69 minutes against the lab's 12 - and a migration that trades a twelve-minute gate for a
     # sixty-nine-minute one is not an improvement whatever it measures. Split across jobs they run in
     # parallel and the wall clock is the slowest single benchmark rather than the sum.
-    # The slowest is now about 16 minutes (idle) and the rest take 4 to 10, so 30 is a hang, not a
+    # The slowest is now about 20 minutes (idle-2-servers) and the rest take 4 to 12, so 30 is a hang, not a
     # slow run. It was 45 while the rate-limit scenario took 41 of them waiting out real windows.
     timeout-minutes: 30
 
     strategy:
       fail-fast: false
       matrix:
+        # Scenarios with a SQL Server class beside the PostgreSQL one (`<Name>SqlServerBenchmark`, a subclass
+        # so the PostgreSQL case keeps the full name its release history is recorded under) run both in one
+        # job: the filter's `*` between the name and `Benchmark` matches both classes and nothing else. Each
+        # adds a few minutes to its job; the slowest of them, retries and fan-out, were about 7.5 minutes with
+        # PostgreSQL alone and are estimated at 11 to 12 with both, well inside the timeout. A job that would
+        # pass ~25 minutes gets a separate `<name>-sqlserver` entry instead.
         benchmark:
           - name: dispatcher
             filter: '*DispatcherModeBenchmark*'
             sqlserver: true
+          # Four cases (both worker modes, both providers) of 2,000 jobs on two servers; estimated 10 minutes.
+          - name: two-servers
+            filter: '*.TwoServersUnderLoadBenchmark.*'
+            sqlserver: true
           - name: completion-batch
-            filter: '*CompletionBatchBenchmark*'
+            filter: '*CompletionBatch*Benchmark*'
+            sqlserver: true
           - name: payload
             filter: '*PayloadSizeBenchmark*'
           - name: concurrency
@@ -146,26 +198,70 @@ jobs:
           - name: rate-limit
             filter: '*RateLimitBenchmark*'
           - name: failure-path
-            filter: '*FailurePathBenchmark*'
+            filter: '*FailurePath*Benchmark*'
+            sqlserver: true
           - name: publish
             filter: '*PublishBenchmark*'
           - name: message-routing
-            filter: '*MessageRoutingBenchmark*'
+            filter: '*MessageRouting*Benchmark*'
+            sqlserver: true
           - name: scheduled-activation
             filter: '*ScheduledActivationBenchmark*'
           # Exact class filters: '*BatchBenchmark*' also matched CompletionBatchBenchmark.
           - name: retries
-            filter: '*.RetryBenchmark.*'
+            filter: '*.Retry*Benchmark.*'
+            sqlserver: true
+          # Two cases of 500 firings, at most a second's wait for the scheduler's tick each; estimated 7 minutes.
+          - name: recurring
+            filter: '*.RecurringJobsBenchmark.*'
+            sqlserver: true
+          # Four cases of 100 one-second jobs, 20 at a time (about 5 s an operation); estimated 12 minutes.
+          - name: long-running
+            filter: '*.LongRunningJobsBenchmark.*'
+            sqlserver: true
           - name: large-table
             filter: '*.LargeTableBenchmark.*'
+          # Six cases (three loads, both providers) of 2,000 jobs; estimated 12 minutes.
+          - name: background-load
+            filter: '*.BackgroundLoadBenchmark.*'
+            sqlserver: true
           - name: batches
-            filter: '*.BatchBenchmark.*'
+            filter: '*.Batch*Benchmark.*'
+            sqlserver: true
           - name: fan-out
-            filter: '*.FanOutBenchmark.*'
+            filter: '*.FanOut*Benchmark.*'
+            sqlserver: true
           - name: idle
             filter: '*.IdleServerBenchmark.*'
             sqlserver: true
+          # Its own job: idle is the slowest benchmark (about 16 minutes for both providers), so the
+          # two-server case cannot share the job inside the timeout.
+          - name: idle-2-servers
+            filter: '*.IdleTwoServersBenchmark.*'
+            sqlserver: true
+        # The database versions, a matrix dimension rather than a benchmark parameter: each job starts one
+        # PostgreSQL (and, with sqlserver: true, one SQL Server) of the pair, so a PostgreSQL-only scenario runs
+        # once per PostgreSQL version and a two-provider scenario once per PAIR. Paired, not crossed (17 with
+        # 2022, 18 with 2025): a cross product would double the SQL Server jobs to measure combinations that
+        # never meet, the two servers being separate instances. Every image pinned to an exact tag, never
+        # latest: a new upstream release must not move the numbers unannounced. Base and head run on the same
+        # version inside a job, and exports and release records carry the label, so every comparison is like
+        # with like.
+        # The `repeats` input: every cell of the matrix once per repeat, each on a runner of its own, so the
+        # report can give medians and show how far the repeats were apart.
+        repeat: ${{ fromJSON(needs.refs.outputs.repeats) }}
+        db:
+          - label: pg17+mssql2022
+            postgres_label: pg17
+            postgres: postgres:17.12
+            sqlserver: mcr.microsoft.com/mssql/server:2022-CU28-ubuntu-22.04
+          - label: pg18+mssql2025
+            postgres_label: pg18
+            postgres: postgres:18.7
+            sqlserver: mcr.microsoft.com/mssql/server:2025-CU11-ubuntu-22.04
     env:
+      # What this job measured on, in its section headings, its export and the release record.
+      DB_LABEL: ${{ matrix.benchmark.sqlserver && matrix.db.label || matrix.db.postgres_label }}
       WARP_BENCH_POSTGRES: "Host=localhost;Port=5432;Username=postgres;Password=postgres;Database=postgres"
       WARP_BENCH_SQLSERVER: "Server=localhost,1433;User Id=sa;Password=Warp!Bench1;TrustServerCertificate=True;Database=master"
     steps:
@@ -181,13 +277,51 @@ jobs:
       # One fresh container per side (the script replaces any previous one): see the script for why
       # sharing one between the two runs biased the comparison.
       - name: Start PostgreSQL
-        run: bash .github/scripts/start-bench-postgres.sh
+        run: bash .github/scripts/start-bench-postgres.sh "${{ matrix.db.postgres }}"
 
       # Started for every benchmark job, because the provider sweep is a benchmark PARAMETER and not a
       # matrix dimension: one BenchmarkDotNet process runs both sides, so both servers must be up.
       - name: Start SQL Server
         if: matrix.benchmark.sqlserver
-        run: bash .github/scripts/start-bench-sqlserver.sh
+        run: bash .github/scripts/start-bench-sqlserver.sh "${{ matrix.db.sqlserver }}"
+
+      # Which side runs first. The two run one after the other on one runner, and always head first meant any
+      # effect of going first or second (a warmer disk cache, a runner that slows down as the job goes on) was
+      # always on the same side. Odd run numbers measure the base first, even ones the head; within a run
+      # with repeats the order alternates from one repeat to the next, so its medians hold both orders.
+      - name: Choose the order of the two sides
+        id: order
+        run: |
+          if [ -z "${{ needs.refs.outputs.record }}" ] && [ $(( (${{ github.run_number }} + ${{ matrix.repeat }}) % 2 )) -eq 0 ]; then
+            echo "base_first=true" >> "$GITHUB_OUTPUT"
+            echo "Base first (run ${{ github.run_number }}, repeat ${{ matrix.repeat }})."
+          else
+            echo "base_first=false" >> "$GITHUB_OUTPUT"
+            echo "Head first (run ${{ github.run_number }}, repeat ${{ matrix.repeat }})."
+          fi
+
+      # The base, when it goes first. Same step as the one after the head below; see there.
+      - name: Run benchmarks on the base commit (first)
+        id: basefirst
+        if: steps.order.outputs.base_first == 'true'
+        continue-on-error: true
+        env:
+          NuGetAudit: 'false'
+        run: |
+          trap 'git checkout --no-overlay HEAD -- src/core' EXIT
+          git checkout --no-overlay ${{ needs.refs.outputs.base }} -- src/core
+          dotnet run -c Release --project src/benchmarks/Warp.ServerBenchmarks/Warp.ServerBenchmarks.csproj -- \
+            --filter '${{ matrix.benchmark.filter }}' \
+            --exporters json \
+            --artifacts "${{ github.workspace }}/bench/base"
+
+      - name: Start a fresh PostgreSQL for the head commit
+        if: steps.order.outputs.base_first == 'true'
+        run: bash .github/scripts/start-bench-postgres.sh "${{ matrix.db.postgres }}"
+
+      - name: Start a fresh SQL Server for the head commit
+        if: steps.order.outputs.base_first == 'true' && matrix.benchmark.sqlserver
+        run: bash .github/scripts/start-bench-sqlserver.sh "${{ matrix.db.sqlserver }}"
 
       # Only src/core is ever swapped, so the HARNESS is identical on both sides and the two numbers
       # differ by the library alone. That is what makes an arbitrary pair comparable: building each
@@ -215,16 +349,16 @@ jobs:
       # workflow keep the full audit. MSBuild reads the variable as a property, so it reaches
       # BenchmarkDotNet's child builds too.
       - name: Start a fresh PostgreSQL for the base commit
-        if: needs.refs.outputs.record == ''
-        run: bash .github/scripts/start-bench-postgres.sh
+        if: needs.refs.outputs.record == '' && steps.order.outputs.base_first != 'true'
+        run: bash .github/scripts/start-bench-postgres.sh "${{ matrix.db.postgres }}"
 
       - name: Start a fresh SQL Server for the base commit
-        if: needs.refs.outputs.record == '' && matrix.benchmark.sqlserver
-        run: bash .github/scripts/start-bench-sqlserver.sh
+        if: needs.refs.outputs.record == '' && steps.order.outputs.base_first != 'true' && matrix.benchmark.sqlserver
+        run: bash .github/scripts/start-bench-sqlserver.sh "${{ matrix.db.sqlserver }}"
 
       - name: Run benchmarks on the base commit
         id: basebench
-        if: needs.refs.outputs.record == ''
+        if: needs.refs.outputs.record == '' && steps.order.outputs.base_first != 'true'
         continue-on-error: true
         env:
           NuGetAudit: 'false'
@@ -237,7 +371,7 @@ jobs:
             --artifacts "${{ github.workspace }}/bench/base"
 
       - name: Fetch the latest release's results
-        if: needs.refs.outputs.record == '' && needs.refs.outputs.latest_release != ''
+        if: needs.refs.outputs.record == '' && needs.refs.outputs.latest_release != '' && needs.refs.outputs.base_is_release != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -246,7 +380,7 @@ jobs:
             -D "${{ github.workspace }}/release" || echo "No benchmarks.json on ${{ needs.refs.outputs.latest_release }} yet."
 
       - name: Compare
-        if: steps.basebench.outcome == 'success'
+        if: steps.basebench.outcome == 'success' || steps.basefirst.outcome == 'success'
         run: |
           dotnet run -c Release --project src/benchmarks/Warp.ServerBenchmarks/Warp.ServerBenchmarks.csproj -- \
             compare-bdn \
@@ -254,6 +388,8 @@ jobs:
             --head="${{ github.workspace }}/bench/head" \
             --tolerance=5 \
             --release="${{ github.workspace }}/release/benchmarks.json" \
+            --database="$DB_LABEL" \
+            --base-label="${{ needs.refs.outputs.base_label }}" \
             --summary="${{ github.workspace }}/bench/section.md"
 
       # The measured side, as cases, for a release's record and for the history chart.
@@ -262,19 +398,27 @@ jobs:
         run: |
           if [ -d "${{ github.workspace }}/bench/head" ]; then
             dotnet run -c Release --project src/benchmarks/Warp.ServerBenchmarks/Warp.ServerBenchmarks.csproj -- \
-              export-bdn --results="${{ github.workspace }}/bench/head" --out="${{ github.workspace }}/bench/export.json"
+              export-bdn --results="${{ github.workspace }}/bench/head" --out="${{ github.workspace }}/bench/export.json" --database="$DB_LABEL"
+          fi
+
+          # The base side in the same form, for the medians table of a run with repeats (medians-bdn pairs the
+          # two files). Not named export.json: the release record and the history read every file of that name.
+          if [ -d "${{ github.workspace }}/bench/base" ]; then
+            dotnet run -c Release --project src/benchmarks/Warp.ServerBenchmarks/Warp.ServerBenchmarks.csproj -- \
+              export-bdn --results="${{ github.workspace }}/bench/base" --out="${{ github.workspace }}/bench/export-base.json" --database="$DB_LABEL" || true
           fi
 
       - name: Explain an incompatible base
-        if: steps.basebench.outcome == 'failure'
+        if: steps.basebench.outcome == 'failure' || steps.basefirst.outcome == 'failure'
         run: |
           echo "::warning::The benchmarks do not build against the base commit, so nothing was compared."
           echo "::warning::That happens when the change adds an API the benchmark uses."
           {
             echo "<!-- verdict: skipped -->"
-            echo "### ➖ ${{ matrix.benchmark.name }}"
+            BASE_LABEL="${{ needs.refs.outputs.base_label }}"
+            echo "### ➖ ${{ matrix.benchmark.name }} · $DB_LABEL${BASE_LABEL:+ · base $BASE_LABEL}"
             echo
-            echo "Not compared: the benchmark does not build against the base commit. That happens when the change adds an API the benchmark uses."
+            echo "Not compared: the benchmark does not build or run against the base commit. That happens when the change adds an API the benchmark uses."
           } > "${{ github.workspace }}/bench/section.md"
 
       - name: Fail on a multimodal distribution
@@ -294,7 +438,8 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: benchmark-results-${{ matrix.benchmark.name }}
+          # The first repeat keeps the plain name the report and the release record look for; later ones add -rN.
+          name: benchmark-results-${{ matrix.benchmark.name }}-${{ matrix.db.postgres_label }}${{ matrix.repeat != 1 && format('-r{0}', matrix.repeat) || '' }}
           path: ${{ github.workspace }}/bench
 
   # ---------------------------------------------------------------------------------------------
@@ -373,12 +518,21 @@ jobs:
             history-bdn --releases=releases --exports=results \
             --label="${{ needs.refs.outputs.record || 'this run' }}" --out=history.md
 
+      - name: Build the medians of a run with repeats
+        if: needs.refs.outputs.repeat_count != '1'
+        run: |
+          dotnet run -c Release --project src/benchmarks/Warp.ServerBenchmarks/Warp.ServerBenchmarks.csproj -- \
+            medians-bdn --results=results --out=medians.md
+
       - name: Write the report
         env:
+          REPEATS: ${{ needs.refs.outputs.repeat_count }}
           HEAD_SHA: ${{ needs.refs.outputs.head }}
           BASE_SHA: ${{ needs.refs.outputs.base }}
           RECORD: ${{ needs.refs.outputs.record }}
           LATEST_RELEASE: ${{ needs.refs.outputs.latest_release }}
+          BASE_LABEL: ${{ needs.refs.outputs.base_label }}
+          BASE_IS_RELEASE: ${{ needs.refs.outputs.base_is_release }}
         run: |
           # Record mode compares nothing: the page says what was measured, and shows the history.
           if [ -n "$RECORD" ]; then
@@ -393,15 +547,31 @@ jobs:
           fi
 
           # Matrix order, so the page reads the same way every run.
-          scenarios="dispatcher completion-batch payload concurrency rate-limit failure-path retries publish message-routing scheduled-activation large-table batches fan-out idle"
+          scenarios="dispatcher two-servers completion-batch payload concurrency rate-limit failure-path publish message-routing scheduled-activation retries recurring long-running large-table background-load batches fan-out idle idle-2-servers"
 
+          # The database-version pairs of the matrix (its db dimension), keyed by the PostgreSQL label the
+          # artifact names carry. Keep in step with the matrix.
+          versions="pg17 pg18"
+          describe () {
+            case "$1" in
+              pg17) echo "PostgreSQL 17.12; SQL Server 2022 CU28 where SQL Server runs (pg17+mssql2022)" ;;
+              pg18) echo "PostgreSQL 18.7; SQL Server 2025 CU11 where SQL Server runs (pg18+mssql2025)" ;;
+              *) echo "$1" ;;
+            esac
+          }
+
+          # Counted per scenario AND version. A job whose filter matches two classes (a scenario and its SQL
+          # Server subclass) writes one section per class, so a file can hold a pass AND a fail: a fail
+          # anywhere in it fails that scenario.
           passed=0; failed=0; missing=0
-          for name in $scenarios; do
-            file="results/benchmark-results-$name/section.md"
-            if [ ! -f "$file" ]; then missing=$((missing + 1))
-            elif grep -q "verdict: pass" "$file"; then passed=$((passed + 1))
-            elif grep -q "verdict: fail" "$file"; then failed=$((failed + 1))
-            else missing=$((missing + 1)); fi
+          for version in $versions; do
+            for name in $scenarios; do
+              file="results/benchmark-results-$name-$version/section.md"
+              if [ ! -f "$file" ]; then missing=$((missing + 1))
+              elif grep -q "verdict: fail" "$file"; then failed=$((failed + 1))
+              elif grep -q "verdict: pass" "$file"; then passed=$((passed + 1))
+              else missing=$((missing + 1)); fi
+            done
           done
           total=$((passed + failed + missing))
 
@@ -425,28 +595,61 @@ jobs:
             echo "## Performance: $headline"
             echo
             echo "**Head** \`$(git rev-parse --short "$HEAD_SHA")\` $(git log -1 --format=%s "$HEAD_SHA")  "
-            echo "**Base** \`$(git rev-parse --short "$BASE_SHA")\` $(git log -1 --format=%s "$BASE_SHA")"
+            if [ -n "$BASE_LABEL" ]; then
+              echo "**Base** $BASE_LABEL $(git log -1 --format=%s "$BASE_SHA")"
+            else
+              echo "**Base** \`$(git rev-parse --short "$BASE_SHA")\` $(git log -1 --format=%s "$BASE_SHA")"
+            fi
             echo
+            if [ "$BASE_IS_RELEASE" = "true" ]; then
+              echo "The base is the latest release ($LATEST_RELEASE), so every table already compares the head with it, measured on the same runner. The separate \"since $LATEST_RELEASE\" lines, read from the numbers recorded on the release, are left out as redundant."
+              echo
+            fi
             echo "Each scenario runs the same benchmark code against both commits on one runner. Only \`src/core\` differs between the two sides."
             echo
-            for name in $scenarios; do
-              file="results/benchmark-results-$name/section.md"
-              if [ -f "$file" ]; then
-                cat "$file"
-              else
-                echo "### ⚠️ $name"
-                echo
-                echo "No result: the job did not get far enough to compare. Open the job log for why."
-              fi
+            if [ -f medians.md ]; then
+              cat medians.md
               echo
+              later_failed=$(grep -l "verdict: fail" results/benchmark-results-*-r[0-9]/section.md 2>/dev/null | sed -E 's|results/benchmark-results-(.*)/section.md|\1|' | tr '\n' ' ' || true)
+              echo "Every case was measured $REPEATS times. The headline and the per-scenario sections below are the FIRST run; the table above is all of them.${later_failed:+ Cells that failed their gate in a later run: $later_failed}"
+              echo
+            fi
+            for version in $versions; do
+              echo "## Databases: $(describe "$version")"
+              echo
+              for name in $scenarios; do
+                file="results/benchmark-results-$name-$version/section.md"
+                if [ -f "$file" ]; then
+                  cat "$file"
+                else
+                  echo "### ⚠️ $name · $version"
+                  echo
+                  echo "No result: the job did not get far enough to compare. Open the job log for why."
+                fi
+                echo
+              done
             done
             echo "<details><summary>How to read this</summary>"
             echo
             echo "- Tables follow BenchmarkDotNet's summary. Each case has two rows, **base** then **head**, the way BDN shows a benchmark beside its baseline."
             echo "- **Ratio** is head time ÷ base time: below 1.00 is faster. **Alloc Ratio** is the same for memory. **Error** is half the 99.9% confidence interval and **StdDev** the standard deviation, both over the iterations BDN ran."
-            echo "- **Gate** is the verdict on the head row. A scenario fails if **Statements/job** rises more than 5%, **WAL/job** (PostgreSQL) more than 10%, **Jobs/s** collapses to a third, or **Buffers/job** rises to five times. The idle scenario, measured per second, fails on **Statements/s** rising more than 5% on PostgreSQL; its SQL Server row is reported only. Each line sits at three to four times the worst noise measured by comparing a commit with itself: statements 1.8%, WAL 2.5%, jobs/s 0.87×–1.43×."
+            echo "- Base and head run one after the other on one runner, each on a fresh database. Which goes first alternates with the run number (odd: base first), so an effect of the order is not always on the same side."
+            echo "- **Gate** is the verdict on the head row. A scenario fails if **Statements/job** rises more than 5%, **WAL/job** (PostgreSQL) more than 10%, **Jobs/s** collapses to a third, or **Buffers/job** rises to five times. The idle scenarios (one and two servers), measured per second, fail on **Statements/s** rising more than 5% on PostgreSQL; their SQL Server rows are reported only. Each line sits at three to four times the worst noise measured by comparing a commit with itself: statements 1.8%, WAL 2.5%, jobs/s 0.87×–1.43×."
+            echo "- **Report-only gates** (➖, or ⚠️ with \"report-only\" when a line is crossed) are on measurements not yet calibrated by comparing a commit with itself: every SQL Server per-job row (statements and buffers are counted from Query Store since measurement version 2), and the two-server, recurring and background-load scenarios. They are shown and fail nothing until no-op runs have measured their noise; .claude/rules/performance.md lists which to switch back on."
+            echo "- **Jobs/s** is job rows per second: the job rows the database counted in the window (the same rows the per-job columns divide by: 2,010 in the two-server scenario, where 10 are batch rows), per iteration, over the mean time. Scenarios whose duration a clock sets (rate limit, recurring, long-running) are not gated on it."
+            echo "- **Databases** run in containers capped at 2 CPUs and 4 GB, PostgreSQL with full_page_writes off, so WAL per job is the changes Warp writes and does not move with checkpoint timing (WAL FPI/job in the raw tables should read 0)."
+            echo "- Statements the harness itself sends (polling for the end of a drain, cleaning between iterations, making recurring jobs due) are left out of every database column: tagged in the text on PostgreSQL, run under a different language on SQL Server (Query Store keeps no comments). The background-load scenario's dashboard tabs are its workload and stay counted."
+            echo "- **Two servers**: a note under the table gives the share of the jobs the less busy server completed; a case where it is under 20% fails, since it did not measure two servers."
+            echo "- **Background load**: notes under the table give each case's background work per second of drain, against the drain alone. Per job, work that runs every second shrinks when the drain gets faster; per second it does not."
             echo "- **Buffers/job** is database pages touched per job, cached or read, which catches a slower plan that issues the same statements. It moves up to 55% between identical builds, with cache state and vacuum timing, so only a rise to five times fails: every jump that size so far was a query whose plan had changed."
-            echo "- **Allocated** is everything allocated while the case ran, background server work included. Reported, not gated: it moves 2–3% between identical builds. ↑ on Alloc Ratio marks a rise over 5%."
+            echo "- **DB ms/job** is the time the database spent per job: on PostgreSQL execution plus planning time from pg_stat_statements (track_planning on; not pure CPU: it includes waiting on I/O and locks inside a statement), on SQL Server CPU time from Query Store. Reported, not gated, on both providers: it is a timing and has not been calibrated against a commit compared with itself (the message-routing scenario swings ~60% between identical builds)."
+            echo "- **Commands/job** is commands the benchmark process sent, counted at the driver on both providers (Npgsql's operation meter, SqlClient's command events), so EF, raw ADO.NET, locks and notifications all count. A batch is one; transaction control (COMMIT) is not a command and is not counted. The harness's own commands are counted apart and left out. Reported, not gated."
+            echo "- **Xacts/job** is transactions in the benchmark database: committed plus rolled back from pg_stat_database on PostgreSQL (less the harness's statements, each a transaction of its own), the Transactions/sec counter (transactions started) on SQL Server, which still includes the harness's. Reported, not gated."
+            echo "- **Lock wait ms/job** is time spent waiting for locks: on PostgreSQL sampled every 50 ms from pg_locks (ungranted requests × interval, so waits shorter than the interval are seen in proportion), on SQL Server the LCK wait time from sys.dm_os_wait_stats. Deadlocks in the window are shown beside it when there were any. Reported, not gated."
+            echo "- A **—** in any column means that side did not measure it (a record from before the column existed, or a source that gave nothing). It is never compared and never fails."
+            echo "- **SQL Server** statements and buffers are counted from Query Store since measurement version 2 (before: the plan cache, which lost a plan's executions when it was recompiled inside the window and read low and unstable). SQL Server numbers stepped up then: a baseline reset, not a regression."
+            echo "- Every section names the database versions it ran on; each version pair runs as its own job, and base, head and the release history are only compared on the same versions."
+            echo "- **Allocated** is BenchmarkDotNet's memory diagnoser: ONE extra iteration it runs after the measured window (not the measured iterations), allocations process-wide (background server work included, the iteration cleanup not), a single sample. Reported, not gated: it moves 2–3% between identical builds. ↑ on Alloc Ratio marks a rise over 5%."
             echo "- ⚠️ in a Gate cell means a side produced no measurement. That fails the scenario, because a comparison that never happened must not read as a pass."
             echo "- **Since** the latest release: the head's statements per job against the numbers recorded on that release. ⚠️ above +10% is reported and never fails, because it measures everything merged since the release, not this change."
             echo

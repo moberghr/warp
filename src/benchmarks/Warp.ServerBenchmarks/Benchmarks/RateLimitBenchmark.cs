@@ -35,7 +35,8 @@ namespace Warp.ServerBenchmarks.Benchmarks;
     "Rate limit under a backlog",
     "16 workers drain jobs over one rate-limit key. Backlog: 1,000 Wait-mode jobs at 100 per 2 s, ten windows deep, activation every 1 s. ShortWindow: 500 Wait-mode jobs at 50 per 1 s, activation every 2 s. Skip: 2,000 Skip-mode jobs at 50 per 2 s.",
     "The cost of every throttled execution, and how many times a backlog re-executes before it drains.",
-    Order = 41)]
+    Order = 41,
+    ClockBound = true)]
 [CaseLabel(nameof(Shape), "Backlog", "Wait, 1,000 jobs at 100/2s")]
 [CaseLabel(nameof(Shape), "ShortWindow", "Wait, 500 jobs at 50/1s")]
 [CaseLabel(nameof(Shape), "Skip", "Skip, 2,000 jobs at 50/2s")]

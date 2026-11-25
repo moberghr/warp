@@ -10,12 +10,13 @@ namespace Warp.Provider.PostgreSql;
 /// </summary>
 internal sealed class PostgresClusterTaskSql
 {
-    private PostgresClusterTaskSql(string claim, string request, string renew, string complete)
+    private PostgresClusterTaskSql(string claim, string request, string renew, string complete, string register)
     {
         Claim = claim;
         Request = request;
         Renew = renew;
         Complete = complete;
+        Register = register;
     }
 
     public string Claim { get; }
@@ -25,6 +26,8 @@ internal sealed class PostgresClusterTaskSql
     public string Renew { get; }
 
     public string Complete { get; }
+
+    public string Register { get; }
 
     public static PostgresClusterTaskSql Build(IModel model)
     {
@@ -49,6 +52,7 @@ internal sealed class PostgresClusterTaskSql
         var lastDuration = Column(task, nameof(ClusterTask.LastDurationMs));
         var coordination = Column(server, nameof(Server.CoordinationVersion));
         var heartbeat = Column(server, nameof(Server.LastHeartbeatTime));
+        var serverId = Column(server, nameof(Server.Id));
 
         // Every time here is the database's own now() (rule 6.23): whether a lease is free never depends on
         // two servers' clocks agreeing, as a lock never did. The lease lasts one interval, so an idle run needs
@@ -64,11 +68,20 @@ internal sealed class PostgresClusterTaskSql
         var nextRun = $"to_timestamp((floor((EXTRACT(EPOCH FROM now()) + {grid} / 2) / {grid}) + 1) * {grid})";
         var leaseUntil = $"GREATEST({nextRun}, now() + interval '1 second')";
         var leaseFor = $"make_interval(secs => GREATEST(t.{interval}, 1))";
-        var legacy = $"EXISTS (SELECT 1 FROM {serverTable} s WHERE s.{coordination} IS NULL AND s.{heartbeat} >= now() - make_interval(secs => @liveWindow))";
+
+        // A server from before 8.0 counts as alive for as long as its row exists, with NO comparison of its
+        // heartbeat: it writes that on its own clock, and judged against now() a database running ahead of the
+        // hosts by a health-check timeout made every 7.7 server look dead while it ran. ServerCleanup removes the
+        // row of one that really died (on the hosts' clock while this is true, as 7.7 did).
+        var legacy = $"EXISTS (SELECT 1 FROM {serverTable} s WHERE s.{coordination} IS NULL)";
+
+        // Whether any other server is alive: only another server can claim a task this one leaves leased, so a
+        // lone server keeps the lease an idle run of a signal task would otherwise release (rule 6.23).
+        var others = $"EXISTS (SELECT 1 FROM {serverTable} s WHERE s.{serverId} <> @server AND s.{heartbeat} >= now() - make_interval(secs => @liveWindow))";
 
         var claim = $@"
             WITH due AS (
-                SELECT t.{name} AS task FROM {table} t
+                SELECT t.{name} AS task, t.{next} <= now() AS scheduled FROM {table} t
                 WHERE t.{name} = ANY(@names)
                   AND t.{interval} IS NOT NULL
                   AND (t.{next} <= now() OR t.{requested} IS NOT NULL)
@@ -84,12 +97,12 @@ internal sealed class PostgresClusterTaskSql
                     {requested} = NULL
                 FROM due
                 WHERE t.{name} = due.task
-                RETURNING t.{name} AS task, t.{next} AS due_at
+                RETURNING t.{name} AS task, t.{next} AS due_at, due.scheduled
             )
-            SELECT c.task, TRUE, EXTRACT(EPOCH FROM c.due_at - now())::float8, {legacy}
+            SELECT c.task, TRUE, EXTRACT(EPOCH FROM c.due_at - now())::float8, {legacy}, {others}, c.scheduled
             FROM claimed c
             UNION ALL
-            SELECT t.{name}, FALSE, EXTRACT(EPOCH FROM GREATEST(t.{next}, COALESCE(t.{lease}, t.{next})) - now())::float8, {legacy}
+            SELECT t.{name}, FALSE, EXTRACT(EPOCH FROM GREATEST(t.{next}, COALESCE(t.{lease}, t.{next})) - now())::float8, {legacy}, {others}, FALSE
             FROM {table} t
             WHERE t.{name} = ANY(@names)
               AND t.{interval} IS NOT NULL
@@ -140,9 +153,20 @@ internal sealed class PostgresClusterTaskSql
                 {lastMessage} = CASE WHEN @record THEN @message ELSE t.{lastMessage} END,
                 {lastDuration} = CASE WHEN @record THEN @durationMs ELSE t.{lastDuration} END
             WHERE t.{name} = @name
-              AND t.{claimedBy} = @server";
+              AND t.{claimedBy} = @server
+            RETURNING t.{next} <= now()";
 
-        return new PostgresClusterTaskSql(claim, request, renew, complete);
+        // Insert-if-absent: a row another server inserted first becomes an update of its interval, never a
+        // unique violation (EF's insert-then-catch logged every lost race at Error). Rows in name order, so
+        // two servers registering together lock them in the same order. A new task is due at once.
+        var register = $@"
+            INSERT INTO {table} ({name}, {interval}, {next})
+            SELECT x.task, x.secs, to_timestamp(0)
+            FROM unnest(@names, @intervals) AS x(task, secs)
+            ORDER BY x.task
+            ON CONFLICT ({name}) DO UPDATE SET {interval} = EXCLUDED.{interval}";
+
+        return new PostgresClusterTaskSql(claim, request, renew, complete, register);
     }
 
     private static string Qualified(IEntityType entity)

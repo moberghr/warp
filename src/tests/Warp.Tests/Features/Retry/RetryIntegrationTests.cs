@@ -52,9 +52,7 @@ public abstract class RetryIntegrationTestsBase : IntegrationTestBase
         GetRetriedTimes(job).ShouldBe(3);
 
         // Should have 1 initial attempt + 3 retries = 4 "Processing" log entries
-        var processingLogs = await ctx.Set<JobLog>()
-            .CountAsync(l => l.JobId == jobId && l.EventType == "Processing", Xunit.TestContext.Current.CancellationToken);
-        processingLogs.ShouldBe(4);
+        await server.WaitForJobLogCount(jobId, "Processing", 4);
 
         // Each retry now emits a Failed + Scheduled pair instead of a single Requeued,
         // so 3 retries × (1 Failed + 1 Scheduled) + 1 terminal Failed = 4 Failed total and
@@ -142,9 +140,7 @@ public abstract class RetryIntegrationTestsBase : IntegrationTestBase
         GetRetriedTimes(job).ShouldBe(0);
 
         // Should have exactly 1 "Processing" log entry (the single attempt)
-        var processingLogs = await ctx.Set<JobLog>()
-            .CountAsync(l => l.JobId == jobId && l.EventType == "Processing", Xunit.TestContext.Current.CancellationToken);
-        processingLogs.ShouldBe(1);
+        await server.WaitForJobLogCount(jobId, "Processing", 1);
 
         // No retries → no Scheduled-for-retry log, just one terminal Failed.
         var scheduledLogs = await ctx.Set<JobLog>()

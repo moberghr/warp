@@ -73,7 +73,7 @@ public class WarpDispatcherResilienceTests
         });
 
         var groupId = Guid.NewGuid();
-        var pauseState = new PauseStateHolder();
+        using var pauseState = new CountingPauseStateHolder();
         pauseState.Update(serverPaused: false, new Dictionary<Guid, bool> { [groupId] = true });
 
         await using var provider = BuildProvider(queries);
@@ -82,9 +82,14 @@ public class WarpDispatcherResilienceTests
         await dispatcher.StartAsync(CancellationToken.None);
         try
         {
-            // Twenty loop iterations at the 10ms floor, none of which may claim.
-            var claimedWhilePaused = await claimSeen.WaitAsync(TimeSpan.FromMilliseconds(200), Xunit.TestContext.Current.CancellationToken);
-            claimedWhilePaused.ShouldBeFalse("a paused group must not claim jobs");
+            // The loop checks its pause state before every claim, one pass after another: once it has seen
+            // the group paused three times, any claim in between would already have been counted.
+            for (var i = 0; i < 3; i++)
+            {
+                (await pauseState.PausedChecks.WaitAsync(TimeSpan.FromSeconds(2), Xunit.TestContext.Current.CancellationToken)).ShouldBeTrue("the dispatcher stopped checking its pause state");
+            }
+
+            claimSeen.CurrentCount.ShouldBe(0, "a paused group must not claim jobs");
 
             pauseState.Update(serverPaused: false, new Dictionary<Guid, bool> { [groupId] = false });
 
@@ -141,4 +146,23 @@ public class WarpDispatcherResilienceTests
             groupId,
             new DispatcherRegistry(),
             new ServerTaskSignals<TestContext>());
+
+    // Releases PausedChecks each time a check answers "paused".
+    private sealed class CountingPauseStateHolder : PauseStateHolder, IDisposable
+    {
+        public SemaphoreSlim PausedChecks { get; } = new(0);
+
+        public override bool IsPaused(Guid? workerGroupId)
+        {
+            var paused = base.IsPaused(workerGroupId);
+            if (paused)
+            {
+                PausedChecks.Release();
+            }
+
+            return paused;
+        }
+
+        public void Dispose() => PausedChecks.Dispose();
+    }
 }

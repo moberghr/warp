@@ -37,6 +37,14 @@ public class Job
 
     public DateTime? LastKeepAlive { get; set; }
 
+    /// <summary>
+    /// The run that holds this job while it is <c>Processing</c>: a fresh value written by every claim and
+    /// cleared when the job leaves <c>Processing</c>. Every write a run makes to the row is guarded by it, so
+    /// a run whose job was taken back and claimed again cannot write over the new run (#347). Null outside
+    /// <c>Processing</c>.
+    /// </summary>
+    public Guid? RunId { get; set; }
+
     public Guid? TraceId { get; set; }
 
     public Guid? SpawnedByJobId { get; set; }

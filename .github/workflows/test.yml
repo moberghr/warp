@@ -37,12 +37,23 @@ jobs:
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
+      # One job per supported database version, each image pinned to an exact tag so a new upstream release
+      # never changes what a run tested; NoDb once. The fixtures read the image from WARP_TEST_POSTGRES_IMAGE /
+      # WARP_TEST_SQLSERVER_IMAGE (testing.md §4.3.1). Bump the tags deliberately.
       matrix:
         include:
-          - database: PostgreSQL
+          - database: PostgreSQL 17
             filter: --filter-trait "Category=PostgreSql"
-          - database: SQL Server
+            postgres_image: postgres:17.12
+          - database: PostgreSQL 18
+            filter: --filter-trait "Category=PostgreSql"
+            postgres_image: postgres:18.7
+          - database: SQL Server 2022
             filter: --filter-trait "Category=SqlServer"
+            sqlserver_image: mcr.microsoft.com/mssql/server:2022-CU28-ubuntu-22.04
+          - database: SQL Server 2025
+            filter: --filter-trait "Category=SqlServer"
+            sqlserver_image: mcr.microsoft.com/mssql/server:2025-CU11-ubuntu-22.04
           - database: NoDb
             filter: --filter-trait "Category=NoDb"
 
@@ -80,7 +91,13 @@ jobs:
 
       - name: Test (${{ matrix.database }})
         working-directory: src
+        env:
+          WARP_TEST_POSTGRES_IMAGE: ${{ matrix.postgres_image }}
+          WARP_TEST_SQLSERVER_IMAGE: ${{ matrix.sqlserver_image }}
         run: |
+          # An empty matrix value would reach the fixture as "", not as unset.
+          [ -n "$WARP_TEST_POSTGRES_IMAGE" ] || unset WARP_TEST_POSTGRES_IMAGE
+          [ -n "$WARP_TEST_SQLSERVER_IMAGE" ] || unset WARP_TEST_SQLSERVER_IMAGE
           dotnet test --project tests/Warp.Tests/Warp.Tests.csproj --no-build --configuration Debug -- \
             ${{ matrix.filter }} \
             --report-trx --report-trx-filename test-results.trx \

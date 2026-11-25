@@ -69,6 +69,16 @@ public interface IWarpSqlQueries<TContext>
     Task<Job?> LockJobByIdWaitAsync(DbContext context, Guid jobId, CancellationToken ct);
 
     /// <summary>
+    /// Locks the given jobs with a blocking lock, one primary-key lookup per job, in the order given, and
+    /// holds the locks until the ambient transaction ends. For a set-based write that follows in the same
+    /// transaction (<c>BulkRequeueJobs</c>): callers that pass their ids sorted take the row locks in one
+    /// order whatever plan the database picks for the write itself. Without it, SQL Server could run the
+    /// bulk UPDATE through a secondary index on a small table, and two concurrent bulk requeues deadlocked
+    /// (one holding the row and wanting the index key, the other the reverse). Ids with no row are skipped.
+    /// </summary>
+    Task LockJobsByIdWaitAsync(DbContext context, IReadOnlyList<Guid> jobIds, CancellationToken ct);
+
+    /// <summary>
     /// Locks every <see cref="Server"/> row with a blocking lock (WAIT — no SKIP LOCKED).
     /// Used by server cleanup to freeze the set while it decides which servers are stale.
     /// The blocking lock serializes against <c>Heartbeat</c>'s per-row update so we can't
@@ -87,6 +97,20 @@ public interface IWarpSqlQueries<TContext>
     /// existing column value when either is null (COALESCE / ISNULL). Returns <c>null</c> when
     /// the server row doesn't exist; caller treats this as the "server was cleaned up" signal.
     /// </para>
+    /// <para>
+    /// Every time the heartbeat writes (the server's and its background-service instances' last
+    /// heartbeat, the renewed leases' expiry) is the DATABASE's clock, read once by the statement, so no
+    /// server's clock decides whether another server looks alive (#350). <paramref name="now"/> is this
+    /// process's own clock reading: the statement stores the database clock minus it as the server's
+    /// <c>ClockOffsetMs</c>, and returns the database clock as <see cref="HeartbeatResult.DatabaseUtcNow"/>.
+    /// </para>
+    /// <para>
+    /// With <paramref name="writeLocalTime"/> (a server from before 8.0 is alive, rule 2.20) the three times
+    /// written, and the lease-expiry comparison, use <paramref name="now"/> instead, as 7.7 did: that server
+    /// compares its own clock, so this one must not mix in the database's. The offset is stored and the
+    /// database clock returned either way. A separate cached statement, not a CASE: each variant keeps one
+    /// plan, and the 7.7 one is removed with the bridge in the release after 8.x.
+    /// </para>
     /// </summary>
     Task<HeartbeatResult?> HeartbeatAsync(
         DbContext context,
@@ -94,6 +118,7 @@ public interface IWarpSqlQueries<TContext>
         DateTime now,
         long? memoryBytes,
         double? cpuPercent,
+        bool writeLocalTime,
         CancellationToken ct);
 
     /// <summary>
@@ -238,6 +263,16 @@ public interface IWarpSqlQueries<TContext>
     /// Ends this server's run of a task: frees the lease; makes the task due at its next grid point when
     /// the run did work, or at once when <see cref="ClusterTaskCompletion.Rerun"/> is set or a run request
     /// arrived meanwhile; and records the run when <see cref="ClusterTaskCompletion.Record"/> is set.
+    /// Returns whether the task is then due at once, so the caller knows to claim again; false also when
+    /// this server no longer held the task. A completion that only frees the lease leaves the next run
+    /// where the claim put it.
     /// </summary>
-    Task CompleteClusterTaskAsync(DbContext context, ClusterTaskCompletion completion, CancellationToken ct);
+    Task<bool> CompleteClusterTaskAsync(DbContext context, ClusterTaskCompletion completion, CancellationToken ct);
+
+    /// <summary>
+    /// Creates the rows of the named tasks the cluster has not seen (due at once) and sets every named task's
+    /// interval, in one statement that never fails on a row another server inserted first: servers starting
+    /// together each register every task, and a lost insert must not surface as an error (rule 6.23).
+    /// </summary>
+    Task RegisterClusterTasksAsync(DbContext context, IReadOnlyList<ClusterTaskRegistration> tasks, CancellationToken ct);
 }
