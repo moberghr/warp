@@ -244,6 +244,75 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task PassAsync_MoreTimerTasksDueThanSlots_RunsTwoAtATime()
+    {
+        // Arrange: three timer-only tasks fall due together (the grid makes them), pinned in their run. Run all at
+        // once, each held a connection of its own and the pool kept them; two slots is the cap.
+        var barrier = new BarrierSignal();
+        var tasks = new[] { new SlotTask("slot-a", barrier), new SlotTask("slot-b", barrier), new SlotTask("slot-c", barrier) };
+        using var scheduler = await BuildAsync(tasks, TimeSpan.Zero);
+
+        try
+        {
+            // Act
+            await scheduler.PassAsync(Ct);
+
+            // Assert: two run, the third waits for a slot, and runs once one frees.
+            (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue("the first task did not start");
+            (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue("the second task did not start");
+            (await barrier.Running.WaitAsync(TimeSpan.FromMilliseconds(300), Ct)).ShouldBeFalse("a third timer task ran beside two");
+
+            barrier.CanFinish.Release();
+            (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue("the third task did not run once a slot freed");
+        }
+        finally
+        {
+            barrier.CanFinish.Release(3);
+            foreach (var task in tasks)
+            {
+                if (scheduler.RunningTask(task.Name) is { } running)
+                {
+                    await running;
+                }
+            }
+        }
+
+        tasks.Sum(x => x.Runs).ShouldBe(3);
+    }
+
+    [TimedFact]
+    public async Task PassAsync_TimerSlotsFull_SignalDrivenTaskStillRuns()
+    {
+        // Arrange: both timer slots held by pinned runs, and a signal-driven task (the Orchestrator's kind) due.
+        var barrier = new BarrierSignal();
+        var pinned = new[] { new SlotTask("slot-a", barrier), new SlotTask("slot-b", barrier) };
+        var signaled = new SignaledTask(TimeSpan.FromHours(1));
+        using var scheduler = await BuildAsync([.. pinned, signaled], TimeSpan.Zero);
+
+        try
+        {
+            // Act
+            await scheduler.PassAsync(Ct);
+            (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue("the first timer task did not start");
+            (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue("the second timer task did not start");
+
+            // Assert: it is on the job path and does not wait for a timer slot.
+            (await signaled.Ran.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue("the signal-driven task waited behind the timer tasks");
+        }
+        finally
+        {
+            barrier.CanFinish.Release(2);
+            foreach (var task in pinned)
+            {
+                if (scheduler.RunningTask(task.Name) is { } running)
+                {
+                    await running;
+                }
+            }
+        }
+    }
+
+    [TimedFact]
     public async Task PassAsync_SignalWhileTheTaskRunsHere_RunsItAgainRightAfter()
     {
         var task = new PinnedTask(TimeSpan.FromHours(1));
@@ -486,6 +555,31 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
                 Cancelled = true;
                 throw;
             }
+
+            return null;
+        }
+    }
+
+    // A timer-only task pinned in its run by a barrier shared with others, under a lock key of its own.
+    private sealed class SlotTask(string name, BarrierSignal barrier) : IServerTask
+    {
+        private int _runs;
+
+        public int Runs => Volatile.Read(ref _runs);
+
+        public string Name => name;
+
+        public string? LockKey => "warp:test:slot:" + name;
+
+        public TimeSpan? DefaultInterval => TimeSpan.FromHours(1);
+
+        public bool RerunImmediately => false;
+
+        public async Task<string?> ExecuteAsync(CancellationToken ct)
+        {
+            Interlocked.Increment(ref _runs);
+            barrier.Running.Release();
+            await barrier.CanFinish.WaitAsync(ct);
 
             return null;
         }
