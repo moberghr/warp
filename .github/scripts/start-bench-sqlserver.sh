@@ -15,7 +15,12 @@ echo "starting $IMAGE"
 
 docker rm -f warpbench-mssql > /dev/null 2>&1 || true
 
+# Capped at 2 CPUs and 4 GB (BENCH_DB_CPUS / BENCH_DB_MEMORY to change): the database then has the same
+# room on every runner whatever else the machine is doing, and the benchmark process keeps the other cores,
+# so the two do not compete for the same ones. Without it the database took whatever the 4-core runner had
+# left at that moment.
 docker run -d --name warpbench-mssql -p 1433:1433 \
+  --cpus "${BENCH_DB_CPUS:-2}" --memory "${BENCH_DB_MEMORY:-4g}" \
   -e ACCEPT_EULA=Y -e 'MSSQL_SA_PASSWORD=Warp!Bench1' \
   "$IMAGE"
 

@@ -36,6 +36,7 @@ public static class MeasurementVersion
     //
     // 3: the benchmark PostgreSQL servers run with full_page_writes off, so WAL/job no longer includes the whole
     // pages written after a checkpoint (it swung up to 16% between runs of identical work with them). WAL/job
-    // reads lower than on 2. WAL FPI/job is reported and should read 0.
+    // reads lower than on 2. WAL FPI/job is reported and should read 0. The database containers are capped at
+    // 2 CPUs and 4 GB (start-bench-*.sh), which moves timings, not counts.
     public const int Current = 3;
 }

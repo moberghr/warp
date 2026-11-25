@@ -22,7 +22,12 @@ docker rm -f warpbench > /dev/null 2>&1 || true
 # gate. Off, WAL/job counts only the changes Warp makes. Fine for a throwaway benchmark container; never in
 # production, where it risks torn pages after a crash.
 
+# Capped at 2 CPUs and 4 GB (BENCH_DB_CPUS / BENCH_DB_MEMORY to change): the database then has the same
+# room on every runner whatever else the machine is doing, and the benchmark process keeps the other cores,
+# so the two do not compete for the same ones. Without it the database took whatever the 4-core runner had
+# left at that moment.
 docker run -d --name warpbench -p 5432:5432 \
+  --cpus "${BENCH_DB_CPUS:-2}" --memory "${BENCH_DB_MEMORY:-4g}" \
   -e POSTGRES_PASSWORD=postgres \
   "$IMAGE" \
   -c shared_preload_libraries=pg_stat_statements \
