@@ -17,8 +17,10 @@ public abstract class ConcurrencyIntegrationTestsBase : IntegrationTestBase
     {
     }
 
-    [TimedFact]
-    public async Task GivenTwoBarrierJobs_WithFiveWorkers_ThenEachClaimedByExactlyOneWorker()
+    [TimedTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GivenTwoBarrierJobs_WithFiveWorkers_ThenEachClaimedByExactlyOneWorker(bool useDispatcher)
     {
         // Deterministic concurrency check: 2 jobs, 5 workers competing for them via FOR UPDATE
         // SKIP LOCKED. The barrier handler signals on entry and blocks until released, so once
@@ -32,8 +34,7 @@ public abstract class ConcurrencyIntegrationTestsBase : IntegrationTestBase
 
         await using var server = await WarpTestServer.StartAsync(Fixture, cfg =>
         {
-            // Distinct CurrentWorkerId per running job is single-worker semantics; a dispatcher group shares one (§6.12).
-            cfg.UseDispatcher = false;
+            cfg.UseDispatcher = useDispatcher;
             cfg.Services.AddSingleton(barrier);
         });
         var publisher = server.CreatePublisher();
@@ -64,12 +65,15 @@ public abstract class ConcurrencyIntegrationTestsBase : IntegrationTestBase
                 job.CurrentWorkerId.ShouldNotBeNull();
             }
 
-            // The two workers in handler must be distinct (not the same worker double-claiming)
-            var workerIds = await ctx.Set<Job>()
-                .Where(j => j.Id == job1Id || j.Id == job2Id)
-                .Select(j => j.CurrentWorkerId)
-                .ToListAsync(Xunit.TestContext.Current.CancellationToken);
-            workerIds.Distinct().Count().ShouldBe(2, "Two jobs must be processed by two distinct workers");
+            if (!useDispatcher)
+            {
+                // Distinct CurrentWorkerId per running job is single-worker semantics; a dispatcher group shares one (§6.12).
+                var workerIds = await ctx.Set<Job>()
+                    .Where(j => j.Id == job1Id || j.Id == job2Id)
+                    .Select(j => j.CurrentWorkerId)
+                    .ToListAsync(Xunit.TestContext.Current.CancellationToken);
+                workerIds.Distinct().Count().ShouldBe(2, "Two jobs must be processed by two distinct workers");
+            }
         }
         finally
         {
@@ -118,8 +122,10 @@ public abstract class ConcurrencyIntegrationTestsBase : IntegrationTestBase
         completedLogs.ShouldBe(1);
     }
 
-    [TimedFact]
-    public async Task GivenTwoBarrierMessages_WithFiveWorkers_ThenEachRoutedExactlyOnceAndClaimedByDistinctWorker()
+    [TimedTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GivenTwoBarrierMessages_WithFiveWorkers_ThenEachRoutedExactlyOnceAndClaimedByDistinctWorker(bool useDispatcher)
     {
         // Deterministic message-routing-and-claim test: 2 messages → MessageRouter creates 2
         // handler jobs → 5 workers race to claim them. The barrier handler signals on entry
@@ -132,8 +138,7 @@ public abstract class ConcurrencyIntegrationTestsBase : IntegrationTestBase
 
         await using var server = await WarpTestServer.StartAsync(Fixture, cfg =>
         {
-            // Distinct CurrentWorkerId per running job is single-worker semantics; a dispatcher group shares one (§6.12).
-            cfg.UseDispatcher = false;
+            cfg.UseDispatcher = useDispatcher;
             cfg.Services.AddSingleton(barrier);
         });
         var publisher = server.CreatePublisher();
@@ -162,12 +167,15 @@ public abstract class ConcurrencyIntegrationTestsBase : IntegrationTestBase
             handlerJobs[0].CurrentWorkerId.ShouldNotBeNull();
         }
 
-        // Two distinct workers hold the two handler jobs
-        var workerIds = await ctx.Set<Job>()
-            .Where(j => (j.ParentJobId == msg1 || j.ParentJobId == msg2) && j.Kind == JobKind.Job)
-            .Select(j => j.CurrentWorkerId)
-            .ToListAsync(Xunit.TestContext.Current.CancellationToken);
-        workerIds.Distinct().Count().ShouldBe(2);
+        if (!useDispatcher)
+        {
+            // Distinct CurrentWorkerId per running job is single-worker semantics; a dispatcher group shares one (§6.12).
+            var workerIds = await ctx.Set<Job>()
+                .Where(j => (j.ParentJobId == msg1 || j.ParentJobId == msg2) && j.Kind == JobKind.Job)
+                .Select(j => j.CurrentWorkerId)
+                .ToListAsync(Xunit.TestContext.Current.CancellationToken);
+            workerIds.Distinct().Count().ShouldBe(2);
+        }
 
         // Release and verify clean completion
         barrier.CanFinish.Release(2);
