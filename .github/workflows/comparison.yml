@@ -6,6 +6,10 @@ name: Comparison
 # src/benchmarks/Warp.Comparison/README.md; the summary is written to this run's page.
 
 on:
+  # TEMPORARY, remove before merging: workflow_dispatch only works once this file is on main.
+  push:
+    branches: [fix/pre-8.0-issues]
+    paths: ['.github/workflows/comparison.yml']
   workflow_dispatch:
     inputs:
       jobs:
@@ -51,7 +55,7 @@ permissions:
 
 jobs:
   compare:
-    name: Warp vs Hangfire (${{ inputs.servers }} x ${{ inputs.workers }}, ${{ inputs.jobs }} jobs)
+    name: Warp vs Hangfire (${{ inputs.servers || '1' }} x ${{ inputs.workers || '10' }}, ${{ inputs.jobs || '20000' }} jobs)
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:
@@ -75,18 +79,18 @@ jobs:
           set -euo pipefail
           bin=src/benchmarks/Warp.Comparison/bin/Release/net10.0/Warp.Comparison
           mkdir -p results
-          set -- ${{ inputs.engines }}
+          set -- ${{ inputs.engines || 'warp warp-dispatcher hangfire' }}
           count=$#
-          for round in $(seq 1 ${{ inputs.rounds }}); do
+          for round in $(seq 1 ${{ inputs.rounds || '3' }}); do
             # Rotate the arms' order each round, so none always runs first on a cold machine.
             shift_by=$(( (round - 1) % count ))
-            order=$(echo ${{ inputs.engines }} | tr ' ' '\n' | awk -v s=$shift_by -v n=$count '{a[NR-1]=$0} END {for (i=0;i<n;i++) print a[(i+s)%n]}')
-            for kind in ${{ inputs.kinds }}; do
+            order=$(echo ${{ inputs.engines || 'warp warp-dispatcher hangfire' }} | tr ' ' '\n' | awk -v s=$shift_by -v n=$count '{a[NR-1]=$0} END {for (i=0;i<n;i++) print a[(i+s)%n]}')
+            for kind in ${{ inputs.kinds || 'noop work' }}; do
               for engine in $order; do
                 db="cmp_r${round}_${kind}_${engine//-/_}"
                 docker exec warpbench psql -U postgres -qc "CREATE DATABASE $db"
                 echo "::group::round $round · $kind · $engine"
-                "$bin" run --engine=$engine --job=$kind --jobs=${{ inputs.jobs }} --servers=${{ inputs.servers }} --workers=${{ inputs.workers }} \
+                "$bin" run --engine=$engine --job=$kind --jobs=${{ inputs.jobs || '20000' }} --servers=${{ inputs.servers || '1' }} --workers=${{ inputs.workers || '10' }} \
                   --conn="Host=localhost;Port=5432;Username=postgres;Password=postgres;Database=$db" \
                   --out="results/r${round}-${kind}-${engine}.json"
                 echo "::endgroup::"
