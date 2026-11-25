@@ -6,7 +6,7 @@ using Warp.Comparison;
 
 // Warp against Hangfire: one arm per run, a summary of many. README.md describes the method.
 //
-//   dotnet run -c Release -- run --engine=warp|warp-dispatcher|hangfire --conn="Host=..;Database=..;Username=..;Password=.."
+//   dotnet run -c Release -- run --engine=warp-dispatcher|warp-single-worker|hangfire --conn="Host=..;Database=..;Username=..;Password=.."
 //                                [--jobs=20000] [--servers=1] [--workers=10] [--job=noop|work] [--items=1000] [--out=result.json]
 //   dotnet run -c Release -- summarize --results=<folder of result json files> [--out=summary.md]
 var options = args
@@ -31,7 +31,7 @@ if (args.Length > 0 && string.Equals(args[0], "summarize", StringComparison.Ordi
     return 0;
 }
 
-var engine = Option("engine", "warp");
+var engine = Option("engine", "warp-dispatcher");
 var connectionString = options.GetValueOrDefault("conn") ?? throw new ArgumentException("--conn is required", nameof(args));
 var jobs = Number("jobs", 20_000);
 var servers = Number("servers", 1);
@@ -47,8 +47,8 @@ Workload.ConnectionString = connectionString;
 
 IArm Create() => engine switch
 {
-    "warp" => new WarpArm(connectionString, harness, servers, workers, dispatcher: false),
     "warp-dispatcher" => new WarpArm(connectionString, harness, servers, workers, dispatcher: true),
+    "warp-single-worker" => new WarpArm(connectionString, harness, servers, workers, dispatcher: false),
     "hangfire" => new HangfireArm(connectionString, harness, servers, workers),
     _ => throw new NotSupportedException($"Unknown engine '{engine}'"),
 };

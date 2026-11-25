@@ -35,8 +35,9 @@ internal interface IArm : IAsyncDisposable
 
 /// <summary>
 /// Warp, configured the way an application would be: <c>AddWarpServer</c> with the PostgreSQL provider, the worker
-/// count, and every other setting at its default. <paramref name="dispatcher"/> turns on dispatcher mode (one claim
-/// for the whole worker group, completions written in batches); without it each worker claims its own job.
+/// count, and every other setting at its default except <c>UseDispatcher</c>, which each arm sets explicitly so its
+/// meaning does not move with the default: true is dispatcher mode (the default since 8.0: one claim for the whole
+/// worker group, completions written in batches), false is single-worker mode (each worker claims its own job).
 /// </summary>
 internal sealed class WarpArm(string connectionString, string harnessConnectionString, int servers, int workers, bool dispatcher) : IArm
 {

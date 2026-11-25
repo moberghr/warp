@@ -29,9 +29,9 @@ on:
         default: '3'
         type: string
       engines:
-        description: 'Arms: warp (default settings), warp-dispatcher (UseDispatcher = true), hangfire'
+        description: 'Arms: warp-dispatcher (UseDispatcher = true, the default), warp-single-worker (UseDispatcher = false), hangfire'
         required: false
-        default: 'warp warp-dispatcher hangfire'
+        default: 'warp-dispatcher warp-single-worker hangfire'
         type: string
       kinds:
         description: 'Job kinds: noop (empty job), work (reads and updates one row)'
@@ -75,12 +75,12 @@ jobs:
           set -euo pipefail
           bin=src/benchmarks/Warp.Comparison/bin/Release/net10.0/Warp.Comparison
           mkdir -p results
-          set -- ${{ inputs.engines || 'warp warp-dispatcher hangfire' }}
+          set -- ${{ inputs.engines || 'warp-dispatcher warp-single-worker hangfire' }}
           count=$#
           for round in $(seq 1 ${{ inputs.rounds || '3' }}); do
             # Rotate the arms' order each round, so none always runs first on a cold machine.
             shift_by=$(( (round - 1) % count ))
-            order=$(echo ${{ inputs.engines || 'warp warp-dispatcher hangfire' }} | tr ' ' '\n' | awk -v s=$shift_by -v n=$count '{a[NR-1]=$0} END {for (i=0;i<n;i++) print a[(i+s)%n]}')
+            order=$(echo ${{ inputs.engines || 'warp-dispatcher warp-single-worker hangfire' }} | tr ' ' '\n' | awk -v s=$shift_by -v n=$count '{a[NR-1]=$0} END {for (i=0;i<n;i++) print a[(i+s)%n]}')
             for kind in ${{ inputs.kinds || 'noop work' }}; do
               for engine in $order; do
                 db="cmp_r${round}_${kind}_${engine//-/_}"

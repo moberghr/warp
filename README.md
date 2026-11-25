@@ -29,7 +29,7 @@ public class SendConfirmationEmailHandler(IEmailSender email) : IJobHandler<Send
 
 - **One library, four kinds of work.** Jobs, messages, requests and streams share one handler model and one pipeline.
 - **Jobs commit with your data.** Warp writes to your EF Core `DbContext`, so a job and the row it belongs to are saved together or not at all. There is no broker to run.
-- **Light on the database.** In dispatcher mode jobs are claimed in batches and completed in batches: about 0.22 statements per job.
+- **Light on the database.** Jobs are claimed in batches and completed in batches (dispatcher mode, the default since 8.0): about 0.22 statements per job.
 - **A dashboard that explains what happened.** State history, live handler logs, error groups, queue wait, SLOs and traces across jobs.
 - **Nothing to register.** A source generator finds your handlers at build time and dispatches to them without reflection.
 
@@ -37,7 +37,7 @@ public class SendConfirmationEmailHandler(IEmailSender email) : IJobHandler<Send
 
 The same 20,000 jobs on the same PostgreSQL server, 1 server × 10 workers, Warp 8.0 against Hangfire 1.8 (median of 3 runs):
 
-| | Warp (dispatcher) | Warp (default) | Hangfire |
+| | Warp (dispatcher, default) | Warp (single-worker) | Hangfire |
 |---|---|---|---|
 | Drain 20,000 empty jobs | **2.1 s** | 11.2 s | 34.7 s |
 | Drain 20,000 jobs that read and update a row | **5.3 s** | 13.8 s | 36.4 s |

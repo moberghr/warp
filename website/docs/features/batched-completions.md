@@ -4,22 +4,21 @@ sidebar_position: 10
 
 # Batched Completions (Dispatcher Mode)
 
-When running in dispatcher mode (`UseDispatcher = true`), each worker buffers job completions in memory and flushes them as a single multi-row transaction. This collapses N per-job commits into one, cutting database round-trips on high-throughput workloads.
+In dispatcher mode (`UseDispatcher = true`, the default since 8.0), each worker buffers job completions in memory and flushes them as a single multi-row transaction. This collapses N per-job commits into one, cutting database round-trips on high-throughput workloads.
 
 ## Setup
 
-Batched completions are automatic when dispatcher mode is enabled. Tune the batch size and flush interval if the defaults don't fit your workload:
+Batched completions are automatic in dispatcher mode. Tune the batch size and flush interval if the defaults don't fit your workload:
 
 ```csharp
 builder.Services.AddWarpServer<AppDbContext>(config =>
 {
-    config.UseDispatcher = true;
     config.CompletionBatchSize = 50;                         // default: 50
     config.CompletionFlushInterval = TimeSpan.FromMilliseconds(100); // default: 100ms
 });
 ```
 
-Opt out by setting `CompletionBatchSize = 1` — each completion flushes immediately, equivalent to the non-dispatcher path.
+Set `CompletionBatchSize = 1` to start a write as soon as anything is buffered. To turn batching off entirely, set `UseDispatcher = false` (single-worker mode: each worker writes its own completion).
 
 ## How It Works
 
@@ -46,20 +45,17 @@ Batched completions are a throughput optimization, not a latency optimization. C
 - **Delayed visibility** — a job's terminal state doesn't appear in the dashboard until the batch commits (up to `CompletionFlushInterval`). For 100ms flush intervals this is imperceptible; if you raise it significantly, operators see stale "Processing" rows.
 - **Batch size vs. lock contention** — larger batches amortize round-trips but hold row-level locks on more rows per transaction. 50 is a sensible default for PostgreSQL and SQL Server; tune down if you see lock-wait metrics climbing.
 
-## When To Use
+## When To Turn It Off
 
-Enable `UseDispatcher = true` with batched completions when:
+Dispatcher mode is the default because it cuts statements, allocations and connections per job several times over. Set `UseDispatcher = false` (single-worker mode, one commit per job) when:
 
-- **High-throughput** — workers process hundreds of jobs per second per server.
-- **Short-running handlers** — the DB round-trip for the completion write is a meaningful fraction of total handler time.
-- **Idempotent or `[NoRestart]`-protected handlers** — the at-least-once trade-off is acceptable.
-
-For low-throughput or long-running handlers, the non-dispatcher mode (one commit per job) is simpler and has the same per-job latency.
+- **A finished job must read as finished immediately** — something polls a job's state and cannot tolerate up to `CompletionFlushInterval` of `Processing`.
+- **Handlers are not idempotent and cannot be marked `[NoRestart]`** — single-worker mode narrows the window in which a crash re-runs a finished job to the one job each worker holds.
 
 ## Configuration
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `UseDispatcher` | `bool` | `false` | Enables dispatcher mode + batched completions |
+| `UseDispatcher` | `bool` | `true` | Dispatcher mode + batched completions; `false` selects single-worker mode |
 | `CompletionBatchSize` | `int` | `50` | Max completions buffered before an automatic flush |
 | `CompletionFlushInterval` | `TimeSpan` | `100ms` | Max age of the oldest buffered completion before flush |

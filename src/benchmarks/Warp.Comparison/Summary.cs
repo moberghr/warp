@@ -21,7 +21,7 @@ internal static class Summary
         ("Idle connections (average)", x => x.AverageIdleConnections, "0.0"),
     ];
 
-    private static readonly string[] EngineOrder = ["warp", "warp-dispatcher", "hangfire"];
+    private static readonly string[] EngineOrder = ["warp-dispatcher", "warp-single-worker", "hangfire"];
 
     public static string Render(List<RunResult> results)
     {
@@ -61,8 +61,8 @@ internal static class Summary
 
     private static string Label(string engine) => engine switch
     {
-        "warp" => "Warp (default)",
-        "warp-dispatcher" => "Warp (dispatcher)",
+        "warp-dispatcher" => "Warp (dispatcher, the default)",
+        "warp-single-worker" => "Warp (single-worker)",
         "hangfire" => "Hangfire",
         _ => engine,
     };

@@ -170,8 +170,9 @@ builder.Services.AddWarpServer<AppDbContext>(options =>
     options.PollingIntervalFactor = 2.0;                   // multiplier on each empty poll (1.0 disables backoff)
     options.Queues = ["a-critical", "b-default", "c-low"];
 
-    // Dispatcher mode (batch-fetch instead of per-worker polling)
-    options.UseDispatcher = false;
+    // Dispatcher mode (default): one batch claim per worker group, batched completions.
+    // false = single-worker mode, each worker claims and completes its own job.
+    options.UseDispatcher = true;
 
     // Cancellation
     options.CancellationCheckInterval = TimeSpan.FromSeconds(5);
@@ -243,15 +244,19 @@ Paused workers/groups always poll at the floor (no backoff while paused).
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `UseDispatcher` | `bool` | `false` | When true, uses a batch-fetch dispatcher instead of per-worker polling |
+| `UseDispatcher` | `bool` | `true` | One dispatcher per worker group claims jobs in batches and completions are written in batches. `false` selects single-worker mode (the default before 8.0). |
 | `CompletionBatchSize` | `int` | `50` | Dispatcher mode only. Max job completions buffered per worker before an automatic flush |
 | `CompletionFlushInterval` | `TimeSpan` | `100ms` | Dispatcher mode only. Max age of the oldest buffered completion before flush |
 
-By default, each worker polls the database independently for the next job. With `UseDispatcher = true`, a single dispatcher thread batch-fetches jobs and distributes them to workers via an in-memory channel. This reduces database load when running many workers, at the cost of slightly higher latency for the first job in a batch.
+By default (since 8.0) each worker group has one dispatcher that claims jobs for all its free workers in one statement and hands them to the workers through an in-memory channel. Finished jobs are buffered per group and written in one statement — tune `CompletionBatchSize` / `CompletionFlushInterval`, or set `CompletionBatchSize = 1` to start a write as soon as anything is buffered. See [Batched Completions](/docs/features/batched-completions) for the trade-offs. In the [Warp vs Hangfire](/docs/performance/warp-vs-hangfire) run, dispatcher mode issued 0.22 statements and allocated 15 KB per empty job, against 7.03 statements and 130 KB in single-worker mode.
 
-In dispatcher mode, each worker also buffers job completions and commits them as a single multi-row transaction — tune `CompletionBatchSize` / `CompletionFlushInterval` or set `CompletionBatchSize = 1` to opt out. See [Batched Completions](/docs/features/batched-completions) for trade-offs.
+What dispatcher mode changes, compared with single-worker mode:
 
-Use dispatcher mode when you have many workers (20+) and want to reduce database polling pressure. For most setups, the default per-worker polling is simpler and works well.
+- A finished job shows as `Processing` until its batch is written (up to `CompletionFlushInterval`, 100 ms by default).
+- After a crash, jobs whose completion was still buffered run again (stale-job recovery requeues them unless they are `[NoRestart]`).
+- A job claimed ahead of a free worker (`PrefetchCount`) waits for crash recovery if its server dies before running it.
+
+Set `UseDispatcher = false` for single-worker mode, where each worker claims, runs and completes one job at a time and writes its completion straight away.
 
 ### Log Flushing
 

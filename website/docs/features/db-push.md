@@ -17,8 +17,8 @@ builder.Services.AddWarpServer<AppDbContext>(opt =>
 {
     opt.UsePostgreSql();         // or opt.UseSqlServer()
 
-    // Optional: one fetch hands out the work instead of every bare worker waking at once.
-    opt.UseDispatcher = true;
+    // Dispatcher mode is the default since 8.0, so one fetch hands out the work instead of
+    // every bare worker waking at once.
     opt.PollingInterval = TimeSpan.FromSeconds(5); // loose polling is fine when push is on
 
     opt.UseDatabasePush();
@@ -37,7 +37,7 @@ The provider-specific transport is wired by whichever `UsePostgreSql()` / `UseSq
 | `MessageRouter`              | `MessageEnqueued`                 | &lt;50ms        |
 | `Orchestrator`               | `JobFinalized`                    | &lt;50ms        |
 
-A cross-process `JobEnqueued` wakes workers in both modes: the listener wakes the dispatcher **and** signals every bare worker of the process. With `UseDispatcher = true` one fetch hands out the work; with `UseDispatcher = false` every bare worker of the process wakes at once and each fetches for itself. Push is not "without effect" in either mode.
+A cross-process `JobEnqueued` wakes workers in both modes: the listener wakes the dispatcher **and** signals every bare worker of the process. In dispatcher mode (the default) one fetch hands out the work; with `UseDispatcher = false` every bare worker of the process wakes at once and each fetches for itself. Push is not "without effect" in either mode.
 
 ## Which Saves Send a Notification
 

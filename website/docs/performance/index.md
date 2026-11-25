@@ -9,7 +9,7 @@ Warp's queue lives in your application database, so every statement the queue is
 
 ## At a glance
 
-Measured on PostgreSQL 18 for 8.0, 1 server × 10 workers in dispatcher mode, 20,000 jobs, the median of 3 runs on a GitHub runner ([run](https://github.com/moberghr/warp/actions/runs/45617194190)).
+Measured on PostgreSQL 18 for 8.0, 1 server × 10 workers in dispatcher mode (the default), 20,000 jobs, the median of 3 runs on a GitHub runner ([run](https://github.com/moberghr/warp/actions/runs/45617194190)).
 
 | | Empty jobs | Jobs that read and update a row |
 |---|---|---|
@@ -20,13 +20,13 @@ Measured on PostgreSQL 18 for 8.0, 1 server × 10 workers in dispatcher mode, 20
 | Allocated per job | 15.2 KB | 25.1 KB |
 | Peak database connections | 5 | 15 |
 
-- **[Warp vs Hangfire](./warp-vs-hangfire.md)**: the same jobs on the same database, with the harness in the repository. In dispatcher mode Warp drained the queue 7 to 16 times sooner; with default settings, 2.6 to 3 times sooner.
+- **[Warp vs Hangfire](./warp-vs-hangfire.md)**: the same jobs on the same database, with the harness in the repository. With default settings (dispatcher mode) Warp drained the queue 7 to 16 times sooner; in single-worker mode, 2.6 to 3 times sooner.
 - **[8.0 against 7.7](../releases.md#a-faster-worker-and-less-database-work)**: statements, WAL and connections per job for 19 scenarios, on both databases, from the CI perf workflow.
 - **[Memory benchmarks](../operations/benchmarks.md)**: the leak test and how to run the benchmark projects.
 
 ## How Warp keeps the database quiet
 
-These apply to dispatcher mode (`UseDispatcher = true`) unless noted.
+These apply to dispatcher mode, the default since 8.0, unless noted.
 
 - **Jobs are claimed in batches.** One statement claims work for every free worker in a group, so workers do not each poll the table.
 - **Nothing is written between the claim and your handler.** The "Processing" log row is written later, with the first monitor flush or with the completion.
@@ -40,21 +40,20 @@ These apply to dispatcher mode (`UseDispatcher = true`) unless noted.
 
 ## Settings for throughput
 
-The defaults favour simplicity: each worker polls for its own job and commits its own completion. For a busy queue, turn on the dispatcher and database push:
+The dispatcher is on by default: one claim serves a worker group and completions are written in batches. For a busy queue, add database push, which is opt-in because it needs more from the database and the connection:
 
 ```csharp
 builder.Services.AddWarpServer<AppDbContext>(opt =>
 {
     opt.UsePostgreSql();          // or opt.UseSqlServer()
 
-    opt.UseDispatcher = true;     // batch claim + batched completions
     opt.UseDatabasePush();        // wake on enqueue instead of polling
 });
 ```
 
 | Setting | What it changes | Cost |
 |---|---|---|
-| [`UseDispatcher`](../operations/configuration.md#dispatcher-mode) | One claim serves the whole worker group, and completions are written in batches. | A finished job shows as `Processing` until its batch is written (up to 100 ms by default). After a crash, jobs whose completion was still buffered run again. |
+| [`UseDispatcher`](../operations/configuration.md#dispatcher-mode) (default `true`) | One claim serves the whole worker group, and completions are written in batches. Set it to `false` for single-worker mode, where each worker claims and completes its own job. | A finished job shows as `Processing` until its batch is written (up to 100 ms by default). After a crash, jobs whose completion was still buffered run again. |
 | [`UseDatabasePush()`](../features/db-push.md) | Workers wake within about 50 ms of an enqueue, on any server. | Needs a session-mode connection on PostgreSQL, and Service Broker on SQL Server. |
 | [`CompletionBatchSize`](../features/batched-completions.md) | How many completions one statement writes (default 50). | Larger batches lock more rows per transaction. |
 | [`AddWorkerGroup`](../operations/configuration.md#worker-groups) | Separate worker pools per queue, so a bulk queue cannot starve a critical one. | More groups to size. |

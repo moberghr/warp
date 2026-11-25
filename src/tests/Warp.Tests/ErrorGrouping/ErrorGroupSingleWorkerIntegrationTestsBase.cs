@@ -10,7 +10,7 @@ using Warp.Worker.Services;
 namespace Warp.Tests.ErrorGrouping;
 
 /// <summary>
-/// End-to-end guard for §8.29 in the DEFAULT single-worker mode (<c>UseDispatcher = false</c>). Here
+/// End-to-end guard for §8.29 in single-worker mode (<c>UseDispatcher = false</c>). Here
 /// <c>WarpWorkerService.FinalizeJobState</c> — not the dispatcher's batched completion copy
 /// (<see cref="ErrorGroupDispatcherIntegrationTestsBase"/>) — is the code that appends the
 /// <see cref="ErrorOccurrence"/> inbox row on failure. This boots a real single-worker server, fails a job,

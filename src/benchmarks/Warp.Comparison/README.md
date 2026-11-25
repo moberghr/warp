@@ -10,8 +10,8 @@ Three arms, each with the same number of servers and workers (default 1 server Ã
 
 | Arm | Configuration |
 |---|---|
-| `warp` | `AddWarpServer` with `UsePostgreSql()` and `WorkerCount`. Every other setting at its default: each worker claims its own job. |
-| `warp-dispatcher` | The same, with `UseDispatcher = true`: one claim serves the worker group and completions are written in batches. |
+| `warp-dispatcher` | `AddWarpServer` with `UsePostgreSql()`, `WorkerCount` and `UseDispatcher = true`, every other setting at its default. Dispatcher mode is the default since 8.0: one claim serves the worker group and completions are written in batches. |
+| `warp-single-worker` | The same with `UseDispatcher = false`: each worker claims, runs and completes its own job (the default before 8.0). |
 | `hangfire` | Hangfire 1.8.25 with Hangfire.PostgreSql 1.21.1, its default filters (automatic retry, statistics, continuations), `WorkerCount`, and `QueuePollInterval` at 1 s instead of 15 s, so an idle worker looks again after a second. |
 
 Two jobs, identical in both libraries (`Jobs.cs`):

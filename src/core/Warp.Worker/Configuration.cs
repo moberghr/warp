@@ -349,11 +349,18 @@ public class WarpServerConfiguration : WarpConfiguration
     public bool EnableHandlerLogging { get; set; } = true;
 
     /// <summary>
-    /// When true, uses a single dispatcher per worker group that batch-fetches jobs
-    /// and distributes them to workers, reducing per-job DB overhead.
-    /// When false (default), each worker independently fetches its own jobs.
+    /// When true (default), one dispatcher per worker group batch-fetches jobs, hands them to the
+    /// group's workers and writes their completions in batches (see <see cref="CompletionBatchSize"/>
+    /// and <see cref="CompletionFlushInterval"/>), which cuts the per-job database round trips,
+    /// allocations and connections several times over.
+    /// <para>
+    /// When false, each worker independently fetches, runs and completes one job at a time
+    /// (single-worker mode, the default before 8.0). A finished job is written as Completed in the
+    /// same step, a crash leaves no buffered completions to re-run, and no job waits in a server's
+    /// prefetch buffer — choose it when those matter more than throughput.
+    /// </para>
     /// </summary>
-    public bool UseDispatcher { get; set; }
+    public bool UseDispatcher { get; set; } = true;
 
     /// <summary>
     /// Dispatcher-mode only. The completions of a worker group's jobs are buffered together and written
