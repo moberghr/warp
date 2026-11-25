@@ -86,9 +86,7 @@ public abstract class ConcurrencyIntegrationTestsBase : IntegrationTestBase
             // Exactly one, read once the job is at rest: the row is deferred (rule 6.12), written by the
             // monitor's first flush or with the completion, so mid-run it may not exist yet. Asserting it
             // 300 ms after the handlers entered failed on CI (SQL Server 2025) when the flush came later.
-            var processingLogs = await readCtx.Set<JobLog>()
-                .CountAsync(l => l.JobId == jobId && l.EventType == "Processing", Xunit.TestContext.Current.CancellationToken);
-            processingLogs.ShouldBe(1, $"Job {jobId} should have exactly one Processing log");
+            await server.WaitForJobLogCount(jobId, "Processing", 1);
         }
     }
 
@@ -108,9 +106,7 @@ public abstract class ConcurrencyIntegrationTestsBase : IntegrationTestBase
         job.CurrentState.ShouldBe(State.Completed);
 
         // Exactly one Processing and one Completed log — only one worker touched it
-        var processingLogs = await ctx.Set<JobLog>()
-            .CountAsync(l => l.JobId == jobId && l.EventType == "Processing", Xunit.TestContext.Current.CancellationToken);
-        processingLogs.ShouldBe(1);
+        await server.WaitForJobLogCount(jobId, "Processing", 1);
 
         var completedLogs = await ctx.Set<JobLog>()
             .CountAsync(l => l.JobId == jobId && l.EventType == "Completed", Xunit.TestContext.Current.CancellationToken);

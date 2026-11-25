@@ -4,6 +4,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Time.Testing;
+using Shouldly;
 using Warp.Core;
 using Warp.Core.BackgroundServices;
 using Warp.Core.CircuitBreaker;
@@ -450,6 +451,38 @@ public class WarpTestServer : IAsyncDisposable
             .FirstOrDefaultAsync(Xunit.TestContext.Current.CancellationToken);
 
         throw new TimeoutException($"Job {jobId} did not reach state {state} within {effectiveTimeout}. Current state: {finalState}");
+    }
+
+    /// <summary>
+    /// Waits until the job has exactly <paramref name="expected"/> committed log rows of one event type, and
+    /// fails with the count it found otherwise.
+    /// <para>
+    /// For rows that can land AFTER the job's terminal state is visible. A "Processing" row is deferred (rule
+    /// 6.12): for a job that has run a whole monitor tick the running-job monitor takes it and saves it on its
+    /// own, and the worker does not wait for that save before it finalizes the job. Counting those rows the
+    /// moment the job reached its state read one short on CI (SQL Server 2025: 2 of 3).
+    /// </para>
+    /// </summary>
+    public async Task WaitForJobLogCount(Guid jobId, string eventType, int expected, TimeSpan? timeout = null)
+    {
+        var deadline = DateTime.UtcNow + (timeout ?? TimeSpan.FromSeconds(5));
+        var count = -1;
+        while (DateTime.UtcNow < deadline)
+        {
+            count = await CreateContext().Set<JobLog>()
+                .CountAsync(
+                    x => x.JobId == jobId && x.EventType == eventType,
+                    Xunit.TestContext.Current.CancellationToken);
+
+            if (count >= expected)
+            {
+                break;
+            }
+
+            await Task.Delay(100, Xunit.TestContext.Current.CancellationToken);
+        }
+
+        count.ShouldBe(expected, $"Job {jobId} should have exactly {expected} '{eventType}' log row(s)");
     }
 
     public async Task WaitForJobLog(Guid jobId, string eventType, TimeSpan? timeout = null)
