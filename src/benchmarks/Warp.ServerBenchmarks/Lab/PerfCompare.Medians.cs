@@ -62,8 +62,8 @@ public static partial class PerfCompare
             + $"{UnsteadyCountPct:0}% apart (transactions: {UnsteadyTransactionsPct:0}%, pages: {UnsteadyPagesPct:0}%): that case did not do the same work every time. Speed is head ÷ base jobs per second "
             + "within each run, median and range; it is the only timing here, and a ratio because the runners differ.");
         report.AppendLine();
-        report.AppendLine("| Scenario | Case | Database | Runs | Statements | WAL | Commands | Transactions | Pages | Speed |");
-        report.AppendLine("| :--- | :--- | :--- | ---: | :--- | :--- | :--- | :--- | :--- | :--- |");
+        report.AppendLine("| Scenario | Case | Database | Runs | Statements | WAL | Commands | Transactions | Pages | Peak conns | Idle conns | Speed |");
+        report.AppendLine("| :--- | :--- | :--- | ---: | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |");
 
         foreach (var cases in repeats)
         {
@@ -80,6 +80,8 @@ public static partial class PerfCompare
                 MedianCell(cases, x => x.RoundTripsPerJob, "0.00", unit, UnsteadyCountPct, UnsteadyCountFloor),
                 MedianCell(cases, x => x.TransactionsPerJob, "0.00", unit, UnsteadyTransactionsPct, UnsteadyCountFloor),
                 MedianCell(cases, x => x.BuffersPerJob, "0.0", unit, UnsteadyPagesPct, 0),
+                MedianCell(cases, x => x.PeakConnections, "0", string.Empty, UnsteadyPagesPct, 2),
+                MedianCell(cases, x => x.IdleConnections, "0.0", string.Empty, UnsteadyPagesPct, 2),
                 SpeedCell(cases) + " |"));
         }
 

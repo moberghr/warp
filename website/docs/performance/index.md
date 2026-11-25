@@ -9,25 +9,24 @@ Warp's queue lives in your application database, so every statement the queue is
 
 ## At a glance
 
-Measured on PostgreSQL for the unreleased 8.0. Each cell is the range across repeated runs. The second column ran with 10 workers.
+Measured on PostgreSQL 18 for 8.0, 1 server × 10 workers in dispatcher mode (the default), 20,000 jobs, the median of 3 runs on a GitHub runner ([run](https://github.com/moberghr/warp/actions/runs/45617194190)).
 
 | | Empty jobs | Jobs that read and update a row |
 |---|---|---|
-| Throughput, first job to last | 4,633–7,464 jobs/s | 1,105–1,446 jobs/s |
-| Database statements per job | 0.23–0.24 | 3.3–3.4 (2 are the job's own) |
-| PostgreSQL CPU per job | 0.11–0.20 ms | 0.49–0.53 ms |
-| Worker CPU per job | 0.12–0.13 ms | 0.52–0.57 ms |
-| Allocated per job | 13.7 KB | 19–23 KB |
+| Throughput, first job to last | 10,388 jobs/s | 3,892 jobs/s |
+| Database statements per job | 0.22 | 3.39 (2 are the job's own) |
+| Database time per job | 0.061 ms | 0.261 ms |
+| Worker CPU per job | 0.15 ms | 0.41 ms |
+| Allocated per job | 15.2 KB | 25.1 KB |
+| Peak database connections | 5 | 15 |
 
-{/* VERIFY: figures from the comparison summary of 2026-11-25; the empty-job run did not state its worker count. Update from the detailed report. */}
-
-- **[Warp vs Hangfire](./warp-vs-hangfire.md)**: the same jobs on the same database. Warp drained the queue 9 to 34 times sooner, depending on the workload.
-- **[8.0 against 7.7](../releases.md#a-faster-worker-and-less-database-work)**: jobs per second and statements per job for 15 scenarios, on both databases, from the CI perf workflow.
+- **[Warp vs Hangfire](./warp-vs-hangfire.md)**: the same jobs on the same database, with the harness in the repository. With default settings (dispatcher mode) Warp drained the queue 7 to 16 times sooner; in single-worker mode, 2.6 to 3 times sooner.
+- **[8.0 against 7.7](../releases.md#a-faster-worker-and-less-database-work)**: statements, WAL and connections per job for 19 scenarios, on both databases, from the CI perf workflow.
 - **[Memory benchmarks](../operations/benchmarks.md)**: the leak test and how to run the benchmark projects.
 
 ## How Warp keeps the database quiet
 
-These apply to dispatcher mode (`UseDispatcher = true`) unless noted.
+These apply to dispatcher mode, the default since 8.0, unless noted.
 
 - **Jobs are claimed in batches.** One statement claims work for every free worker in a group, so workers do not each poll the table.
 - **Nothing is written between the claim and your handler.** The "Processing" log row is written later, with the first monitor flush or with the completion.
@@ -35,27 +34,27 @@ These apply to dispatcher mode (`UseDispatcher = true`) unless noted.
 - **Completions are written many at a time.** Workers hand a finished job to the group's buffer and take the next one. One statement writes the batch. See [Batched Completions](../features/batched-completions.md).
 - **Handlers are dispatched by generated code.** The source generator emits a typed call for each job type, so running a job involves no reflection. This applies in both modes.
 - **The worker never builds your `DbContext`.** A handler that does not touch the database does not pay for one. This applies in both modes.
-- **Job indexes are partial.** Four indexes cover only the rows that are waiting, so most state changes write fewer index entries.
+- **Job indexes are partial.** Four job indexes cover only the rows they are read for (waiting, scheduled, with a parent, with an expiry), so most state changes write fewer index entries.
 - **Ids are time-ordered (UUID version 7).** On PostgreSQL, inserts land on the newest index pages.
 - **Idle servers stay idle.** Cluster-wide tasks run once per tick for the whole cluster, and an idle run writes nothing.
 
 ## Settings for throughput
 
-The defaults favour simplicity: each worker polls for its own job and commits its own completion. For a busy queue, turn on the dispatcher and database push:
+The dispatcher is on by default: one claim serves a worker group and completions are written in batches. For a busy queue, add database push, which is opt-in because it needs more from the database and the connection:
 
 ```csharp
 builder.Services.AddWarpServer<AppDbContext>(opt =>
 {
     opt.UsePostgreSql();          // or opt.UseSqlServer()
 
-    opt.UseDispatcher = true;     // batch claim + batched completions
     opt.UseDatabasePush();        // wake on enqueue instead of polling
 });
 ```
 
 | Setting | What it changes | Cost |
 |---|---|---|
-| [`UseDispatcher`](../operations/configuration.md#dispatcher-mode) | One claim serves the whole worker group, and completions are written in batches. | A finished job shows as `Processing` until its batch is written (up to 100 ms by default). After a crash, jobs whose completion was still buffered run again. |
+| [`UseDispatcher`](../operations/configuration.md#dispatcher-mode) (default `true`) | One claim serves the whole worker group, and completions are written in batches. Set it to `false` for single-worker mode, where each worker claims and completes its own job. | A finished job shows as `Processing` until its batch is written (up to 100 ms by default). After a crash, jobs whose completion was still buffered run again. |
+| [`PrefetchCount`](../operations/configuration.md#worker) (default 0) | Buffers jobs ahead of the workers, so a worker that finishes starts its next job without a claim round trip: about 16% more empty jobs per second at `WorkerCount` on one server. | A prefetched job waits behind its own server's running jobs even while another server is idle, and waits for crash recovery if that server dies. Keep it at 0 for long-running jobs or several servers. |
 | [`UseDatabasePush()`](../features/db-push.md) | Workers wake within about 50 ms of an enqueue, on any server. | Needs a session-mode connection on PostgreSQL, and Service Broker on SQL Server. |
 | [`CompletionBatchSize`](../features/batched-completions.md) | How many completions one statement writes (default 50). | Larger batches lock more rows per transaction. |
 | [`AddWorkerGroup`](../operations/configuration.md#worker-groups) | Separate worker pools per queue, so a bulk queue cannot starve a critical one. | More groups to size. |

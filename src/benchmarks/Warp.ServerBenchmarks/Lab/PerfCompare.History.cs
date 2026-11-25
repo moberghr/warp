@@ -301,7 +301,9 @@ public static partial class PerfCompare
             result.DbTimePerJob,
             result.RoundTripsPerJob,
             result.TransactionsPerJob,
-            result.LockWaitMsPerJob);
+            result.LockWaitMsPerJob,
+            result.PeakConnections,
+            result.IdleConnections);
     }
 
     private static string ScenarioTitleOf(BdnCase benchmark) =>
@@ -374,5 +376,7 @@ public static partial class PerfCompare
         double? DbTimePerJob = null,
         double? RoundTripsPerJob = null,
         double? TransactionsPerJob = null,
-        double? LockWaitMsPerJob = null);
+        double? LockWaitMsPerJob = null,
+        double? PeakConnections = null,
+        double? IdleConnections = null);
 }

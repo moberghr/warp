@@ -362,8 +362,8 @@ public static partial class PerfCompare
             ? DatabaseStatementsDiagnoser.IsPerSecond(type)
             : cases.All(x => headRun.TryGetValue(x.FullName, out var measured) ? measured.PerSecond : JobCountOf(x) is null);
         var per = perSecond ? "s" : "job";
-        var header = string.Join(" | ", columns.Append("Commit")) + $" | Mean | Error | StdDev | Ratio | Jobs/s | Statements/{per} | Buffers/{per} | WAL/{per} | DB ms/{per} | Commands/{per} | Xacts/{per} | Lock wait ms/{per} | Allocated | Alloc Ratio | Gate";
-        var alignment = string.Join(" | ", columns.Append("Commit").Select(_ => ":---")) + " | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---";
+        var header = string.Join(" | ", columns.Append("Commit")) + $" | Mean | Error | StdDev | Ratio | Jobs/s | Statements/{per} | Buffers/{per} | WAL/{per} | DB ms/{per} | Commands/{per} | Xacts/{per} | Lock wait ms/{per} | Peak conns | Idle conns | Allocated | Alloc Ratio | Gate";
+        var alignment = string.Join(" | ", columns.Append("Commit").Select(_ => ":---")) + " | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---";
 
         // Declared order, the order BenchmarkDotNet ran them in. Sorting by name put "Keys: 10000"
         // before "Keys: 8".
@@ -661,6 +661,8 @@ public static partial class PerfCompare
             FormatMetric(result.RoundTripsPerJob, "N2"),
             FormatMetric(result.TransactionsPerJob, "N2"),
             FormatLockWait(result),
+            FormatMetric(result.PeakConnections, "N0"),
+            FormatMetric(result.IdleConnections, "N1"),
             result.Bytes is null ? "NA" : FormatBytes(result.Bytes.Value));
 
     // Lock wait, with the window's deadlocks beside it when there were any.
@@ -871,7 +873,9 @@ public static partial class PerfCompare
                     MetricOf(benchmark, "JobRows"),
                     MetricOf(benchmark, "SmallestServerShare"),
                     MetricOf(benchmark, "ServerJobs"),
-                    ActualOperations(benchmark));
+                    ActualOperations(benchmark),
+                    MetricOf(benchmark, "PeakConnections"),
+                    MetricOf(benchmark, "IdleConnections"));
             }
         }
 
@@ -974,7 +978,9 @@ public static partial class PerfCompare
         double? JobRows = null,
         double? SmallestServerShare = null,
         double? ServerJobs = null,
-        long Operations = 0);
+        long Operations = 0,
+        double? PeakConnections = null,
+        double? IdleConnections = null);
 
     private sealed record BdnHost(
         string? BenchmarkDotNetVersion,

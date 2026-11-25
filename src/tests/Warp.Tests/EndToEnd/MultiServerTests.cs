@@ -26,8 +26,10 @@ public abstract class MultiServerTestsBase : IntegrationTestBase
     private static void Configure3Workers(WarpServerBuilder<TestContext> config)
         => config.WorkerCount = 3;
 
-    [TimedFact]
-    public async Task GivenTwoBarrierJobs_WithTwoServers_ThenClaimedExactlyOnceAcrossServers()
+    [TimedTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GivenTwoBarrierJobs_WithTwoServers_ThenClaimedExactlyOnceAcrossServers(bool useDispatcher)
     {
         // Deterministic cross-server claim test: 2 jobs, 2 servers × 3 workers each (6 workers
         // total competing). The barrier handler signals on entry and blocks; once two Running
@@ -39,6 +41,8 @@ public abstract class MultiServerTestsBase : IntegrationTestBase
         void WithBarrier(WarpServerBuilder<TestContext> cfg)
         {
             Configure3Workers(cfg);
+
+            cfg.UseDispatcher = useDispatcher;
             cfg.Services.AddSingleton(barrier);
         }
 
@@ -73,12 +77,15 @@ public abstract class MultiServerTestsBase : IntegrationTestBase
                 job.CurrentWorkerId.ShouldNotBeNull();
             }
 
-            // Two distinct workers hold the jobs (no single-worker double-claim)
-            var workerIds = await ctx.Set<Job>()
-                .Where(j => j.Id == job1Id || j.Id == job2Id)
-                .Select(j => j.CurrentWorkerId)
-                .ToListAsync(Xunit.TestContext.Current.CancellationToken);
-            workerIds.Distinct().Count().ShouldBe(2, "Two jobs must be processed by two distinct workers");
+            if (!useDispatcher)
+            {
+                // Distinct CurrentWorkerId per running job is single-worker semantics; a dispatcher group shares one (§6.12).
+                var workerIds = await ctx.Set<Job>()
+                    .Where(j => j.Id == job1Id || j.Id == job2Id)
+                    .Select(j => j.CurrentWorkerId)
+                    .ToListAsync(Xunit.TestContext.Current.CancellationToken);
+                workerIds.Distinct().Count().ShouldBe(2, "Two jobs must be processed by two distinct workers");
+            }
         }
         finally
         {

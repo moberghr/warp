@@ -172,6 +172,16 @@ public class WarpTestServer : IAsyncDisposable
         {
             if (PauseState.IsPaused(groupId) == expectedPaused)
             {
+                // The holder flipped, but a loop that read "not paused" just before is still in its claim and can
+                // return a row the test writes next (rule 6.8). Wait until every loop of the group has answered
+                // "paused" since.
+                if (expectedPaused && PauseState is WorkerLoopPauseTracker loops)
+                {
+                    using var bounded = CancellationTokenSource.CreateLinkedTokenSource(Xunit.TestContext.Current.CancellationToken);
+                    bounded.CancelAfter(deadline - DateTime.UtcNow);
+                    await loops.WaitUntilEveryLoopSawPauseAsync(bounded.Token, groupId);
+                }
+
                 return;
             }
 
@@ -296,7 +306,6 @@ public class WarpTestServer : IAsyncDisposable
                     // Tests configure short retry delays (1s); keep the Scheduled→Enqueued
                     // sweep tight so retry loops don't stall waiting for the 5s default.
                     config.ScheduledActivationInterval = TimeSpan.FromMilliseconds(250);
-                    config.UseDispatcher = false;
 
                     // Turn off the auto Counter→Statistic aggregator. No test relies on it
                     // firing automatically — tests that need aggregation invoke
@@ -341,6 +350,9 @@ public class WarpTestServer : IAsyncDisposable
                     config.AddTimeout();
                 });
 
+                // Every test server tracks its worker loops, so WaitForPauseState can wait for the pause to reach
+                // them; a test that registers its own PauseStateHolder below replaces it.
+                services.AddSingleton<PauseStateHolder>(new WorkerLoopPauseTracker());
                 configureServices?.Invoke(services);
             })
             .Build();

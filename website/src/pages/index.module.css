@@ -277,7 +277,7 @@
 
 .perfRow {
   display: grid;
-  grid-template-columns: 76px 1fr 96px;
+  grid-template-columns: 148px 1fr 64px;
   align-items: center;
   gap: 14px;
   color: var(--wp-text-muted);
@@ -562,7 +562,7 @@
   }
 
   .perfRow {
-    grid-template-columns: 68px 1fr 88px;
+    grid-template-columns: 132px 1fr 56px;
     gap: 10px;
   }
 

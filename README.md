@@ -33,7 +33,7 @@ public class SendConfirmationEmailHandler(IEmailSender email)
 ## Why Warp
 
 - **Jobs commit with your data.** Warp writes to your `DbContext`, so a job and the row it belongs to are saved together or not at all.
-- **Light on the database.** Jobs are claimed in batches and completed in batches: about 0.24 statements per job.
+- **Light on the database.** Jobs are claimed in batches and completed in batches (dispatcher mode, the default since 8.0): about 0.22 statements per job.
 - **One library, four kinds of work.** Jobs, messages, requests and streams share one handler model and one pipeline.
 - **A dashboard that explains what happened.** State history, live handler logs, error groups, queue wait, SLOs and traces across jobs.
 - **Nothing to register.** A source generator finds your handlers at build time and dispatches to them without reflection.
@@ -42,17 +42,17 @@ Not sure it fits? [When another tool fits better](https://moberghr.github.io/war
 
 ## Performance
 
-The queue shares your database, so it should not crowd it. The same jobs on the same PostgreSQL server, Warp 8.0 against Hangfire:
+The queue shares your database, so it should not crowd it. The same 20,000 jobs on the same PostgreSQL server, 1 server × 10 workers, Warp 8.0 against Hangfire 1.8 (median of 3 runs):
 
 ![Time to drain a queue, Warp against Hangfire](https://raw.githubusercontent.com/moberghr/warp/main/website/static/img/readme/performance.svg)
 
-| Per empty job | Warp | Hangfire |
-|---|---|---|
-| Database statements | **0.23–0.24** | 42.8–43.0 |
-| PostgreSQL CPU | **0.11–0.20 ms** | 4.4–4.8 ms |
-| Memory allocated | **13.7 KB** | 79.7 KB |
+| Per empty job | Warp (dispatcher, default) | Warp (single-worker) | Hangfire |
+|---|---|---|---|
+| Database statements | **0.22** | 7.03 | 40.03 |
+| Database time | **0.061 ms** | 0.726 ms | 3.444 ms |
+| Memory allocated | **15.2 KB** | 130.2 KB | 75.0 KB |
 
-Preliminary figures for the unreleased 8.0, measured in November 2026. The method, every measured row and the caveats are on the [comparison page](https://moberghr.github.io/warp/docs/performance/warp-vs-hangfire).
+The harness is in [`src/benchmarks/Warp.Comparison`](src/benchmarks/Warp.Comparison) and runs in the Comparison workflow. Setup, every measured row and the caveats are on the [comparison page](https://moberghr.github.io/warp/docs/performance/warp-vs-hangfire).
 
 ## Quick start
 

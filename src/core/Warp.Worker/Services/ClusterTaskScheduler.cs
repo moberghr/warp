@@ -42,6 +42,15 @@ internal static class ClusterTaskTimings
 
     /// <summary>The loop never sleeps longer than this, so a dashboard edit of an interval or a lost wake is picked up within it.</summary>
     public static readonly TimeSpan MaxSleep = TimeSpan.FromMinutes(1);
+
+    /// <summary>
+    /// How many timer-only tasks (those no signal wakes) one server runs at once. Each run takes a connection of
+    /// its own, and the tasks fall due together on the grid, so running every task a claim won at once held about
+    /// 14 connections open on an idle server for good: the pool keeps a connection that is used again within its
+    /// idle lifetime, and the next tick always came first. Idle runs take milliseconds, so two at a time delays
+    /// nothing. Signal-driven tasks (the Orchestrator, the MessageRouter) are on the job path and never wait.
+    /// </summary>
+    public const int TimerTaskConcurrency = 2;
 }
 
 /// <summary>
@@ -67,6 +76,7 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
     private readonly TimeSpan _signalInterval;
     private readonly TimeSpan _liveWindow;
     private readonly SemaphoreSlim _wake = new(0, 1);
+    private readonly SemaphoreSlim _timerSlots;
     private int _wakes;
     private readonly Lock _gate = new();
 
@@ -92,9 +102,11 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
         ILogger logger,
         TimeSpan signalInterval,
         TimeSpan liveWindow,
-        LegacyServerPresence? legacyServers = null)
+        LegacyServerPresence? legacyServers = null,
+        int timerTaskConcurrency = ClusterTaskTimings.TimerTaskConcurrency)
     {
         _legacyServers = legacyServers;
+        _timerSlots = new SemaphoreSlim(Math.Max(1, timerTaskConcurrency));
         _entries = tasks.ToDictionary(x => x.Name, x => new Entry(x), StringComparer.Ordinal);
         _scopes = scopes;
         _runner = runner;
@@ -376,9 +388,32 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
         var ran = true;
         TimeSpan? runTime = null;
         var held = false;
+        var timerTask = entry.Signals.Count == 0;
+        var slotTaken = false;
         try
         {
-            (ran, message) = await _runner.RunAsync(entry.Info, _legacyServersAlive, run.Token, scheduledRun);
+            // A timer-only task waits for one of the server's slots (TimerTaskConcurrency); its lease is renewed
+            // meanwhile, so another server cannot take it while it waits. The wait is not part of its duration.
+            if (timerTask)
+            {
+                await _timerSlots.WaitAsync(run.Token);
+                slotTaken = true;
+                started = Stopwatch.GetTimestamp();
+            }
+
+            try
+            {
+                (ran, message) = await _runner.RunAsync(entry.Info, _legacyServersAlive, run.Token, scheduledRun);
+            }
+            finally
+            {
+                // Freed before the signal hold below: a held lease must not keep another task from running.
+                if (slotTaken)
+                {
+                    _timerSlots.Release();
+                }
+            }
+
             runTime = Stopwatch.GetElapsedTime(started);
 
             // A run a signal started holds the lease for the rest of the signal interval before it
@@ -670,7 +705,11 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
 
     private static TimeSpan Min(TimeSpan a, TimeSpan b) => a < b ? a : b;
 
-    public void Dispose() => _wake.Dispose();
+    public void Dispose()
+    {
+        _wake.Dispose();
+        _timerSlots.Dispose();
+    }
 
     private sealed class Entry(ServerTaskInfo info)
     {

@@ -5,6 +5,7 @@ using Shouldly;
 using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
 using Warp.Tests.Fixtures;
+using Warp.Tests.Helpers;
 using Warp.Tests.TestData.Handlers;
 using Warp.Worker;
 

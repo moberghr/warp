@@ -182,7 +182,7 @@ const REASONS = [
   },
   {
     title: "Light on the database",
-    body: "Jobs are claimed in batches and completed in batches. An empty job costs about 0.24 database statements, so the queue leaves the server to the rest of your application.",
+    body: "Jobs are claimed in batches and completed in batches. An empty job costs as few as 0.22 database statements, so the queue leaves the server to the rest of your application.",
     to: "/docs/performance",
     link: "Performance",
   },
@@ -290,17 +290,19 @@ function Tour() {
 
 const PERF_BARS = [
   {
-    title: "Drain 50,000 empty jobs",
+    title: "Drain 20,000 empty jobs",
     rows: [
-      { name: "Warp", value: "7.2–10.6 s", pct: 4.3, warp: true },
-      { name: "Hangfire", value: "228–244 s", pct: 100, warp: false },
+      { name: "Warp", value: "2.1 s", pct: 6.1, warp: true },
+      { name: "Warp, single-worker", value: "11.2 s", pct: 32.3, warp: false },
+      { name: "Hangfire", value: "34.7 s", pct: 100, warp: false },
     ],
   },
   {
     title: "Drain 20,000 jobs that read and update a row",
     rows: [
-      { name: "Warp", value: "14.0–17.7 s", pct: 11.4, warp: true },
-      { name: "Hangfire", value: "151–155 s", pct: 100, warp: false },
+      { name: "Warp", value: "5.3 s", pct: 14.6, warp: true },
+      { name: "Warp, single-worker", value: "13.8 s", pct: 37.9, warp: false },
+      { name: "Hangfire", value: "36.4 s", pct: 100, warp: false },
     ],
   },
 ];
@@ -308,18 +310,18 @@ const PERF_BARS = [
 const PERF_ROWS = [
   {
     metric: "Database statements per empty job",
-    warp: "0.23–0.24",
-    other: "42.8–43.0",
+    warp: "0.22",
+    other: "40.03",
   },
   {
-    metric: "PostgreSQL CPU per empty job",
-    warp: "0.11–0.20 ms",
-    other: "4.4–4.8 ms",
+    metric: "Database time per empty job",
+    warp: "0.061 ms",
+    other: "3.444 ms",
   },
   {
     metric: "Memory allocated per empty job",
-    warp: "13.7 KB",
-    other: "79.7 KB",
+    warp: "15.2 KB",
+    other: "75.0 KB",
   },
 ];
 
@@ -331,8 +333,8 @@ function Performance() {
           The queue shares your database. It should not crowd it.
         </h2>
         <p className={styles.lede}>
-          The same jobs on the same PostgreSQL server, Warp&nbsp;8.0 against
-          Hangfire.
+          The same 20,000 jobs on the same PostgreSQL server, one server with
+          10 workers, Warp&nbsp;8.0 against Hangfire&nbsp;1.8.
         </p>
         <div className={styles.perf}>
           <div>
@@ -379,8 +381,9 @@ function Performance() {
           </table>
         </div>
         <p className={styles.note}>
-          Shorter is better. Bars show the slowest run of each range.
-          Preliminary figures for the unreleased 8.0, measured in November 2026.{" "}
+          Shorter is better. Each value is the median of 3 runs. Warp is
+          shown in dispatcher mode, the default since 8.0, and the table
+          compares that mode with Hangfire.{" "}
           <Link to="/docs/performance/warp-vs-hangfire">
             Every measured row, the method and the caveats
           </Link>
@@ -585,7 +588,7 @@ function Install() {
 
 export default function Home(): ReactNode {
   return (
-    <Layout description="Background jobs, pub/sub messages and an in-process mediator for .NET 10, stored in your PostgreSQL or SQL Server database through EF Core. About 0.24 database statements per job, with a real-time operations dashboard.">
+    <Layout description="Background jobs, pub/sub messages and an in-process mediator for .NET 10, stored in your PostgreSQL or SQL Server database through EF Core. As few as 0.22 database statements per job, with a real-time operations dashboard.">
       <main className={styles.page}>
         <Hero />
         <Reasons />
