@@ -193,6 +193,10 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
         if (delta.WalBytes > 0)
         {
             yield return new Metric(PerJobDescriptor.WalBytes, delta.WalBytes / (double)delta.Jobs);
+
+            // The part of the WAL that is whole pages, written for the first change to each page after a
+            // checkpoint. It is what moves WAL/job between runs of identical work, so it is reported beside it.
+            yield return new Metric(PerJobDescriptor.WalFullPageImages, delta.WalFullPageImages / (double)delta.Jobs);
         }
 
         foreach (var metric in LoadMetrics(delta, client, delta.Jobs, perSecond: false))
@@ -435,6 +439,7 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
                     (SELECT COALESCE(SUM(calls), 0) FROM counted) AS statements,
                     (SELECT COALESCE(SUM(shared_blks_hit + shared_blks_read), 0) FROM counted) AS buffers,
                     (SELECT COALESCE(SUM(wal_bytes), 0) FROM counted) AS wal,
+                    (SELECT COALESCE(SUM(wal_fpi), 0) FROM counted) AS wal_fpi,
                     (SELECT COALESCE(SUM(total_exec_time + total_plan_time), 0) FROM counted) AS db_ms,
                     (SELECT COALESCE(SUM(xact_commit + xact_rollback), 0) FROM pg_stat_database WHERE datname LIKE 'warpbench\_%') AS xacts,
                     (SELECT COALESCE(SUM(deadlocks), 0) FROM pg_stat_database WHERE datname LIKE 'warpbench\_%') AS deadlocks,
@@ -449,11 +454,12 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
                     0,
                     Convert.ToInt64(reader.GetValue(1)),
                     Convert.ToInt64(reader.GetValue(2)),
-                    Convert.ToDouble(reader.GetValue(3)),
-                    Convert.ToInt64(reader.GetValue(4)),
-                    -1,
+                    Convert.ToInt64(reader.GetValue(3)),
+                    Convert.ToDouble(reader.GetValue(4)),
                     Convert.ToInt64(reader.GetValue(5)),
-                    Convert.ToInt64(reader.GetValue(6)))
+                    -1,
+                    Convert.ToInt64(reader.GetValue(6)),
+                    Convert.ToInt64(reader.GetValue(7)))
                 : null;
         }
         catch (NpgsqlException)
@@ -579,6 +585,7 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
                 jobs,
                 buffers,
                 0,
+                0,
                 cpuMs,
                 Convert.ToInt64(reader.GetValue(0)),
                 Convert.ToDouble(reader.GetValue(1)),
@@ -665,6 +672,7 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
         long Jobs,
         long Buffers,
         long WalBytes,
+        long WalFullPageImages,
         double DbTimeMs,
         long Transactions,
         double LockWaitMs,
@@ -679,6 +687,7 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
                 a.Jobs - b.Jobs,
                 a.Buffers - b.Buffers,
                 a.WalBytes - b.WalBytes,
+                a.WalFullPageImages - b.WalFullPageImages,
                 a.DbTimeMs - b.DbTimeMs,
                 a.Transactions - b.Transactions,
                 a.LockWaitMs < 0 ? -1 : a.LockWaitMs - b.LockWaitMs,
@@ -691,6 +700,7 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
                 a.Jobs + b.Jobs,
                 a.Buffers + b.Buffers,
                 a.WalBytes + b.WalBytes,
+                a.WalFullPageImages + b.WalFullPageImages,
                 a.DbTimeMs + b.DbTimeMs,
                 a.Transactions + b.Transactions,
                 a.LockWaitMs < 0 || b.LockWaitMs < 0 ? -1 : a.LockWaitMs + b.LockWaitMs,
@@ -705,6 +715,8 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
         public static readonly PerJobDescriptor Buffers = new("BuffersPerJob", "Buffers/job", "Database pages touched per job, cached or read", "blk");
 
         public static readonly PerJobDescriptor WalBytes = new("WalBytesPerJob", "WAL/job", "Write-ahead log bytes per job (PostgreSQL)", "B");
+
+        public static readonly PerJobDescriptor WalFullPageImages = new("WalFullPageImagesPerJob", "WAL FPI/job", "Full-page images written to the WAL per job, the first change to each page after a checkpoint (PostgreSQL)", "fpi");
 
         public static readonly PerJobDescriptor JobRows = new("JobRows", "Job rows", "Job rows written in the measured window, the per-job columns' divisor", "rows");
 

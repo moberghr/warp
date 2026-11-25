@@ -33,5 +33,10 @@ public static class MeasurementVersion
     //    per-second figures, since it has no JobCount parameter), and PostgreSQL's idle windows include planning
     //    time like every other window.
     //  - Results carry the database versions they were measured on.
-    public const int Current = 2;
+    //
+    // 3: PostgreSQL takes a checkpoint before every measured iteration (PostgresServerFixture.CleanJobTables), so
+    // each iteration's first change to a page writes a full-page image into the WAL. WAL/job no longer depends on
+    // whether PostgreSQL's own checkpoint fell inside the window, and reads higher than on 2. A WAL FPI/job column
+    // reports that part.
+    public const int Current = 3;
 }
