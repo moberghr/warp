@@ -1,0 +1,10 @@
+{
+  "stack": "dotnet",
+  "secondary_stacks": ["typescript"],
+  "framework": ["aspnetcore", "aspire"],
+  "data_layer": ["efcore", "npgsql", "sqlserver", "raw-sql-in-providers"],
+  "test_framework": ["xunit", "shouldly", "moq", "testcontainers", "respawn"],
+  "package_manager": "nuget",
+  "deployment": ["nuget-package", "github-actions", "docker-demo"],
+  "additional": ["roslyn-source-generators", "stylecop", "roslynator", "sonaranalyzer", "meziantou-analyzer", "distributedlock", "cronos", "refit", "signalr", "react", "vite", "tailwind", "zustand", "tanstack-query", "playwright", "mutation-tests", "benchmarkdotnet"]
+}

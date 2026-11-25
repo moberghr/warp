@@ -1,12 +1,13 @@
 {
-  "version": "7.10.2",
+  "version": "9.10.2",
   "installed": "2026-06-03",
-  "source": "https://github.com/moberghr/claude-helpers",
+  "source": "https://github.com/moberghr/mtk-agent-toolkit",
   "coding-guidelines": {
     "repo": "moberghr/coding-guidelines",
     "sha": "4043387ca2c70ed0cd76e005861f5c471908c3bb",
     "files": {
       "CodingStyle.md": "sha256:006df483a80bc503fedab94ec27c0aa8b8f6e4afec31caecedad3cc852ed2445"
     }
-  }
+  },
+  "refreshed": "2026-11-25"
 }
