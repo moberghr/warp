@@ -33,19 +33,18 @@ public class WorkerGroupConfiguration
     /// <summary>
     /// Dispatcher mode only. How many jobs to claim BEYOND what idle workers can start right now.
     /// <para>
-    /// Null (the default) means <see cref="WorkerCount"/> — the depth the dispatcher has always
-    /// buffered. Prefetch is what makes dispatcher mode worth running: workers free up one at a
-    /// time, so without it a claim degenerates to roughly one job per round trip and throughput
-    /// falls below plain per-worker fetching.
+    /// Null or zero (the default since 8.0) means no prefetch: the dispatcher claims only for workers
+    /// that are free, so nothing waits in the buffer beyond the moment a worker picks it up (a worker
+    /// finishing its completion-batch flush is briefly counted as free, so a job can sit buffered for
+    /// that instant; the claim is bounded, not zero). Before 8.0, null meant <see cref="WorkerCount"/>.
     /// </para>
     /// <para>
-    /// Zero means never claim speculatively — nothing waits in the buffer beyond the moment a worker
-    /// picks it up (a worker finishing its completion-batch flush is briefly counted as free, so a job
-    /// can sit buffered for that instant; the claim is bounded, not zero), at the cost of that
-    /// throughput. Choose it when cross-server fairness matters more: prefetched jobs
-    /// are Processing on THIS server, so another server with idle workers cannot take them, and
-    /// they wait behind whatever the local workers are running. Higher values trade further the
-    /// other way and suit short jobs on a single-server or evenly loaded deployment.
+    /// A positive value buffers that many jobs ahead, so a worker that finishes starts its next job
+    /// without waiting for a claim. That raises throughput for many short jobs (about 16% more empty
+    /// jobs per second at <see cref="WorkerCount"/> on one server), at a cost: prefetched jobs are
+    /// Processing on THIS server, so another server with idle workers cannot take them, they wait
+    /// behind whatever the local workers are running, and if this server dies they wait for crash
+    /// recovery. Leave it at zero for long-running jobs or several servers.
     /// </para>
     /// </summary>
     public int? PrefetchCount { get; set; }
@@ -100,7 +99,7 @@ public class WarpServerConfiguration : WarpConfiguration
 
     /// <summary>
     /// Dispatcher mode only. How many jobs to claim beyond what idle workers can start right now.
-    /// Null (the default) means <see cref="WorkerCount"/>. Applies to the implicit default worker
+    /// Null or zero (the default) means no prefetch. Applies to the implicit default worker
     /// group; see <see cref="WorkerGroupConfiguration.PrefetchCount"/>.
     /// </summary>
     public int? PrefetchCount { get; set; }

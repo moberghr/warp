@@ -56,8 +56,9 @@ public class WarpDispatcher<TContext> : BackgroundService
         _workerGroupId = workerGroupId;
         DiagnosticsTag = DispatcherDiagnostics.GroupTag(workerGroupId);
 
-        // Null means "the depth this has always buffered" — WorkerCount (§ back-compat).
-        var prefetchCount = Math.Max(0, groupConfiguration.PrefetchCount ?? groupConfiguration.WorkerCount);
+        // Null means no prefetch (8.0; it meant WorkerCount before): a prefetched job is Processing on this
+        // server, so it would wait behind the local workers while another server's workers idle.
+        var prefetchCount = Math.Max(0, groupConfiguration.PrefetchCount ?? 0);
         _availability = new DispatcherWorkerAvailability(groupConfiguration.WorkerCount, prefetchCount);
 
         // The buffer must be able to hold everything a claim may produce: one job per worker slot

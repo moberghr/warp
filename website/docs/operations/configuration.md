@@ -212,7 +212,7 @@ builder.Services.AddWarpServer<AppDbContext>(options =>
 |--------|------|---------|-------------|
 | `RunWorker` | `bool` | `true` | Whether this server runs the job worker. Call `DisableWorker()` (which sets this to `false`) for a service-only server: background services + server infrastructure, no worker hosts, no job-only server tasks, no `Worker`/`WorkerGroup` rows. **Do not** set `WorkerCount = 0` while leaving the worker enabled — `AddWarpServer` throws at registration for that contradiction (it would orchestrate jobs but never execute them). Use `DisableWorker()` instead. |
 | `WorkerCount` | `int` | `min(CPU * 5, 20)` | Number of concurrent worker threads |
-| `PrefetchCount` | `int?` | `null` (= `WorkerCount`) | **Dispatcher mode only.** How many jobs the dispatcher may claim beyond the workers that are free to start one. A prefetched job is already `Processing` in the database while it waits in the in-memory buffer, so it is unavailable to other servers and its claim ages against `InvisibilityTimeout` — depth buys pickup latency at the cost of fairness across servers. Set `0` to claim only what a worker can start immediately — fairest across servers, at some throughput cost on bursty short jobs; raise it for bursty, very short jobs where the claim round-trip dominates. `null` keeps the historical behaviour of buffering one job per worker. |
+| `PrefetchCount` | `int?` | `null` (= 0, no prefetch) | **Dispatcher mode only.** How many jobs the dispatcher may claim beyond the workers that are free to start one. Unset or `0` claims only what a worker can start immediately, the fairest across servers. A positive value buffers jobs ahead so a worker that finishes starts its next job without a claim round trip: about 16% more empty jobs per second at `WorkerCount` on one server. A prefetched job is already `Processing` in the database while it waits in the in-memory buffer, so other servers cannot take it, it waits behind this server's running jobs, and its claim ages against `InvisibilityTimeout`. Raise it for many very short jobs on one server or evenly loaded servers; leave it at 0 for long-running jobs. Before 8.0, unset meant `WorkerCount`. |
 | `PollingInterval` | `TimeSpan` | `10 seconds` | Delay between polls when no jobs are available. Also serves as the floor for exponential backoff — it resets to this floor the moment a job is processed, and in-process enqueue signals (and DB push) shortcut it entirely. |
 | `MaxPollingInterval` | `TimeSpan` | `30 seconds` | Upper bound on the polling delay during idle periods. The delay grows from `PollingInterval` by `PollingIntervalFactor` on each empty poll, clamped to this value, and resets instantly when a job is processed. |
 | `PollingIntervalFactor` | `double` | `2.0` | Multiplier applied to the current polling delay on each consecutive empty poll. Set to `1.0` (or lower) to disable exponential backoff — the delay stays at `PollingInterval`. |
@@ -254,7 +254,7 @@ What dispatcher mode changes, compared with single-worker mode:
 
 - A finished job shows as `Processing` until its batch is written (up to `CompletionFlushInterval`, 100 ms by default).
 - After a crash, jobs whose completion was still buffered run again (stale-job recovery requeues them unless they are `[NoRestart]`).
-- A job claimed ahead of a free worker (prefetch, on by default: [`PrefetchCount`](#worker) is `WorkerCount` unless set) is `Processing` on the server that claimed it. It waits behind that server's running jobs, even while another server has idle workers, and if the server dies before running it, it waits for crash recovery. For long-running jobs across several servers, set `PrefetchCount = 0`, globally or on that worker group.
+- Prefetch is off by default: the dispatcher claims only for workers that are free. [`PrefetchCount`](#worker) buffers jobs ahead for more throughput on many short jobs, at the cost that a prefetched job is `Processing` on the server that claimed it, so it waits behind that server's running jobs even while another server has idle workers, and waits for crash recovery if that server dies.
 
 Set `UseDispatcher = false` for single-worker mode, where each worker claims, runs and completes one job at a time and writes its completion straight away.
 
@@ -293,7 +293,7 @@ This creates 7 workers total: 5 polling `critical` every 100ms, and 2 polling `r
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `WorkerCount` | `int` | `min(CPU * 5, 20)` | Number of workers in this group |
-| `PrefetchCount` | `int?` | `null` (= `WorkerCount`) | Prefetch depth for this group, dispatcher mode only. See the server-level option above. |
+| `PrefetchCount` | `int?` | `null` (= 0, no prefetch) | Prefetch depth for this group, dispatcher mode only. See the server-level option above. |
 | `Queues` | `string[]` | `["default"]` | Queues this group subscribes to |
 | `PollingInterval` | `TimeSpan` | `10 seconds` | Delay between polls for this group. Also the floor for exponential backoff. |
 | `MaxPollingInterval` | `TimeSpan` | `30 seconds` | Upper bound on the polling delay during idle periods for this group |

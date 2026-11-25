@@ -67,11 +67,12 @@ Saga handlers are not affected: the saga proxy still saves for them.
 
 ## Dispatcher mode is the default
 
-`UseDispatcher` defaults to `true` in 8.0. Each worker group has one dispatcher that claims jobs for its free workers in one statement, and the group's completions are written in batches. Servers that set nothing switch mode with the upgrade. It cuts statements, allocations and connections per job several times over (see [Warp vs Hangfire](../performance/warp-vs-hangfire.md)), and changes three things you can observe:
+`UseDispatcher` defaults to `true` in 8.0. Each worker group has one dispatcher that claims jobs for its free workers in one statement, and the group's completions are written in batches. Servers that set nothing switch mode with the upgrade. It cuts statements, allocations and connections per job several times over (see [Warp vs Hangfire](../performance/warp-vs-hangfire.md)), and changes these things you can observe:
 
 - A finished job shows `Processing` until its batch is written, up to `CompletionFlushInterval` (100 ms by default).
 - After a crash, jobs whose completion was still buffered run again: `StaleJobRecovery` requeues them unless they are `[NoRestart]`. Handlers must already be safe to run more than once; this widens the window.
-- A job claimed ahead of a free worker (prefetch, on by default: `PrefetchCount` is `WorkerCount` unless set) is `Processing` on the server that claimed it. It waits behind that server's running jobs, even while another server has idle workers, and if the server dies before running it, it waits for crash recovery. For long-running jobs across several servers, set `PrefetchCount = 0`, globally or on that worker group.
+- **Prefetch is off by default** (`PrefetchCount` unset now means 0; in 7.x it meant `WorkerCount`). The dispatcher claims only for workers that are free, so a job never waits on one server while another server has idle workers. That includes servers that already ran with `UseDispatcher = true` on 7.x: set `PrefetchCount = WorkerCount` to keep the 7.x depth.
+- To raise throughput for many short jobs, set `PrefetchCount` to buffer jobs ahead of the workers (about 16% more empty jobs per second at `WorkerCount` on one server). The cost: a prefetched job is `Processing` on the server that claimed it, so it waits behind that server's running jobs even while another server has idle workers, and waits for crash recovery if that server dies. Leave it at 0 for long-running jobs or several servers.
 
 To keep 7.x's single-worker mode:
 
