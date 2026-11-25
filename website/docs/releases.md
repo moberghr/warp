@@ -61,7 +61,7 @@ The fix is compatible with 7.x, where the worker's own save then finds nothing l
 
 **Measured against 7.7.0** by the perf workflow (CI, jobs per second and database statements per job):
 
-<!-- VERIFY: numbers from the first CI run on PR #352; update from the final run -->
+{/* VERIFY: numbers from the first CI run on PR #352; update from the final run */}
 
 | Scenario | Jobs/s, 7.7.0 → 8.0 | Statements per job, 7.7.0 → 8.0 |
 |---|---|---|

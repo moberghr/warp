@@ -139,6 +139,9 @@ const config: Config = {
           position: 'left',
           label: 'Docs',
         },
+        { to: '/docs/why-warp', label: 'Why Warp', position: 'left' },
+        { to: '/docs/performance', label: 'Performance', position: 'left' },
+        { to: '/docs/releases', label: 'Releases', position: 'left' },
         {
           href: 'https://github.com/moberghr/warp',
           label: 'GitHub',
@@ -152,7 +155,9 @@ const config: Config = {
         {
           title: 'Docs',
           items: [
+            { label: 'Why Warp', to: '/docs/why-warp' },
             { label: 'Getting Started', to: '/docs/getting-started' },
+            { label: 'Performance', to: '/docs/performance' },
             { label: 'Patterns', to: '/docs/patterns' },
             { label: 'Dashboard', to: '/docs/dashboard/overview' },
             { label: 'Releases', to: '/docs/releases' },
@@ -161,6 +166,8 @@ const config: Config = {
         {
           title: 'More',
           items: [
+            { label: 'Migrating from Hangfire', to: '/docs/operations/migrating-from-hangfire' },
+            { label: 'Migrating from Wolverine', to: '/docs/operations/migrating-from-wolverine' },
             { label: 'GitHub', href: 'https://github.com/moberghr/warp' },
             { label: 'AI Docs (llms.txt)', href: 'pathname:///warp/llms.txt' },
             { label: 'AI Full Reference', href: 'pathname:///warp/llms-full.txt' },

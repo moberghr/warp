@@ -2,9 +2,15 @@
 sidebar_position: 4
 ---
 
-# Benchmarks
+# Memory benchmarks
 
-Memory and performance benchmarks for the Warp server. These verify that the server has no memory leaks and provide baseline allocation numbers for capacity planning.
+Memory benchmarks for the Warp server. These verify that the server has no memory leaks.
+
+:::info[Throughput and per-job figures have moved]
+
+The allocation and throughput tables on this page were measured before 8.0 and are kept for the method. For current figures see [Performance](../performance/index.md): 8.0 allocates 13.7 KB per empty job.
+
+:::
 
 ## Test Environment
 

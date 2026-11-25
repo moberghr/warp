@@ -4,7 +4,7 @@ sidebar_position: 1
 
 # Getting Started
 
-Warp is a distributed job processing and message queue library for .NET 10. It provides four patterns:
+Warp is a distributed job processing and message queue library for .NET 10. For what it is and when to choose it, see [Why Warp](./why-warp.md). It provides four patterns:
 
 - **[Messages](./patterns/messages.md)** (`IMessage`) — Pub/sub queue. Multiple handlers per message, each becomes an independent job.
 - **[Jobs](./patterns/jobs.md)** (`IJob`) — Orchestrated background work. Single handler, scheduling, retries, continuations, batches.
@@ -20,6 +20,19 @@ dotnet add package Moberg.Warp.Worker                # Worker service
 dotnet add package Moberg.Warp.Dashboard             # Dashboard
 dotnet add package Moberg.Warp.Http                  # HTTP exposure for IRequest/IStreamRequest (optional)
 ```
+
+Use the same version for every Warp package. The packages depend on each other, so mixing versions can resolve to an incompatible set.
+
+Package ids are `Moberg.Warp.*`; namespaces are `Warp.*`:
+
+| You want | Types and methods | `using` |
+|---|---|---|
+| Register Warp or a server | `AddWarp`, `AddWarpServer`, `IPublisher`, `IBatchPublisher`, `IRecurringJobPublisher` | `Warp.Core` |
+| Define and handle work | `IJob`, `IMessage`, `IRequest<T>`, `IStreamRequest<T>`, the handler interfaces, `IPipelineBehavior<,>`, `IJobContext`, `IMediator` | `Warp.Core.Handlers` |
+| Addon builder methods | `AddRetry`, `AddConcurrency`, `AddTimeout`, `AddRateLimit`, `AddSagas` | `Warp.Core.Retry`, `.Concurrency`, `.Timeout`, `.RateLimit`, `.Sagas` |
+| Dashboard | `MapWarpDashboard`, `AddWarpDashboard` | `Warp.Dashboard` |
+| HTTP endpoints | `WarpHttpGet` / `WarpHttpPost` / …, `AddWarpHttp`, `MapWarpHttp` | `Warp.Http` |
+| Database provider | `UsePostgreSql`, `UseSqlServer` | `Warp.Provider.PostgreSql`, `Warp.Provider.SqlServer` |
 
 ## Setup
 

@@ -39,15 +39,11 @@ function GitHubIcon() {
 // ─── Content ──────────────────────────────────────────────────────────────────
 
 const HERO_SETUP = `<span class="k-dim">// Register with your existing DbContext</span>
-<span class="k-blue">builder</span>.Services.<span class="k-green">AddWarp</span>&lt;AppDbContext&gt;(opt =&gt; {
-    opt.<span class="k-green">UsePostgreSql</span>();
-});
-
 <span class="k-blue">builder</span>.Services.<span class="k-green">AddWarpServer</span>&lt;AppDbContext&gt;(opt =&gt; {
     opt.<span class="k-green">UsePostgreSql</span>();
     opt.WorkerCount = <span class="k-yellow">10</span>;
     opt.<span class="k-green">AddRetry</span>();
-    opt.<span class="k-green">AddMutex</span>();
+    opt.<span class="k-green">AddConcurrency</span>(); <span class="k-dim">// [Mutex] / [Semaphore]</span>
 });
 
 app.<span class="k-green">MapWarpDashboard</span>(<span class="k-yellow">"/warp"</span>); <span class="k-dim">// dashboard at /warp</span>`;
@@ -67,7 +63,7 @@ const INSTALL_PACKAGES = `<span class="k-dim">$</span> dotnet add package Moberg
 <span class="k-dim">$</span> dotnet add package Moberg.Warp.Worker
 <span class="k-dim">$</span> dotnet add package Moberg.Warp.Dashboard
 
-<span class="k-green">✓</span> DbContext auto-configured — no manual setup
+<span class="k-green">✓</span> Warp tables added to your DbContext model
 <span class="k-green">✓</span> Outbox publisher registered (same transaction)
 <span class="k-green">✓</span> Worker service ready, dashboard at /warp`;
 
@@ -84,21 +80,23 @@ function Hero() {
               Distributed job processing for .NET 10
             </div>
             <h1 className={styles.heroTitle}>
-              Reliable background processing<br />
-              for .NET production systems.
+              Background jobs for&nbsp;.NET that go easy on <em>your&nbsp;database</em>.
             </h1>
             <p className={styles.heroSub}>
-              Warp is a distributed job processing and message queue for .NET&nbsp;10.
-              Pub/sub messaging, orchestrated background jobs, and in-memory request
-              dispatch — integrated with your existing EF&nbsp;Core DbContext using
-              the transactional outbox pattern.
+              Jobs, pub/sub messages and an in-process mediator for .NET&nbsp;10,
+              stored in the PostgreSQL or SQL&nbsp;Server database you already have.
+              Jobs commit with your data through your own EF&nbsp;Core DbContext,
+              at about 0.24 database statements per job.
             </p>
             <div className={styles.heroActions}>
               <Link className={styles.btnPrimary} to="/docs/getting-started">
-                View Documentation
+                Get started
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" aria-hidden="true">
                   <path d="M5 12h14M13 6l6 6-6 6" />
                 </svg>
+              </Link>
+              <Link className={styles.btnSecondary} to="/docs/performance">
+                See the benchmarks
               </Link>
               <Link className={styles.btnSecondary} href="https://github.com/moberghr/warp">
                 <GitHubIcon />
@@ -110,7 +108,7 @@ function Hero() {
               <span>SQL Server</span>
               <span>.NET 10</span>
               <span>MIT licensed</span>
-              <span>1,024 tests</span>
+              <span>6,000 tests</span>
             </div>
           </div>
 
@@ -149,6 +147,78 @@ function Marquee() {
   );
 }
 
+const PERF_STATS = [
+  { value: '21–34×', label: 'sooner than Hangfire to drain 50,000 empty jobs' },
+  { value: '9–11×', label: 'sooner when every job reads and updates a row' },
+  { value: '0.24', label: 'database statements per job, against 43' },
+  { value: '13.7 KB', label: 'allocated per job, against 79.7 KB' },
+];
+
+const PERF_BARS = [
+  {
+    title: 'Drain 50,000 empty jobs',
+    rows: [
+      { name: 'Warp', value: '7.2–10.6 s', pct: 3.8, warp: true },
+      { name: 'Hangfire', value: '228–244 s', pct: 100, warp: false },
+    ],
+  },
+  {
+    title: 'Drain 20,000 jobs that read and update a row',
+    rows: [
+      { name: 'Warp', value: '14.0–17.7 s', pct: 10.4, warp: true },
+      { name: 'Hangfire', value: '151–155 s', pct: 100, warp: false },
+    ],
+  },
+];
+
+function Performance() {
+  return (
+    <section className={styles.section} id="performance">
+      <div className="container">
+        <SectionHead num="01" label="Performance" />
+        <h2 className={styles.h2}>The queue shares your database. It should not crowd it.</h2>
+        <p className={styles.lede}>
+          Warp claims jobs in batches and writes completions in batches, so one statement
+          covers many jobs. The same jobs on the same PostgreSQL server, Warp&nbsp;8.0
+          against Hangfire:
+        </p>
+        <div className={styles.perfStats}>
+          {PERF_STATS.map((s) => (
+            <div key={s.value} className={styles.perfStat}>
+              <div className={styles.perfValue}>{s.value}</div>
+              <div className={styles.perfLabel}>{s.label}</div>
+            </div>
+          ))}
+        </div>
+        <div className={styles.perfBars}>
+          {PERF_BARS.map((group) => (
+            <div key={group.title} className={styles.perfGroup}>
+              <div className={styles.perfGroupTitle}>{group.title}</div>
+              {group.rows.map((row) => (
+                <div key={row.name} className={styles.perfRow}>
+                  <span className={styles.perfName}>{row.name}</span>
+                  <span className={styles.perfTrack}>
+                    <span
+                      className={row.warp ? styles.perfFillWarp : styles.perfFill}
+                      style={{ width: `${row.pct}%` }}
+                    />
+                  </span>
+                  <span className={styles.perfRowValue}>{row.value}</span>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+        <p className={styles.perfNote}>
+          Shorter is better. Preliminary figures for the unreleased 8.0, measured in November 2026;
+          each value is the range across repeated runs.{' '}
+          <Link to="/docs/performance/warp-vs-hangfire">Every measured row, the method and the caveats</Link>.
+        </p>
+      </div>
+    </section>
+  );
+}
+
 const PATTERNS = [
   {
     num: '01',
@@ -182,9 +252,9 @@ const PATTERNS = [
 
 function Patterns() {
   return (
-    <section className={styles.section} id="patterns">
+    <section className={`${styles.section} ${styles.sectionAlt}`} id="patterns">
       <div className="container">
-        <SectionHead num="01" label="Four patterns" />
+        <SectionHead num="02" label="Four patterns" />
         <h2 className={styles.h2}>Four processing patterns. One unified library.</h2>
         <p className={styles.lede}>
           Messages for fan-out delivery, Jobs for durable orchestrated execution,
@@ -237,8 +307,8 @@ const FEATURES = [
   },
   {
     icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2L3 7v6c0 5 4 9 9 10 5-1 9-5 9-10V7l-9-5z"/></svg>,
-    title: 'Distributed mutex',
-    desc: 'Opt-in concurrency control via [Mutex("key")] attribute or .WithMutex("key") at publish time. Enforces single-execution per key across all worker instances.',
+    title: 'Flow control',
+    desc: '[Mutex], [Semaphore], [RateLimit] and [Timeout] on the job or the handler, enforced across every server. The policy is resolved once and written on the job row.',
   },
   {
     icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><path d="M22 6l-10 7L2 6"/></svg>,
@@ -265,18 +335,32 @@ const FEATURES = [
     title: 'Circuit breaker',
     desc: 'Opt-in circuit breaker prevents repeated calls to a failing downstream dependency. Closed → Open → HalfOpen state machine with configurable thresholds. Jobs are rescheduled and retain their retry budget.',
   },
+  {
+    icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M9 6h6a3 3 0 0 1 3 3v6"/></svg>,
+    title: 'Sagas & background services',
+    desc: 'Correlated state across messages with ISagaHandler, and supervised long-running services with restart on fault, cluster-singleton leases and logs in the dashboard.',
+  },
+  {
+    icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4M12 17h.01"/></svg>,
+    title: 'Issues, SLOs & metrics',
+    desc: 'Failures grouped by fingerprint, queue wait and backlog per queue, SLOs with error budgets, and your own application metrics charted beside them.',
+  },
+  {
+    icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15 15 0 0 1 0 20M12 2a15 15 0 0 0 0 20"/></svg>,
+    title: 'HTTP, adapters & webhooks',
+    desc: 'Expose request handlers as HTTP endpoints, observe and rate-limit outbound calls, and deliver signed webhooks durably with retries and redelivery.',
+  },
 ];
 
 function Features() {
   return (
-    <section className={`${styles.section} ${styles.sectionAlt}`} id="features">
+    <section className={styles.section} id="features">
       <div className="container">
-        <SectionHead num="02" label="Capabilities" />
-        <h2 className={styles.h2}>Comprehensive background processing capabilities.</h2>
+        <SectionHead num="03" label="Capabilities" />
+        <h2 className={styles.h2}>Everything a production queue needs, in one set of packages.</h2>
         <p className={styles.lede}>
-          Warp addresses the full range of background processing requirements for
-          production .NET applications, with no additional infrastructure or manual
-          configuration.
+          Reliability, flow control, scheduling and observability are part of Warp.
+          Most are one builder call or one attribute away.
         </p>
         <div className={styles.featuresGrid}>
           {FEATURES.map((f, i) => (
@@ -292,16 +376,22 @@ function Features() {
   );
 }
 
+const DASHBOARD_SHOTS = [
+  { file: '03-job-detail-trace', alt: 'Job detail with state history and handler logs', caption: 'Job detail and live handler logs', to: '/docs/dashboard/jobs' },
+  { file: '31-issues', alt: 'Issues page with failures grouped by fingerprint', caption: 'Failures grouped into issues', to: '/docs/dashboard/health/issues' },
+  { file: '35-slo', alt: 'SLO page with error budgets', caption: 'SLOs and error budgets', to: '/docs/dashboard/health/slo' },
+];
+
 function Dashboard() {
   return (
-    <section className={styles.section} id="dashboard">
+    <section className={`${styles.section} ${styles.sectionAlt}`} id="dashboard">
       <div className="container">
-        <SectionHead num="03" label="Dashboard" />
-        <h2 className={styles.h2}>Operational visibility into your job processing pipeline.</h2>
+        <SectionHead num="04" label="Dashboard" />
+        <h2 className={styles.h2}>See what every job did, while it is doing it.</h2>
         <p className={styles.lede}>
-          Built-in operations dashboard with live throughput graphs, job detail view,
-          exception traces, handler log output, batch progress bars, worker health status,
-          and recurring job history. Served at <code>/warp</code> with no additional configuration.
+          Live throughput, every job's state history and handler logs, failures grouped
+          into issues, queue wait, SLOs and traces across jobs. Served at <code>/warp</code> from
+          your own application, behind your own authorization.
         </p>
         <div className={styles.screenshotWrap}>
           <img
@@ -317,6 +407,15 @@ function Dashboard() {
             data-theme-target="dark"
           />
         </div>
+        <div className={styles.shotGrid}>
+          {DASHBOARD_SHOTS.map((shot) => (
+            <Link key={shot.file} to={shot.to} className={styles.shotCard}>
+              <img src={`/warp/img/screenshots/${shot.file}.png`} alt={shot.alt} data-theme-target="light" loading="lazy" />
+              <img src={`/warp/img/screenshots/${shot.file}-dark.png`} alt={shot.alt} data-theme-target="dark" loading="lazy" />
+              <span className={styles.shotCaption}>{shot.caption}</span>
+            </Link>
+          ))}
+        </div>
       </div>
     </section>
   );
@@ -324,14 +423,14 @@ function Dashboard() {
 
 function Install() {
   return (
-    <section className={`${styles.section} ${styles.sectionAlt}`} id="install">
+    <section className={styles.section} id="install">
       <div className="container">
-        <SectionHead num="04" label="Get started" />
-        <h2 className={styles.h2}>Minimal setup. No infrastructure changes required.</h2>
+        <SectionHead num="05" label="Get started" />
+        <h2 className={styles.h2}>Four packages and your existing database.</h2>
         <p className={styles.lede}>
-          Register your existing DbContext as usual — Warp wraps it automatically.
-          No manual schema migrations, no special context configuration, and no
-          secondary registration.
+          Register your DbContext as usual. Warp adds its tables to your model, so your
+          normal EF&nbsp;Core migrations create them. There is no broker and no second
+          database to run.
         </p>
         <div className={styles.installGrid}>
           <div>
@@ -368,16 +467,17 @@ function Callout() {
     <section className={styles.section}>
       <div className="container">
         <div className={styles.callout}>
-          <h2>A structured approach to background processing.</h2>
+          <h2>Run your first job in a few minutes.</h2>
           <p>
-            Warp provides a structured, production-grade job processor built on your
-            existing EF Core stack. Consistent patterns for messaging, scheduling,
-            retries, and observability — without introducing additional infrastructure
-            dependencies.
+            Add the packages, register Warp on your DbContext, and write a handler.
+            Coming from Hangfire or Wolverine? There is a migration guide for each.
           </p>
           <div className={styles.calloutActions}>
             <Link className={styles.calloutBtnPrimary} to="/docs/getting-started">
-              View Documentation
+              Get started
+            </Link>
+            <Link className={styles.calloutBtnSecondary} to="/docs/operations/migrating-from-hangfire">
+              Migrating from Hangfire
             </Link>
             <Link className={styles.calloutBtnSecondary} href="https://github.com/moberghr/warp">
               View on GitHub
@@ -393,10 +493,11 @@ function Callout() {
 
 export default function Home(): JSX.Element {
   return (
-    <Layout description="Distributed job processing and message queue for .NET 10. Integrated with EF Core — pub/sub messaging, orchestrated background jobs, configurable retries, cron scheduling, and a real-time operations dashboard.">
+    <Layout description="Background jobs, pub/sub messages and an in-process mediator for .NET 10, stored in your PostgreSQL or SQL Server database through EF Core. About 0.24 database statements per job, with a real-time operations dashboard.">
       <main>
         <Hero />
         <Marquee />
+        <Performance />
         <Patterns />
         <Features />
         <Dashboard />
