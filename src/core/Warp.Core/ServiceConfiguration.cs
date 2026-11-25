@@ -81,6 +81,8 @@ public static class ServiceConfiguration
             WarpConfigurationMerge.ApplyCoreSettings(builder, registered.Value);
         }
 
+        WebhookConfigurationValidation.Validate(registered?.Value ?? builder);
+
         var configured = CreateWarpServices<TContext>(services);
 
         // Non-server application heartbeat host — registered ONLY when this process opted into

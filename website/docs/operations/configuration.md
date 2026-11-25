@@ -34,6 +34,19 @@ Set on `AddWarp` (or `AddWarpServer`, which inherits them) and only meaningful w
 
 To keep application versions apart in the stored series (old vs new during a rolling deploy), call `ByVersion()` inside `AddMetrics` on the hosts that should record it. It is off by default and needs `ApplicationName` and `ApplicationVersion`. See [Comparing versions](/docs/features/custom-metrics#comparing-versions).
 
+### Webhooks
+
+Set on `AddWarp` (or `AddWarpServer`, which inherits them). The webhook engine is always on; see [Outbound Webhooks](/docs/features/webhooks).
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `WebhookAttemptTimeout` | `TimeSpan` | `30 seconds` | Budget for one delivery attempt: sending the request, receiving the response headers and reading the captured prefix of the body. An attempt past it is cancelled and counts as a failed attempt (retried per the delivery's `RetrySchedule`). Enforced with a cancellation token, not `HttpClient.Timeout`, so a `warp-webhooks` client you configure keeps its own settings; that client's `Timeout` (100 s by default) still applies to the send, so raise it too before going above 100 s. If the headers arrived in time and only the body capture runs out, the status code still decides the outcome. Must be at least 1 ms (or `Timeout.InfiniteTimeSpan` to disable); `AddWarp` throws otherwise. New in 8.1. |
+| `WebhookDeliveryRetention` | `TimeSpan` | `30 days` | How long a delivery row is kept (`ExpireAt = CreatedAt + retention`); also the default call-log retention of the `warp-webhooks` adapter. |
+| `WebhookDeliveryRetentionCount` | `int?` | `null` | Count cap for settled deliveries (oldest deleted first). `Pending` deliveries are never count-trimmed. `null` disables it. |
+| `WebhookStuckDeliveryGrace` | `TimeSpan` | `10 minutes` | How far past `NextAttemptAt` a `Pending` delivery must be before the stuck-delivery sweep gives it a fresh executor job. |
+
+`opt.AddWebhooks(w => ...)` takes the per-process options: `UseCustomSigner<T>()`, `OnDeliveryExhausted<T>()` and, new in 8.1, `PublicAddressesOnly` (default `false`; set it on every server that runs a worker, see [Public addresses only](/docs/features/webhooks#public-addresses-only)).
+
 ### Naming Conventions
 
 Warp's entity configurations do **not** hardcode table or column names. If you use a naming convention plugin (e.g., `UseSnakeCaseNamingConvention()`), it will transform Warp's tables and columns just like your own entities:

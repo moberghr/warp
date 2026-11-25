@@ -20,10 +20,52 @@ public interface IWebhookCommandService
     /// <c>Pending</c> with no job to run it.
     /// </summary>
     Task<WebhookRedeliveryResult> Redeliver(Guid deliveryId, CancellationToken ct = default);
+
+    /// <summary>
+    /// <see cref="Redeliver(Guid, CancellationToken)"/> with options. With
+    /// <see cref="WebhookRedeliveryOptions.Secret"/> set, the delivery's stamped signing secret is replaced
+    /// in the same atomic settled→<c>Pending</c> flip, so the redelivered attempts are signed with the new
+    /// secret — use it after rotating an endpoint's key. Without it the delivery keeps the secret stamped at
+    /// send, exactly like the parameterless overload. The secret is validated like
+    /// <c>WebhookSend.Secret</c> (length; base64 for <c>StandardWebhooks</c>) and a delivery signed with
+    /// <c>WebhookSigning.None</c> rejects one (<see cref="ArgumentException"/>). It is never returned by
+    /// any read surface.
+    /// <para>
+    /// This member has a default implementation so existing implementers keep compiling: it forwards to
+    /// <see cref="Redeliver(Guid, CancellationToken)"/> when no secret is given and throws
+    /// <see cref="NotSupportedException"/> when one is, rather than silently signing with the old key.
+    /// Warp's own implementation supports both.
+    /// </para>
+    /// </summary>
+    Task<WebhookRedeliveryResult> Redeliver(Guid deliveryId, WebhookRedeliveryOptions options, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        if (options.Secret is null)
+        {
+            return Redeliver(deliveryId, ct);
+        }
+
+        throw new NotSupportedException(
+            $"{GetType().Name} does not support redelivering with a new secret. Implement "
+            + "IWebhookCommandService.Redeliver(Guid, WebhookRedeliveryOptions, CancellationToken).");
+    }
 }
 
 /// <summary>
-/// Outcome of <see cref="IWebhookCommandService.Redeliver"/>. Values start at 1 (§8.11) so the endpoint can
+/// Options for <see cref="IWebhookCommandService.Redeliver(Guid, WebhookRedeliveryOptions, CancellationToken)"/>.
+/// </summary>
+public sealed class WebhookRedeliveryOptions
+{
+    /// <summary>
+    /// The signing secret the redelivered attempts use, replacing the one stamped at send (for example
+    /// after a key rotation). <see langword="null"/> keeps the stamped secret.
+    /// </summary>
+    public string? Secret { get; init; }
+}
+
+/// <summary>
+/// Outcome of <see cref="IWebhookCommandService.Redeliver(Guid, CancellationToken)"/>. Values start at 1 (§8.11) so the endpoint can
 /// map each case to a distinct HTTP status.
 /// </summary>
 public enum WebhookRedeliveryResult

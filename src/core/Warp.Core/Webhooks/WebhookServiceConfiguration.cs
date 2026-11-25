@@ -1,4 +1,6 @@
+using System.Net.Http;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Http;
 
 namespace Warp.Core.Webhooks;
 
@@ -47,7 +49,42 @@ public static class WebhookServiceConfiguration
                 + "collection before AddWebhooks. WebhookSigning.Custom must not fail at send time.");
         }
 
+        if (options.PublicAddressesOnly)
+        {
+            AddPublicAddressGuard(builder.Services);
+        }
+
         return builder;
+    }
+
+    // Makes the warp-webhooks primary handler a SocketsHttpHandler (composing with a host's own
+    // UseSocketsHttpHandler(...) configuration) and installs the address guard from a PostConfigure action,
+    // which runs after every Configure and so also sees a primary handler a host swapped in later: a
+    // SocketsHttpHandler gets the guard, anything else fails closed — a guard the host asked for must never
+    // be silently dropped. A non-Sockets handler registered BEFORE this call is replaced (guard wins).
+    private static void AddPublicAddressGuard(IServiceCollection services)
+    {
+        services.AddHttpClient(WebhookConstants.AdapterName)
+            .UseSocketsHttpHandler();
+
+        services.PostConfigure<HttpClientFactoryOptions>(
+            WebhookConstants.AdapterName,
+            x => x.HttpMessageHandlerBuilderActions.Add(EnforcePublicAddressGuard));
+    }
+
+    private static void EnforcePublicAddressGuard(HttpMessageHandlerBuilder builder)
+    {
+        if (builder.PrimaryHandler is SocketsHttpHandler sockets)
+        {
+            sockets.ConnectCallback = WebhookAddressGuard.ConnectAsync;
+
+            return;
+        }
+
+        throw new InvalidOperationException(
+            "AddWebhooks(w => w.PublicAddressesOnly = true) needs the \"warp-webhooks\" client's primary handler "
+            + $"to be a SocketsHttpHandler, but it is {builder.PrimaryHandler?.GetType().Name ?? "null"}. Configure "
+            + "the client with UseSocketsHttpHandler(...) instead of ConfigurePrimaryHttpMessageHandler(...).");
     }
 }
 
@@ -62,6 +99,27 @@ public sealed class WarpWebhookOptions
     internal Type? CustomSignerType { get; private set; }
 
     internal bool CustomSigningDeclared { get; private set; }
+
+    /// <summary>
+    /// When <see langword="true"/>, webhook attempts connect only to publicly routable addresses: the
+    /// <c>warp-webhooks</c> client resolves the destination host itself, drops every loopback, private,
+    /// link-local (including cloud metadata at 169.254.169.254), shared, documentation, multicast and
+    /// reserved address (see <see cref="WebhookAddressGuard.IsPublic"/>), and connects to exactly the
+    /// addresses that passed — redirects included. A host that resolves to no public address fails the
+    /// attempt with a <see cref="WebhookAddressNotPublicException"/> (retried per the schedule like any
+    /// failed attempt). Default <see langword="false"/>, so local development can send to <c>localhost</c>.
+    /// <para>
+    /// <b>With an HTTP proxy</b> (an explicit <c>Proxy</c>, or the system proxy from <c>HTTP_PROXY</c> /
+    /// <c>HTTPS_PROXY</c>) the client connects to the proxy, so the guard checks the proxy's address and
+    /// the proxy must enforce the policy for the destination. A proxy on a private address is refused.
+    /// </para>
+    /// <para>
+    /// Turning it on makes the client's primary handler a <see cref="SocketsHttpHandler"/>. Configure that
+    /// client with <c>UseSocketsHttpHandler(...)</c>; replacing its primary handler with another type fails
+    /// every attempt, and a host <c>ConnectCallback</c> is replaced by the guard.
+    /// </para>
+    /// </summary>
+    public bool PublicAddressesOnly { get; set; }
 
     /// <summary>
     /// Registers the host callback invoked once when a delivery exhausts its retry schedule. Equivalent

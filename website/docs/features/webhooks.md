@@ -42,12 +42,15 @@ builder.Services.AddWarpServer<AppDbContext>(opt =>
 {
     opt.UsePostgreSql();
     opt.AddAdapters();          // OPTIONAL: record each attempt as an AdapterCallLog row
-    opt.AddWebhooks(w =>        // OPTIONAL: only for a custom signer / exhausted-handler
-        w.OnDeliveryExhausted<MyExhaustedHandler>());
+    opt.AddWebhooks(w =>        // OPTIONAL: custom signer / exhausted handler / address guard
+    {
+        w.OnDeliveryExhausted<MyExhaustedHandler>();
+        w.PublicAddressesOnly = true;   // production: never connect to private/loopback/metadata addresses
+    });
 });
 ```
 
-`AddWebhooks(...)` is **optional configuration only** — a custom `IWebhookSigner` and the `OnDeliveryExhausted` callback. It is not an enable switch; delivery runs without it. When a delivery exhausts, Warp also emits a `WebhookDeliveryExhausted` [operational notification](./operational-notifications.md) to any registered `IWarpNotifier` — the generic operator-alerting channel, alongside the webhook-specific `OnDeliveryExhausted` callback. `AddAdapters()` is also optional: with it, every attempt is recorded as a `warp-webhooks` `AdapterCallLog` row (response bodies always captured, request bodies never — the payload already lives on the delivery row) and the per-attempt timeline is populated; without it, the delivery state machine, retries, exhaustion, and dashboard still work fully from the `WebhookDelivery` row — only the granular per-attempt HTTP call log is absent (same telemetry-vs-recording split as adapters).
+`AddWebhooks(...)` is **optional configuration only** — a custom `IWebhookSigner`, the `OnDeliveryExhausted` callback and the [public-addresses-only guard](#public-addresses-only). It is not an enable switch; delivery runs without it. When a delivery exhausts, Warp also emits a `WebhookDeliveryExhausted` [operational notification](./operational-notifications.md) to any registered `IWarpNotifier` — the generic operator-alerting channel, alongside the webhook-specific `OnDeliveryExhausted` callback. `AddAdapters()` is also optional: with it, every attempt is recorded as a `warp-webhooks` `AdapterCallLog` row (response bodies always captured, request bodies never — the payload already lives on the delivery row) and the per-attempt timeline is populated; without it, the delivery state machine, retries, exhaustion, and dashboard still work fully from the `WebhookDelivery` row — only the granular per-attempt HTTP call log is absent (same telemetry-vs-recording split as adapters).
 
 ### Requires a Warp server somewhere
 
@@ -131,6 +134,42 @@ Any response outside the success set (or a thrown transport exception) is a fail
 
 **Any exception from the HTTP leg consumes a schedule slot.** The executor treats *every* throw while attempting the HTTP request as one failed attempt — this includes a rate-limit rejection (`AdapterRateLimitedException`) if the host attaches the adapters shared rate limiter to the `warp-webhooks` client. A throttled attempt is not free: it increments `AttemptCount` and burns the next entry of `RetrySchedule` exactly as a `500` or a connection failure would, and the delivery exhausts once the schedule is consumed regardless of *why* the attempts failed. This is deliberate — the delivery state machine does not distinguish a throttle from any other failure — but it means a rate limiter tuned too tight can exhaust a delivery on throttles alone. If you rate-limit the webhooks client, size `RetrySchedule` with that in mind (a throttle-heavy endpoint wants more, longer-spaced entries), or leave the `warp-webhooks` adapter unthrottled and shape delivery rate through the schedule instead.
 
+## Attempt limits
+
+Each attempt is bounded in time and in memory:
+
+- **The response body is never buffered.** The request is sent with `HttpCompletionOption.ResponseHeadersRead`; the status code decides the outcome. When the adapter captures the response body (the `warp-webhooks` default), only its first `MaxCapturedBodySize` bytes (8 KiB by default) are read; the rest is never read or drained, and the response is disposed. When body capture is off, the body is not read at all. Before 8.1 the whole body was buffered (up to 2 GB) before the capture read.
+- **`WebhookAttemptTimeout`** (default 30 seconds, on `WarpConfiguration`) bounds the send, the response headers and that capture read together. An attempt whose response headers do not arrive in time is a **failed attempt**: recorded with a `TimeoutException` on the attempt row and retried per `RetrySchedule` like any other failure. A slow receiver therefore costs a schedule slot; size the timeout for your slowest legitimate receiver. If the headers arrive in time but the body is still trickling in when the budget runs out, only the body capture is cut short: the status code has already decided the outcome, so a `2xx` stays `Delivered` (with no captured body) rather than sending the event again.
+
+```csharp
+builder.Services.AddWarpServer<AppDbContext>(opt =>
+{
+    opt.WebhookAttemptTimeout = TimeSpan.FromSeconds(10);
+});
+```
+
+The timeout is a cancellation token, not `HttpClient.Timeout`, so a `warp-webhooks` client you configure yourself keeps its own settings. That client's `Timeout` (100 s by default) still applies to the send, so raise it as well before setting `WebhookAttemptTimeout` above 100 s. Host shutdown also cancels an attempt; the log line says which of the two happened ("timed out after ..." versus "was cancelled because the host is shutting down").
+
+## Public addresses only
+
+A webhook URL usually comes from a customer, so by default nothing stops it from pointing at `localhost`, a private network or a cloud metadata endpoint (`169.254.169.254`). Turn on `PublicAddressesOnly` in production:
+
+```csharp
+opt.AddWebhooks(w => w.PublicAddressesOnly = true);
+```
+
+With it on, the `warp-webhooks` client's primary handler is a `SocketsHttpHandler` whose `ConnectCallback` resolves the host, drops every address that is not publicly routable and connects to exactly the addresses that passed. The address checked is the address connected to, so a DNS answer that changes between a check and the connection (DNS rebinding) cannot get through, and a redirect opens its connection through the same callback. A host that resolves to no public address fails the attempt with `WebhookAddressNotPublicException` ("Webhook host '…' does not resolve to a public address."); the resolved addresses are never logged or recorded. Like any failed attempt it is retried per the schedule, so validate URLs when subscriptions are created as well.
+
+Refused ranges, from the IANA IPv4 and IPv6 special-purpose address registries (RFC 6890 and its successors): `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10`, `127.0.0.0/8`, `169.254.0.0/16`, `172.16.0.0/12`, `192.0.0.0/24`, `192.0.2.0/24`, `192.88.99.0/24`, `192.168.0.0/16`, `198.18.0.0/15`, `198.51.100.0/24`, `203.0.113.0/24`, `224.0.0.0/4` and everything above it (multicast, `240.0.0.0/4`, broadcast); for IPv6 everything outside `2000::/3` (which covers `::`, `::1`, `fc00::/7`, `fe80::/10`, `fec0::/10`, `ff00::/8`, `64:ff9b:1::/48`, `100::/64`), plus `2001::/23`, `2001:db8::/32` and `3fff::/20`. IPv4-mapped (`::ffff:0:0/96`), NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`) addresses are judged by the IPv4 address they embed. The classification is public as `WebhookAddressGuard.IsPublic(IPAddress)`, so you can run the same check when a subscription is saved.
+
+It is off by default so local development can send to `localhost`.
+
+**Set it on every server that runs a worker.** The guard is installed on the `warp-webhooks` client of the process that calls `AddWebhooks`, and an attempt runs on whichever server picks up the executor job. Turning it on only in the API process that calls `SendAsync` protects nothing; call `opt.AddWebhooks(w => w.PublicAddressesOnly = true)` inside every `AddWarpServer` (with a worker) in the deployment.
+
+**With an HTTP proxy** (an explicit `Proxy`, or the system proxy from `HTTP_PROXY` / `HTTPS_PROXY`), the client connects to the proxy, not to the destination. The guard then checks the proxy's address — a proxy on a private address is refused — and **the proxy must enforce the policy** for the destination itself.
+
+**Configuring the client yourself.** Configure the `warp-webhooks` client with `UseSocketsHttpHandler((handler, _) => ...)`; it composes with the guard. A primary handler you set with `ConfigurePrimaryHttpMessageHandler` before `AddWebhooks` is replaced by the guarded handler, and one set after it that is not a `SocketsHttpHandler` makes the client fail to build, so every attempt fails rather than sending unguarded. A `ConnectCallback` of your own is replaced by the guard.
+
 ## Signing
 
 `WebhookSigning` selects how each attempt is signed. The mode and secret ride the `WebhookSend` and are stamped on the row, so signing is computed fresh per attempt from self-contained data:
@@ -154,6 +193,7 @@ Per-delivery signing secrets are stored on the `WebhookDelivery` row. This is an
 The stance and the controls:
 
 - **Redacted on every read surface.** The query service, the REST endpoints, and the dashboard expose the secret only as a `HasSecret` boolean — the value never leaves the service. `Authorization`-class headers are redacted the same way. Redaction is not a caller-toggleable option.
+- **Rotation.** The stamped secret is the one in force at `SendAsync`; deliveries still retrying keep it. To redeliver a settled delivery with a rotated key, use [`Redeliver` with `WebhookRedeliveryOptions.Secret`](#redelivery).
 - **Never logged.** Payloads and secrets are user data (§1.2) — stored (that is the feature) but never emitted to logs at Info level or above.
 - **Escape hatch for stricter requirements.** Hosts that cannot store signing secrets at rest use **`Signing = None`** and sign in their own payload-building code (a body-embedded HMAC over the payload they already serialize). Warp then persists no secret for that delivery; the security boundary stays entirely in the host.
 
@@ -179,6 +219,17 @@ This is the `OnDeliveryExhausted` signal from the boundary table. Warp reports t
 ## Redelivery
 
 A settled (`Delivered` or `Exhausted`) delivery can be requeued from the dashboard or through `IWebhookCommandService.Redeliver(deliveryId)`: it resets to `Pending` with a fresh attempt budget, refreshes `ExpireAt` so it can't be swept mid-flight, and enqueues an immediate executor job — the settled→`Pending` flip and the enqueue commit atomically in one transaction, so two concurrent redelivers on one delivery enqueue exactly one job.
+
+**Redeliver with a rotated secret.** A delivery signs with the secret stamped at `SendAsync`, so a plain redeliver after you rotate an endpoint's key signs with the old key. Pass the new secret and it replaces the stamped one in the same atomic settled→`Pending` flip:
+
+```csharp
+await webhookCommands.Redeliver(
+    deliveryId,
+    new WebhookRedeliveryOptions { Secret = subscription.SigningSecret }, // the rotated whsec_… key
+    ct);
+```
+
+The new secret is validated like `WebhookSend.Secret` (at most 512 characters; base64 for `StandardWebhooks`), and a delivery sent with `Signing = None` rejects one with `ArgumentException`. Without `Secret` the overload behaves exactly like `Redeliver(deliveryId)`. A rejected redeliver (already `Pending`) leaves the stamped secret alone. The dashboard's Redeliver button keeps the stamped secret; the new secret is never returned by any read surface. The overload is a new `IWebhookCommandService` member with a default implementation, so an implementation of your own keeps compiling: without a secret it forwards to `Redeliver(deliveryId)`, and with one it throws `NotSupportedException` instead of signing with the old key.
 
 `Redeliver` returns a `WebhookRedeliveryResult` so callers map outcomes precisely: `Enqueued` (requeued), `NotFound` (unknown id), and `Rejected` (already `Pending` — it owns a live job). Because the redelivery enqueuer is part of Core and registered by `AddWarp`, `Redeliver` works from **any** process (dashboard-only / publisher-only included) — it stages the executor job through the outbox and a server elsewhere runs it. (The `Unavailable` result remains defined for defensiveness but is no longer reachable in a normal `AddWarp` process now that the enqueuer is always present.) The REST endpoint maps `Enqueued`→`200`, `NotFound`→`404`, and `Rejected`→`409`.
 

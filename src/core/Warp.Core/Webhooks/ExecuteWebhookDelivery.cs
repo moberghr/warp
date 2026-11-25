@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Warp.Core.Adapters;
 using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
@@ -60,6 +61,7 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
     private readonly IWarpAdapters _adapters;
     private readonly AdapterRegistry _adapterRegistry;
     private readonly WarpNotifierDispatcher _notifier;
+    private readonly TimeSpan _attemptTimeout;
     private readonly ILogger<ExecuteWebhookDeliveryHandler<TContext>> _logger;
 
     public ExecuteWebhookDeliveryHandler(
@@ -73,6 +75,7 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
         IWarpAdapters adapters,
         AdapterRegistry adapterRegistry,
         WarpNotifierDispatcher notifier,
+        IOptions<WarpConfiguration> configuration,
         ILogger<ExecuteWebhookDeliveryHandler<TContext>> logger)
     {
         _context = context;
@@ -85,6 +88,7 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
         _adapters = adapters;
         _adapterRegistry = adapterRegistry;
         _notifier = notifier;
+        _attemptTimeout = configuration.Value.WebhookAttemptTimeout;
         _logger = logger;
     }
 
@@ -284,14 +288,25 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
             return false;
         }
 
+        // The per-attempt budget covers the send and the bounded body read. It is a linked token rather than
+        // the client's own Timeout property, because a host may configure its own warp-webhooks client and
+        // Warp must not overwrite that client's settings. A timeout is an ordinary failed attempt (retried
+        // per schedule); host shutdown stays distinguishable through the job's own token.
+        using var timeoutCts = new CancellationTokenSource(_attemptTimeout, _timeProvider);
+        using var attemptCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
+        var attemptToken = attemptCts.Token;
+
         try
         {
             var client = _httpClientFactory.CreateClient(WebhookConstants.AdapterName);
 
-            using var response = await client.SendAsync(request, cancellationToken);
+            // ResponseHeadersRead: the status decides the outcome, so the body is never buffered. Only the
+            // capture prefix is read (when capture is on) and the rest is never drained; disposing the
+            // response releases the connection.
+            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, attemptToken);
 
             var success = IsSuccess(response, delivery);
-            await CaptureResponseAsync(scope, request, response, isFailure: !success, cancellationToken);
+            await CaptureResponseAsync(scope, request, response, isFailure: !success, attemptToken, cancellationToken);
 
             if (success)
             {
@@ -304,6 +319,29 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
                 $"Response status code does not indicate success: {(int)response.StatusCode} ({response.ReasonPhrase}).",
                 inner: null,
                 statusCode: response.StatusCode));
+
+            return false;
+        }
+        catch (HttpRequestException ex) when (ex.InnerException is WebhookAddressNotPublicException notPublic)
+        {
+            // PublicAddressesOnly refused the connection. The reason names the host, never its addresses.
+            scope.Fail(notPublic);
+            _logger.LogWarning("Webhook delivery {DeliveryId} attempt {Attempt} failed: {Reason}", delivery.Id, delivery.AttemptCount + 1, notPublic.Message);
+
+            return false;
+        }
+        catch (OperationCanceledException ex) when (cancellationToken.IsCancellationRequested)
+        {
+            scope.Fail(ex);
+            _logger.LogWarning("Webhook delivery {DeliveryId} attempt {Attempt} was cancelled by the executor job's token (host shutdown or job cancellation), not by the attempt timeout.", delivery.Id, delivery.AttemptCount + 1);
+
+            return false;
+        }
+        catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
+        {
+            var timeout = new TimeoutException($"The webhook attempt did not complete within {_attemptTimeout} (WebhookAttemptTimeout).");
+            scope.Fail(timeout);
+            _logger.LogWarning("Webhook delivery {DeliveryId} attempt {Attempt} timed out after {Timeout}.", delivery.Id, delivery.AttemptCount + 1, _attemptTimeout);
 
             return false;
         }
@@ -326,8 +364,12 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
     // metadata (§8.19); response headers/body follow the resolved CaptureMode (webhooks defaults to
     // response-body Always, request-body never — the payload already lives on the delivery row). Values are
     // redacted (§1.2) and byte-truncated before they reach the scope's capture columns. The executor owns
-    // the response, so the body is read destructively (no downstream consumer to preserve it for).
-    private async Task CaptureResponseAsync(AdapterCallScope scope, HttpRequestMessage request, HttpResponseMessage response, bool isFailure, CancellationToken cancellationToken)
+    // the response, so the body is read destructively (no downstream consumer to preserve it for). The
+    // response was sent with ResponseHeadersRead, so only the capped prefix ever crosses the wire into
+    // memory; with body capture off for this outcome the body is not read at all. The read is bounded by
+    // the attempt timeout, but running out of time there only abandons the capture: the outcome was already
+    // decided by the status code, and turning a 2xx into a retry would send the event again.
+    private async Task CaptureResponseAsync(AdapterCallScope scope, HttpRequestMessage request, HttpResponseMessage response, bool isFailure, CancellationToken attemptToken, CancellationToken jobToken)
     {
         scope.SetStatusCode((int)response.StatusCode);
 
@@ -341,7 +383,7 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
 
         if (response.Content is not null && HttpCaptureHelpers.ShouldCapture(recording.CaptureResponseBodies, isFailure))
         {
-            var body = await ReadResponseBodyAsync(response.Content, recording.MaxCapturedBodySize, cancellationToken);
+            var body = await ReadResponseBodyAsync(response.Content, recording.MaxCapturedBodySize, attemptToken, jobToken);
             if (body is not null)
             {
                 scope.SetResponseBody(HttpCaptureHelpers.TruncateToBytes(body, recording.MaxCapturedBodySize));
@@ -349,7 +391,7 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
         }
     }
 
-    private static async Task<string?> ReadResponseBodyAsync(HttpContent content, int maxBytes, CancellationToken cancellationToken)
+    private static async Task<string?> ReadResponseBodyAsync(HttpContent content, int maxBytes, CancellationToken attemptToken, CancellationToken jobToken)
     {
         if (maxBytes <= 0)
         {
@@ -358,14 +400,14 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
 
         try
         {
-            await using var stream = await content.ReadAsStreamAsync(cancellationToken);
+            await using var stream = await content.ReadAsStreamAsync(attemptToken);
 
             // Read only a bounded prefix (+1 byte so an over-cap body still trips TruncateToBytes' marker).
             var buffer = new byte[maxBytes + 1];
             var read = 0;
             while (read < buffer.Length)
             {
-                var n = await stream.ReadAsync(buffer.AsMemory(read, buffer.Length - read), cancellationToken);
+                var n = await stream.ReadAsync(buffer.AsMemory(read, buffer.Length - read), attemptToken);
                 if (n == 0)
                 {
                     break;
@@ -375,6 +417,11 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
             }
 
             return read == 0 ? string.Empty : Encoding.UTF8.GetString(buffer, 0, read);
+        }
+        catch (OperationCanceledException) when (!jobToken.IsCancellationRequested)
+        {
+            // The attempt timeout fired mid-read: abandon the capture, keep the status-decided outcome.
+            return null;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

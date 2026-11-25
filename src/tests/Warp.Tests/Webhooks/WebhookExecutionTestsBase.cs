@@ -2,6 +2,7 @@ using System.Net;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Shouldly;
 using Warp.Core;
 using Warp.Core.Adapters;
@@ -1045,6 +1046,7 @@ public abstract class WebhookExecutionTestsBase : IntegrationTestBase
             scope.ServiceProvider.GetRequiredService<IWarpAdapters>(),
             scope.ServiceProvider.GetRequiredService<AdapterRegistry>(),
             scope.ServiceProvider.GetRequiredService<WarpNotifierDispatcher>(),
+            scope.ServiceProvider.GetRequiredService<IOptions<WarpConfiguration>>(),
             NullLogger<ExecuteWebhookDeliveryHandler<TestContext>>.Instance);
 
         // The executor still completes (no-failed-jobs invariant) even though the outcome commit faulted.

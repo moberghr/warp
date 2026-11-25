@@ -13,6 +13,7 @@ using Warp.Core.Logging;
 using Warp.Core.Metrics;
 using Warp.Core.RateLimit;
 using Warp.Core.Services;
+using Warp.Core.Webhooks;
 using Warp.Worker.BackgroundServices;
 using Warp.Worker.Services;
 
@@ -64,6 +65,8 @@ public static class ServiceConfiguration
         {
             WarpConfigurationMerge.ApplyCoreSettings(registeredCore.Value, builder);
         }
+
+        WebhookConfigurationValidation.Validate(builder);
 
         // Fail fast on the contradictory "run the worker, but with zero workers" shape. Without
         // this, such a server registers the worker hosts and all job-orchestration tasks (taking

@@ -46,24 +46,51 @@ public class WebhookCommandService<TContext> : IWebhookCommandService
         _redeliveryEnqueuers = redeliveryEnqueuers;
     }
 
-    public async Task<WebhookRedeliveryResult> Redeliver(Guid deliveryId, CancellationToken ct = default)
+    public Task<WebhookRedeliveryResult> Redeliver(Guid deliveryId, CancellationToken ct = default)
+        => RedeliverCoreAsync(deliveryId, newSecret: null, ct);
+
+    public Task<WebhookRedeliveryResult> Redeliver(Guid deliveryId, WebhookRedeliveryOptions options, CancellationToken ct = default)
     {
-        var status = await _context.Set<WebhookDelivery>()
+        ArgumentNullException.ThrowIfNull(options);
+
+        if (options.Secret is { Length: > WebhookColumnCaps.Secret })
+        {
+            throw new ArgumentException(
+                $"WebhookRedeliveryOptions.Secret exceeds the {WebhookColumnCaps.Secret}-character limit.",
+                nameof(options));
+        }
+
+        return RedeliverCoreAsync(deliveryId, options.Secret, ct);
+    }
+
+    private async Task<WebhookRedeliveryResult> RedeliverCoreAsync(Guid deliveryId, string? newSecret, CancellationToken ct)
+    {
+        var current = await _context.Set<WebhookDelivery>()
             .AsNoTracking()
             .Where(x => x.Id == deliveryId)
-            .Select(x => (WebhookDeliveryStatus?)x.Status)
+            .Select(x =>
+                new
+                {
+                    x.Status,
+                    x.SigningMode,
+                })
             .FirstOrDefaultAsync(ct);
 
-        if (status is null)
+        if (current is null)
         {
             return WebhookRedeliveryResult.NotFound;
         }
 
         // A Pending delivery already has a live executor job — requeuing would double-attempt. Only settled
         // (Delivered / Exhausted) deliveries are redeliverable; reject without side effects.
-        if (status == WebhookDeliveryStatus.Pending)
+        if (current.Status == WebhookDeliveryStatus.Pending)
         {
             return WebhookRedeliveryResult.Rejected;
+        }
+
+        if (newSecret is not null)
+        {
+            ValidateNewSecret(newSecret, current.SigningMode, nameof(WebhookRedeliveryOptions));
         }
 
         // No worker in this process to run an executor job, and nothing scans NextAttemptAt: a Pending reset
@@ -80,7 +107,8 @@ public class WebhookCommandService<TContext> : IWebhookCommandService
         await using var transaction = await _context.Database.BeginTransactionAsync(ct);
 
         // Guarded settled→Pending transition: the status guard lives in the WHERE, so exactly one of two
-        // racing redelivers flips the row (rowcount 1) and the other matches zero rows.
+        // racing redelivers flips the row (rowcount 1) and the other matches zero rows. A rotated secret is
+        // written by the same statement, so the row is never Pending with the old key or settled with the new.
         var updated = await _context.Set<WebhookDelivery>()
             .Where(x => x.Id == deliveryId)
             .Where(x => x.Status != WebhookDeliveryStatus.Pending)
@@ -89,7 +117,8 @@ public class WebhookCommandService<TContext> : IWebhookCommandService
                     .SetProperty(x => x.Status, WebhookDeliveryStatus.Pending)
                     .SetProperty(x => x.AttemptCount, 0)
                     .SetProperty(x => x.NextAttemptAt, now)
-                    .SetProperty(x => x.ExpireAt, expireAt),
+                    .SetProperty(x => x.ExpireAt, expireAt)
+                    .SetProperty(x => x.Secret, x => newSecret ?? x.Secret),
                 ct);
 
         if (updated == 0)
@@ -117,6 +146,23 @@ public class WebhookCommandService<TContext> : IWebhookCommandService
         WarpTelemetry.WebhookRedeliveries.Add(1);
 
         return WebhookRedeliveryResult.Enqueued;
+    }
+
+    // Validated before anything is written: the attempt reads the secret only at send time, so a bad value
+    // would otherwise surface as failed attempts long after this call returned Enqueued.
+    private static void ValidateNewSecret(string secret, WebhookSigning signingMode, string paramName)
+    {
+        if (signingMode == WebhookSigning.None)
+        {
+            throw new ArgumentException(
+                "The delivery is not signed (WebhookSigning.None), so a new secret would never be used.",
+                paramName);
+        }
+
+        if (signingMode == WebhookSigning.StandardWebhooks)
+        {
+            WebhookSecretValidation.ValidateStandardWebhooksSecret(secret, paramName);
+        }
     }
 }
 

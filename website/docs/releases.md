@@ -4,6 +4,25 @@ sidebar_position: 6
 
 # Releases
 
+## 8.1.0
+
+*unreleased*
+
+Outbound webhook hardening. No migration and no breaking change.
+
+### Webhooks: bounded attempts
+
+- **The response body is no longer buffered.** Attempts are sent with `HttpCompletionOption.ResponseHeadersRead`; only the captured prefix of the body is read (8 KiB by default, nothing when body capture is off) and the rest is never drained. Before, the whole body was buffered (up to 2 GB) before the bounded capture read.
+- **New `WebhookAttemptTimeout`** on `WarpConfiguration` (default **30 seconds**) bounds the send, the response headers and the capture read. An attempt whose response headers do not arrive in time is an ordinary failed attempt, retried per the delivery's `RetrySchedule`; if only the body capture runs out of time, the status code still decides (a `2xx` stays `Delivered`). It is a cancellation token, not `HttpClient.Timeout`, so a `warp-webhooks` client you configure keeps its settings. **Behaviour change:** before, an attempt could run for the client's 100 s `Timeout`; a receiver that legitimately takes longer than 30 s now fails its attempts, so raise the setting for it. See [Attempt limits](features/webhooks.md#attempt-limits).
+
+### Webhooks: public addresses only (opt-in)
+
+`opt.AddWebhooks(w => w.PublicAddressesOnly = true)` makes the `warp-webhooks` client connect only to publicly routable addresses: it resolves the host itself, drops loopback, private, link-local (cloud metadata), shared, documentation, multicast and reserved addresses, and connects to exactly the addresses that passed, so DNS rebinding and redirects cannot get around it. A refused host fails the attempt with `WebhookAddressNotPublicException`. Off by default so local development can send to `localhost`. It applies in the process that calls `AddWebhooks`, so **set it on every server that runs a worker**, not only where `SendAsync` is called. With an HTTP proxy the guard checks the proxy, so the proxy must enforce the policy. The classification is public as `WebhookAddressGuard.IsPublic(IPAddress)`. See [Public addresses only](features/webhooks.md#public-addresses-only).
+
+### Webhooks: redeliver with a rotated secret
+
+`IWebhookCommandService.Redeliver(deliveryId, new WebhookRedeliveryOptions { Secret = ... }, ct)` replaces the delivery's stamped signing secret in the same atomic settled→`Pending` flip, so a redelivery after a key rotation is signed with the new key. The new overload has a default implementation, so your own `IWebhookCommandService` implementations keep compiling (with a secret, the default throws `NotSupportedException` rather than signing with the old key). The dashboard's Redeliver is unchanged. See [Redelivery](features/webhooks.md#redelivery).
+
 ## 8.0.0
 
 *2026-11-25*
