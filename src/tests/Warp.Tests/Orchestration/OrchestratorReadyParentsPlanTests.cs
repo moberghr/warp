@@ -137,28 +137,16 @@ public abstract partial class OrchestratorReadyParentsPlanTestsBase : IAsyncLife
     // are in flight: the sweep reads all 1,000 of these to find none ready (10,924 pages on PostgreSQL),
     // and it used to run on every job completion.
     [TimedFact]
-    public async Task HintedReadyParentsQuery_ThousandMessagesInFlight_ReadsOnlyTheNamedParents()
+    public async Task HintedReadiness_ThousandMessagesInFlight_ReadsOnlyTheNamedParents()
     {
         var ct = Xunit.TestContext.Current.CancellationToken;
         var now = DateTime.UtcNow;
-        Job Row(JobKind kind, State state, Guid? parent) =>
-            new()
-            {
-                Id = Guid.NewGuid(),
-                Kind = kind,
-                CurrentState = state,
-                ParentJobId = parent,
-                CreateTime = now,
-                ScheduleTime = now,
-                Queue = "default",
-            };
-
-        var messages = Enumerable.Range(0, 1000).Select(_ => Row(JobKind.Message, State.Processing, null)).ToList();
+        var messages = Enumerable.Range(0, 1000).Select(_ => Row(JobKind.Message, State.Processing, null, now)).ToList();
         await using (var seed = _fixture.CreateContext())
         {
             seed.Set<Job>().AddRange(messages);
-            seed.Set<Job>().AddRange(messages.Skip(1).Select(x => Row(JobKind.Job, State.Processing, x.Id)));
-            seed.Set<Job>().Add(Row(JobKind.Job, State.Processing, messages[0].Id));
+            seed.Set<Job>().AddRange(messages.Skip(1).Select(x => Row(JobKind.Job, State.Processing, x.Id, now)));
+            seed.Set<Job>().Add(Row(JobKind.Job, State.Processing, messages[0].Id, now));
             await seed.SaveChangesAsync(ct);
 
             // The first message's only child finishes: the row leaves Processing, as in a running system.
@@ -169,11 +157,101 @@ public abstract partial class OrchestratorReadyParentsPlanTestsBase : IAsyncLife
 
         Guid[] named = [messages[0].Id, messages[1].Id];
         await using var context = _fixture.CreateContext();
-        var query = Orchestrator<TestContext>.HintedReadyParentsQuery(context, named);
+        var childStates = Orchestrator<TestContext>.ChildStatesOfQuery(context, named);
+        var ready = Orchestrator<TestContext>.ParentsWithSettledChildren(await childStates.ToListAsync(ct));
 
-        (await query.Select(x => x.Id).ToListAsync(ct)).ShouldBe([messages[0].Id], "one named parent is ready, the other still has a running child");
-        var (pages, detail) = await MeasurePagesReadAsync(context, query, ct);
-        pages.ShouldBeLessThan(MaxPages, detail);
+        ready.ShouldBe([messages[0].Id], "one named parent is ready, the other still has a running child");
+        var (childPages, childDetail) = await MeasurePagesReadAsync(context, childStates, ct);
+        childPages.ShouldBeLessThan(MaxPages, childDetail);
+        var (parentPages, parentDetail) = await MeasurePagesReadAsync(context, Orchestrator<TestContext>.ParentsByIdQuery(context, ready), ct);
+        parentPages.ShouldBeLessThan(MaxPages, parentDetail);
+    }
+
+    // The same check in the state the message-routing benchmark reaches: the table was analyzed while it
+    // was nearly empty, then a burst of messages ran, so thousands of finished jobs are in the table and the
+    // statistics know of none. As one statement (parents by id, kind and state, NOT EXISTS a pending child
+    // with kind = Job, EXISTS a child with kind = Job in a settled state) PostgreSQL then found the settled
+    // child through (kind, state, create_time), every finished job in the table once per named parent:
+    // 28,608 pages for 26 named parents on the benchmark, on almost every job completion. The statements
+    // below name the parent ids and nothing else, so only the parent index and the primary key can serve them.
+    [TimedFact]
+    public async Task HintedReadiness_BurstOfFinishedJobsTheStatisticsNeverSaw_ReadsOnlyTheNamedParents()
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var now = DateTime.UtcNow;
+        await using var context = _fixture.CreateContext();
+        var postgres = context.Database.ProviderName?.Contains("Npgsql", StringComparison.Ordinal) == true;
+        var entity = context.Model.FindEntityType(typeof(Job))!;
+        var table = "\"" + entity.GetSchema() + "\".\"" + entity.GetTableName() + "\"";
+
+        // None of these takes parameters; the identifiers come from the model.
+        var keepStale = "ALTER TABLE " + table + " SET (autovacuum_enabled = false)";
+        var analyze = "ANALYZE " + table;
+        var restore = "ALTER TABLE " + table + " RESET (autovacuum_enabled)";
+
+        try
+        {
+            if (postgres)
+            {
+                // Statistics of a nearly empty table, kept that way: autovacuum would analyze it in its own time.
+                context.Set<Job>().AddRange(Enumerable.Range(0, 20).Select(_ => Row(JobKind.Job, State.Enqueued, null, now)));
+                await context.SaveChangesAsync(ct);
+                await context.Database.ExecuteSqlRawAsync(keepStale, ct);
+                await context.Database.ExecuteSqlRawAsync(analyze, ct);
+                context.ChangeTracker.Clear();
+            }
+
+            // 1,000 messages of three handlers each. The first 990 have run; the last ten are in flight with
+            // two children done and one running, except five of them whose third child finishes below.
+            var messages = Enumerable.Range(0, 1000).Select(_ => Row(JobKind.Message, State.Processing, null, now)).ToList();
+            var inFlight = messages.Skip(990).ToList();
+            await using (var seed = _fixture.CreateContext())
+            {
+                seed.Set<Job>().AddRange(messages);
+                seed.Set<Job>().AddRange(messages.SelectMany(x => Enumerable.Range(0, 3).Select(_ => Row(JobKind.Job, State.Processing, x.Id, now))));
+                await seed.SaveChangesAsync(ct);
+
+                // Every transition is an update, as on a running system: it leaves the old index entries behind.
+                var done = messages.Take(990).Select(x => x.Id).ToList();
+                await seed.Set<Job>()
+                    .Where(x => x.ParentJobId != null && done.Contains(x.ParentJobId.Value))
+                    .ExecuteUpdateAsync(x => x.SetProperty(y => y.CurrentState, State.Completed), ct);
+                await seed.Set<Job>()
+                    .Where(x => done.Contains(x.Id))
+                    .ExecuteUpdateAsync(x => x.SetProperty(y => y.CurrentState, State.Completed), ct);
+
+                var running = await seed.Set<Job>()
+                    .Where(x => x.ParentJobId != null && inFlight.Select(y => y.Id).Contains(x.ParentJobId.Value))
+                    .Select(x => new { x.Id, ParentId = x.ParentJobId!.Value })
+                    .ToListAsync(ct);
+                var readyParents = inFlight.Take(5).Select(x => x.Id).ToHashSet();
+                var finished = running
+                    .GroupBy(x => x.ParentId)
+                    .SelectMany(x => readyParents.Contains(x.Key) ? x : x.Take(2))
+                    .Select(x => x.Id)
+                    .ToList();
+                await seed.Set<Job>()
+                    .Where(x => finished.Contains(x.Id))
+                    .ExecuteUpdateAsync(x => x.SetProperty(y => y.CurrentState, State.Completed), ct);
+            }
+
+            var named = inFlight.Select(x => x.Id).ToArray();
+            var childStates = Orchestrator<TestContext>.ChildStatesOfQuery(context, named);
+            var ready = Orchestrator<TestContext>.ParentsWithSettledChildren(await childStates.ToListAsync(ct));
+
+            ready.Order().ShouldBe(inFlight.Take(5).Select(x => x.Id).Order(), "five named parents have every child done, five still have one running");
+            var (childPages, childDetail) = await MeasurePagesReadAsync(context, childStates, ct);
+            childPages.ShouldBeLessThan(MaxPages, childDetail);
+            var (parentPages, parentDetail) = await MeasurePagesReadAsync(context, Orchestrator<TestContext>.ParentsByIdQuery(context, ready), ct);
+            parentPages.ShouldBeLessThan(MaxPages, parentDetail);
+        }
+        finally
+        {
+            if (postgres)
+            {
+                await context.Database.ExecuteSqlRawAsync(restore, CancellationToken.None);
+            }
+        }
     }
 
     // "Which of these jobs is awaited?", asked while thousands of rows are awaiting: the cost follows the
@@ -253,6 +331,18 @@ public abstract partial class OrchestratorReadyParentsPlanTestsBase : IAsyncLife
 
         pages.ShouldBeLessThan(MaxPages, detail);
     }
+
+    private static Job Row(JobKind kind, State state, Guid? parent, DateTime now) =>
+        new()
+        {
+            Id = Guid.NewGuid(),
+            Kind = kind,
+            CurrentState = state,
+            ParentJobId = parent,
+            CreateTime = now,
+            ScheduleTime = now,
+            Queue = "default",
+        };
 
     private static async Task<(long Pages, string Detail)> MeasurePagesReadAsync(TestContext context, IQueryable query, CancellationToken ct)
     {

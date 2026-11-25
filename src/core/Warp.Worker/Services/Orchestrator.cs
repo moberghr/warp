@@ -154,8 +154,19 @@ public sealed class Orchestrator<TContext> : IServerTask, IScheduledRunAware, ID
         var finalized = 0;
         foreach (var chunk in hintedParents.Chunk(ParentIdsPerStatement))
         {
-            var readyHinted = await HintedReadyParentsQuery(_context, chunk).ToListAsync(ct);
-            finalized += await FinalizeParentsAsync(readyHinted, settled, jobExpirationTimeout, ct);
+            var childStates = await ChildStatesOfQuery(_context, chunk).ToListAsync(ct);
+            var readyIds = ParentsWithSettledChildren(childStates);
+            if (readyIds.Count == 0)
+            {
+                continue;
+            }
+
+            // By primary key alone; kind and state are checked here, not in the statement (see ParentsByIdQuery).
+            var readyHinted = (await ParentsByIdQuery(_context, readyIds).ToListAsync(ct))
+                .Where(x => x.Kind is JobKind.Message or JobKind.Batch)
+                .Where(x => x.CurrentState is State.Awaiting or State.Processing)
+                .ToList();
+            finalized += await FinalizeParentsAsync(readyHinted, childStates, settled, jobExpirationTimeout, ct);
             _context.ChangeTracker.Clear();
         }
 
@@ -171,7 +182,10 @@ public sealed class Orchestrator<TContext> : IServerTask, IScheduledRunAware, ID
                 _signals.RequestParentSweep();
             }
 
-            finalized += await FinalizeParentsAsync(readySwept, settled, jobExpirationTimeout, ct);
+            var sweptChildStates = readySwept.Count == 0
+                ? []
+                : await ChildStatesOfQuery(_context, readySwept.ConvertAll(x => x.Id)).ToListAsync(ct);
+            finalized += await FinalizeParentsAsync(readySwept, sweptChildStates, settled, jobExpirationTimeout, ct);
             _context.ChangeTracker.Clear();
         }
 
@@ -220,17 +234,53 @@ public sealed class Orchestrator<TContext> : IServerTask, IScheduledRunAware, ID
             .Take(batchSize);
     }
 
-    // The same readiness check for the parents a finished job named (rule 6.11), found by primary key.
-    // The sweep above reads every parent in flight to find the ready ones, about 11 pages each on
-    // PostgreSQL, and it ran on every job completion: 10,924 pages per pass with 1,000 messages in
-    // flight and none ready. This reads the named parents only, whatever else is in flight.
-    internal static IQueryable<Job> HintedReadyParentsQuery(DbContext context, IReadOnlyCollection<Guid> parentIds) =>
-        WhereChildrenSettled(
-            context,
-            context.Set<Job>()
-                .Where(p => parentIds.Contains(p.Id))
-                .Where(p => p.Kind == JobKind.Message || p.Kind == JobKind.Batch)
-                .Where(p => p.CurrentState == State.Awaiting || p.CurrentState == State.Processing));
+    // The readiness check for the parents a finished job named (rule 6.11), in two statements that can each
+    // be served only one way, and that is the point (the lesson of rules 6.9 and 6.11 again).
+    //
+    // It was ONE statement: parents WHERE id = ANY(named) AND kind IN (..) AND state IN (..) AND NOT EXISTS
+    // (a child with kind = Job still pending) AND EXISTS (a child with kind = Job AND state IN (settled)).
+    // Every extra predicate offered PostgreSQL another index, and after a burst the statistics said each
+    // matched one row, so it took them: the settled child through (kind, state, create_time), which is every
+    // finished job in the table, read once per named parent and discarded by the join filter; the pending
+    // child through a BitmapAnd with kind = Job, every job's index entry per parent; the parents themselves
+    // through (kind, state) with the ids as a filter. Measured on the message-routing benchmark: 28,608 pages
+    // for 26 named parents and 177,258 for 60, on almost every job completion, against a few hundred when
+    // the plan happened to be right. Message routing read 110 to 1,317 pages per job on identical code.
+    //
+    // 1. the children's (kind, state) of the named parents, by parent id and nothing else: the
+    //    (ParentJobId, CurrentState) index is the only one the predicate can use
+    // 2. readiness is decided here, in memory (ParentsWithSettledChildren)
+    // 3. the ready parents by primary key and nothing else (ParentsByIdQuery)
+    //
+    // Internal and static so OrchestratorReadyParentsPlanTests measures the pages THESE read, not a copy.
+    internal static IQueryable<ChildState> ChildStatesOfQuery(DbContext context, IReadOnlyCollection<Guid> parentIds) =>
+        context.Set<Job>()
+            .Where(c => c.ParentJobId != null && parentIds.Contains(c.ParentJobId.Value))
+            .Select(c =>
+                new ChildState
+                {
+                    ParentId = c.ParentJobId!.Value,
+                    Kind = c.Kind,
+                    CurrentState = c.CurrentState,
+                })
+            .Distinct();
+
+    // No kind or state predicate, deliberately: with one, PostgreSQL found 26 named parents through the
+    // (kind, state, create_time) index and filtered 696 rows by id. The caller checks both in memory; the
+    // rows are the few parents whose children have all settled.
+    internal static IQueryable<Job> ParentsByIdQuery(DbContext context, IReadOnlyCollection<Guid> parentIds) =>
+        context.Set<Job>().Where(p => parentIds.Contains(p.Id));
+
+    // The parents all of whose job children are settled, with at least one that is. The same rule as
+    // WhereChildrenSettled (which the sweep still runs in SQL): Completed, Failed and Deleted are settled,
+    // Awaiting is a continuation that has not started and is neither, anything else is still pending.
+    internal static List<Guid> ParentsWithSettledChildren(IEnumerable<ChildState> childStates) =>
+        [.. childStates
+            .Where(x => x.Kind == JobKind.Job)
+            .GroupBy(x => x.ParentId)
+            .Where(x => x.All(y => y.CurrentState is State.Completed or State.Failed or State.Deleted or State.Awaiting))
+            .Where(x => x.Any(y => y.CurrentState is State.Completed or State.Failed or State.Deleted))
+            .Select(x => x.Key),];
 
     // Deleted counts as SETTLED on both sides of the readiness check: a deleted child is
     // deliberately-skipped work (a Skip-mode [Mutex]/[RateLimit] rejecting a routed handler job, or an
@@ -383,7 +433,7 @@ public sealed class Orchestrator<TContext> : IServerTask, IScheduledRunAware, ID
         return ([.. slice], cursor);
     }
 
-    private async Task<int> FinalizeParentsAsync(List<Job> readyParents, List<Guid> settled, TimeSpan jobExpirationTimeout, CancellationToken ct)
+    private async Task<int> FinalizeParentsAsync(List<Job> readyParents, List<ChildState> childStates, List<Guid> settled, TimeSpan jobExpirationTimeout, CancellationToken ct)
     {
         if (readyParents.Count == 0)
         {
@@ -392,22 +442,12 @@ public sealed class Orchestrator<TContext> : IServerTask, IScheduledRunAware, ID
 
         settled.AddRange(readyParents.Select(x => x.Id));
 
-        // Two-step fetch (§5.2): one follow-up query collects the distinct (parent, settled state) pairs
-        // instead of an `_context.Set<Job>().Any(...)` subquery inside the Select projection (which EF
-        // Core has translated unreliably across versions). One round-trip yields every per-state id-set.
-        var parentIds = readyParents.ConvertAll(p => p.Id);
-        var settledChildStates = await _context.Set<Job>()
-            .Where(c => c.Kind == JobKind.Job)
-            .Where(c => c.CurrentState == State.Failed || c.CurrentState == State.Completed || c.CurrentState == State.Deleted)
-            .Where(c => c.ParentJobId != null && parentIds.Contains(c.ParentJobId.Value))
-            .Select(c =>
-                new
-                {
-                    ParentId = c.ParentJobId!.Value,
-                    c.CurrentState,
-                })
-            .Distinct()
-            .ToListAsync(ct);
+        // The children's states come from ChildStatesOfQuery, read by parent id alone. They were read here by
+        // a statement that also named kind = Job and the settled states, which let PostgreSQL walk every
+        // finished job in the table to find them (1,239 pages a call on the message-routing benchmark).
+        var settledChildStates = childStates
+            .Where(x => x.Kind == JobKind.Job)
+            .ToList();
         var failedParentIdSet = settledChildStates
             .Where(x => x.CurrentState == State.Failed)
             .Select(x => x.ParentId)
@@ -632,6 +672,16 @@ public sealed class Orchestrator<TContext> : IServerTask, IScheduledRunAware, ID
         _signals.NoteFinalized([], failed);
 
         return orphaned.Count;
+    }
+
+    // One (kind, state) a parent's children are in.
+    internal sealed class ChildState
+    {
+        public Guid ParentId { get; init; }
+
+        public JobKind Kind { get; init; }
+
+        public State CurrentState { get; init; }
     }
 
     // A parent some awaiting row is waiting on: what decides whether that row may move.
