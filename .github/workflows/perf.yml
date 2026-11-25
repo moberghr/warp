@@ -30,6 +30,11 @@ on:
         description: 'Measure this release tag with the current benchmarks and attach the results to it (no comparison)'
         required: false
         type: string
+      repeats:
+        description: 'Measure every case this many times (1 to 5) and report the medians. 1 checks a change for a regression; 3 or more for numbers that will be published or for timings'
+        required: false
+        default: '1'
+        type: string
   # A published release is measured and its results attached to it as benchmarks.json, which never
   # expires. Every later run compares against the latest of those, and charts them release over release.
   release:
@@ -57,6 +62,8 @@ jobs:
       latest_release: ${{ steps.refs.outputs.latest_release }}
       base_label: ${{ steps.refs.outputs.base_label }}
       base_is_release: ${{ steps.refs.outputs.base_is_release }}
+      repeats: ${{ steps.refs.outputs.repeats }}
+      repeat_count: ${{ steps.refs.outputs.repeat_count }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -117,6 +124,14 @@ jobs:
             BASE_IS_RELEASE=true
           fi
           echo "base_is_release=$BASE_IS_RELEASE" >> "$GITHUB_OUTPUT"
+
+          # How many times every case is measured, as the list the benchmark matrix runs over. One in record
+          # mode whatever was asked: a release's record holds each case once.
+          REPEATS="${{ inputs.repeats }}"
+          case "$REPEATS" in 1|2|3|4|5) ;; "") REPEATS=1 ;; *) echo "::error::repeats must be 1 to 5, got '$REPEATS'"; exit 1 ;; esac
+          if [ -n "$RECORD" ]; then REPEATS=1; fi
+          echo "repeat_count=$REPEATS" >> "$GITHUB_OUTPUT"
+          echo "repeats=[$(seq -s, 1 "$REPEATS")]" >> "$GITHUB_OUTPUT"
         env:
           GH_TOKEN: ${{ github.token }}
 
@@ -138,7 +153,7 @@ jobs:
   # that has to read pg_stat_statements from it.
   # ---------------------------------------------------------------------------------------------
   benchmarks:
-    name: Benchmarks (${{ matrix.benchmark.name }}, ${{ matrix.benchmark.sqlserver && matrix.db.label || matrix.db.postgres_label }})
+    name: Benchmarks (${{ matrix.benchmark.name }}, ${{ matrix.benchmark.sqlserver && matrix.db.label || matrix.db.postgres_label }}${{ needs.refs.outputs.repeat_count != '1' && format(', run {0}', matrix.repeat) || '' }})
     needs: refs
 
     # Pinned, not ubuntu-latest. This workflow measures, and the latest label migrates to Ubuntu 26 in
@@ -232,6 +247,9 @@ jobs:
         # latest: a new upstream release must not move the numbers unannounced. Base and head run on the same
         # version inside a job, and exports and release records carry the label, so every comparison is like
         # with like.
+        # The `repeats` input: every cell of the matrix once per repeat, each on a runner of its own, so the
+        # report can give medians and show how far the repeats were apart.
+        repeat: ${{ fromJSON(needs.refs.outputs.repeats) }}
         db:
           - label: pg17+mssql2022
             postgres_label: pg17
@@ -269,16 +287,17 @@ jobs:
 
       # Which side runs first. The two run one after the other on one runner, and always head first meant any
       # effect of going first or second (a warmer disk cache, a runner that slows down as the job goes on) was
-      # always on the same side. Odd run numbers measure the base first, even ones the head.
+      # always on the same side. Odd run numbers measure the base first, even ones the head; within a run
+      # with repeats the order alternates from one repeat to the next, so its medians hold both orders.
       - name: Choose the order of the two sides
         id: order
         run: |
-          if [ -z "${{ needs.refs.outputs.record }}" ] && [ $(( ${{ github.run_number }} % 2 )) -eq 1 ]; then
+          if [ -z "${{ needs.refs.outputs.record }}" ] && [ $(( (${{ github.run_number }} + ${{ matrix.repeat }}) % 2 )) -eq 0 ]; then
             echo "base_first=true" >> "$GITHUB_OUTPUT"
-            echo "Base first (run ${{ github.run_number }})."
+            echo "Base first (run ${{ github.run_number }}, repeat ${{ matrix.repeat }})."
           else
             echo "base_first=false" >> "$GITHUB_OUTPUT"
-            echo "Head first (run ${{ github.run_number }})."
+            echo "Head first (run ${{ github.run_number }}, repeat ${{ matrix.repeat }})."
           fi
 
       # The base, when it goes first. Same step as the one after the head below; see there.
@@ -382,6 +401,13 @@ jobs:
               export-bdn --results="${{ github.workspace }}/bench/head" --out="${{ github.workspace }}/bench/export.json" --database="$DB_LABEL"
           fi
 
+          # The base side in the same form, for the medians table of a run with repeats (medians-bdn pairs the
+          # two files). Not named export.json: the release record and the history read every file of that name.
+          if [ -d "${{ github.workspace }}/bench/base" ]; then
+            dotnet run -c Release --project src/benchmarks/Warp.ServerBenchmarks/Warp.ServerBenchmarks.csproj -- \
+              export-bdn --results="${{ github.workspace }}/bench/base" --out="${{ github.workspace }}/bench/export-base.json" --database="$DB_LABEL" || true
+          fi
+
       - name: Explain an incompatible base
         if: steps.basebench.outcome == 'failure' || steps.basefirst.outcome == 'failure'
         run: |
@@ -412,7 +438,8 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: benchmark-results-${{ matrix.benchmark.name }}-${{ matrix.db.postgres_label }}
+          # The first repeat keeps the plain name the report and the release record look for; later ones add -rN.
+          name: benchmark-results-${{ matrix.benchmark.name }}-${{ matrix.db.postgres_label }}${{ matrix.repeat != 1 && format('-r{0}', matrix.repeat) || '' }}
           path: ${{ github.workspace }}/bench
 
   # ---------------------------------------------------------------------------------------------
@@ -491,8 +518,15 @@ jobs:
             history-bdn --releases=releases --exports=results \
             --label="${{ needs.refs.outputs.record || 'this run' }}" --out=history.md
 
+      - name: Build the medians of a run with repeats
+        if: needs.refs.outputs.repeat_count != '1'
+        run: |
+          dotnet run -c Release --project src/benchmarks/Warp.ServerBenchmarks/Warp.ServerBenchmarks.csproj -- \
+            medians-bdn --results=results --out=medians.md
+
       - name: Write the report
         env:
+          REPEATS: ${{ needs.refs.outputs.repeat_count }}
           HEAD_SHA: ${{ needs.refs.outputs.head }}
           BASE_SHA: ${{ needs.refs.outputs.base }}
           RECORD: ${{ needs.refs.outputs.record }}
@@ -573,6 +607,13 @@ jobs:
             fi
             echo "Each scenario runs the same benchmark code against both commits on one runner. Only \`src/core\` differs between the two sides."
             echo
+            if [ -f medians.md ]; then
+              cat medians.md
+              echo
+              later_failed=$(grep -l "verdict: fail" results/benchmark-results-*-r[0-9]/section.md 2>/dev/null | sed -E 's|results/benchmark-results-(.*)/section.md|\1|' | tr '\n' ' ' || true)
+              echo "Every case was measured $REPEATS times. The headline and the per-scenario sections below are the FIRST run; the table above is all of them.${later_failed:+ Cells that failed their gate in a later run: $later_failed}"
+              echo
+            fi
             for version in $versions; do
               echo "## Databases: $(describe "$version")"
               echo

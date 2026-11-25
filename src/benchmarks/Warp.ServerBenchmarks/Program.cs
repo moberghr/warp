@@ -327,6 +327,12 @@ else if (args.Length > 0 && string.Equals(args[0], "record-release", StringCompa
         Value(args, "--commit=") ?? string.Empty,
         Value(args, "--out=") ?? "benchmarks.json");
 }
+else if (args.Length > 0 && string.Equals(args[0], "medians-bdn", StringComparison.OrdinalIgnoreCase))
+{
+    Environment.ExitCode = PerfCompare.Medians(
+        Value(args, "--results=") ?? string.Empty,
+        Value(args, "--out=") ?? "medians.md");
+}
 else if (args.Length > 0 && string.Equals(args[0], "history-bdn", StringComparison.OrdinalIgnoreCase))
 {
     Environment.ExitCode = PerfCompare.History(

@@ -99,7 +99,11 @@ public static partial class PerfCompare
         {
             var current = Directory.GetFiles(exportsPath, "export.json", SearchOption.AllDirectories)
                 .SelectMany(x => JsonSerializer.Deserialize<List<ReleaseCase>>(File.ReadAllText(x), HistoryOptions) ?? [])
-                .ToDictionary(HistoryKey, StringComparer.Ordinal);
+
+                // A run with repeats has each case several times: the history takes one of them (the medians
+                // table is where the repeats are read together).
+                .GroupBy(HistoryKey, StringComparer.Ordinal)
+                .ToDictionary(x => x.Key, x => x.First(), StringComparer.Ordinal);
             if (current.Count > 0)
             {
                 points.Add((label ?? "this run", current));
