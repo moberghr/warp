@@ -19,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       base_ref:
-        description: 'Baseline commit, tag or branch (default: the merge base)'
+        description: 'Baseline commit, tag or branch, e.g. 7.7.0 to compare everything since that release (default: the merge base with main)'
         required: false
         type: string
       head_ref:
@@ -53,6 +53,8 @@ jobs:
       base: ${{ steps.refs.outputs.base }}
       record: ${{ steps.refs.outputs.record }}
       latest_release: ${{ steps.refs.outputs.latest_release }}
+      base_label: ${{ steps.refs.outputs.base_label }}
+      base_is_release: ${{ steps.refs.outputs.base_is_release }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -92,10 +94,29 @@ jobs:
           echo "base=$BASE_SHA" >> "$GITHUB_OUTPUT"
           echo "record=$RECORD" >> "$GITHUB_OUTPUT"
 
+          # What the base is, named in every section heading and in the report header when it was
+          # chosen by hand (a release tag, another branch): "7.7.0 (74443f8c)". Empty for the default
+          # merge base, whose sections stay as they were.
+          if [ -n "${{ inputs.base_ref }}" ]; then
+            echo "base_label=${{ inputs.base_ref }} ($(git rev-parse --short=8 "$BASE_SHA"))" >> "$GITHUB_OUTPUT"
+          else
+            echo "base_label=" >> "$GITHUB_OUTPUT"
+          fi
+
           # The release a run is also compared with, for creep that each change's own gate misses.
           # Empty when there is none yet; the comparison is then simply absent.
           LATEST=$(gh release view --json tagName -q .tagName 2>/dev/null || true)
           echo "latest_release=$LATEST" >> "$GITHUB_OUTPUT"
+
+          # A run whose base IS the latest release (base_ref=7.7.0) already compares the head with that
+          # release, measured side by side on one runner, which is the better comparison: the recorded
+          # numbers came from another runner. The since-release lines would only repeat it less
+          # reliably, so they are left out and the report says why.
+          BASE_IS_RELEASE=false
+          if [ -n "$LATEST" ] && [ "$(git rev-parse --verify --quiet "$LATEST^{commit}" || true)" = "$BASE_SHA" ]; then
+            BASE_IS_RELEASE=true
+          fi
+          echo "base_is_release=$BASE_IS_RELEASE" >> "$GITHUB_OUTPUT"
         env:
           GH_TOKEN: ${{ github.token }}
 
@@ -331,7 +352,7 @@ jobs:
             --artifacts "${{ github.workspace }}/bench/base"
 
       - name: Fetch the latest release's results
-        if: needs.refs.outputs.record == '' && needs.refs.outputs.latest_release != ''
+        if: needs.refs.outputs.record == '' && needs.refs.outputs.latest_release != '' && needs.refs.outputs.base_is_release != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -349,6 +370,7 @@ jobs:
             --tolerance=5 \
             --release="${{ github.workspace }}/release/benchmarks.json" \
             --database="$DB_LABEL" \
+            --base-label="${{ needs.refs.outputs.base_label }}" \
             --summary="${{ github.workspace }}/bench/section.md"
 
       # The measured side, as cases, for a release's record and for the history chart.
@@ -367,9 +389,10 @@ jobs:
           echo "::warning::That happens when the change adds an API the benchmark uses."
           {
             echo "<!-- verdict: skipped -->"
-            echo "### ➖ ${{ matrix.benchmark.name }} · $DB_LABEL"
+            BASE_LABEL="${{ needs.refs.outputs.base_label }}"
+            echo "### ➖ ${{ matrix.benchmark.name }} · $DB_LABEL${BASE_LABEL:+ · base $BASE_LABEL}"
             echo
-            echo "Not compared: the benchmark does not build against the base commit. That happens when the change adds an API the benchmark uses."
+            echo "Not compared: the benchmark does not build or run against the base commit. That happens when the change adds an API the benchmark uses."
           } > "${{ github.workspace }}/bench/section.md"
 
       - name: Fail on a multimodal distribution
@@ -474,6 +497,8 @@ jobs:
           BASE_SHA: ${{ needs.refs.outputs.base }}
           RECORD: ${{ needs.refs.outputs.record }}
           LATEST_RELEASE: ${{ needs.refs.outputs.latest_release }}
+          BASE_LABEL: ${{ needs.refs.outputs.base_label }}
+          BASE_IS_RELEASE: ${{ needs.refs.outputs.base_is_release }}
         run: |
           # Record mode compares nothing: the page says what was measured, and shows the history.
           if [ -n "$RECORD" ]; then
@@ -536,8 +561,16 @@ jobs:
             echo "## Performance: $headline"
             echo
             echo "**Head** \`$(git rev-parse --short "$HEAD_SHA")\` $(git log -1 --format=%s "$HEAD_SHA")  "
-            echo "**Base** \`$(git rev-parse --short "$BASE_SHA")\` $(git log -1 --format=%s "$BASE_SHA")"
+            if [ -n "$BASE_LABEL" ]; then
+              echo "**Base** $BASE_LABEL $(git log -1 --format=%s "$BASE_SHA")"
+            else
+              echo "**Base** \`$(git rev-parse --short "$BASE_SHA")\` $(git log -1 --format=%s "$BASE_SHA")"
+            fi
             echo
+            if [ "$BASE_IS_RELEASE" = "true" ]; then
+              echo "The base is the latest release ($LATEST_RELEASE), so every table already compares the head with it, measured on the same runner. The separate \"since $LATEST_RELEASE\" lines, read from the numbers recorded on the release, are left out as redundant."
+              echo
+            fi
             echo "Each scenario runs the same benchmark code against both commits on one runner. Only \`src/core\` differs between the two sides."
             echo
             for version in $versions; do

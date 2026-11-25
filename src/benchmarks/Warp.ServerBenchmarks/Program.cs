@@ -308,6 +308,7 @@ else if (args.Length > 0 && string.Equals(args[0], "compare-bdn", StringComparis
     }
 
     PerfCompare.DatabaseLabel = Value(args, "--database=");
+    PerfCompare.BaseLabel = Value(args, "--base-label=");
     Environment.ExitCode = PerfCompare.RunBdn(bdnBase, bdnHead, bdnTolerance, bdnSummary, bdnRelease);
 }
 else if (args.Length > 0 && string.Equals(args[0], "export-bdn", StringComparison.OrdinalIgnoreCase))

@@ -107,6 +107,12 @@ public static partial class PerfCompare
     /// </summary>
     public static string? DatabaseLabel { get; set; }
 
+    /// <summary>
+    /// What the base side was when it was chosen by hand (<c>--base-label="7.7.0 (74443f8c)"</c>), shown in each
+    /// section's heading. Empty for the default merge base, whose headings stay as they were.
+    /// </summary>
+    public static string? BaseLabel { get; set; }
+
     private static readonly MetricPolicy[] Policies =
     [
         new("statements_per_job", Gated: true, TolerancePct: 3.0, BadDirection: Direction.Higher),
@@ -574,7 +580,8 @@ public static partial class PerfCompare
         }
 
         var database = DatabaseLabel is null ? string.Empty : $" · {DatabaseLabel}";
-        section.AppendLine(CultureInfo.InvariantCulture, $"### {(failed ? "❌" : "✅")} {scenario?.Title ?? type?.Name ?? cases[0].TypeName}{database}{driftNote}");
+        var baseLabel = string.IsNullOrWhiteSpace(BaseLabel) ? string.Empty : $" · base {BaseLabel}";
+        section.AppendLine(CultureInfo.InvariantCulture, $"### {(failed ? "❌" : "✅")} {scenario?.Title ?? type?.Name ?? cases[0].TypeName}{database}{baseLabel}{driftNote}");
         section.AppendLine();
 
         if (scenario is null)
