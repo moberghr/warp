@@ -23,7 +23,7 @@
     <RepositoryUrl>https://github.com/moberghr/warp</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <PackageTags>jobs;background;queue;mediator;scheduling;dotnet</PackageTags>
+    <PackageTags>background-jobs;jobs;job-queue;message-queue;queue;pubsub;outbox;transactional-outbox;mediator;scheduling;recurring-jobs;cron;saga;efcore;postgresql;sqlserver;dashboard;hangfire;mediatr;dotnet</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageReleaseNotes>See https://moberghr.github.io/warp/docs/releases for full release notes.</PackageReleaseNotes>
   </PropertyGroup>

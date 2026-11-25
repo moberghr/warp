@@ -2,9 +2,13 @@
 
 > Distributed job processing, message queue, and in-memory mediator library for .NET 10.
 
-Warp provides three patterns — Messages (pub/sub), Jobs (orchestrated background work), and Requests (in-memory mediator) — through a unified pipeline. It uses the transactional outbox pattern: jobs are committed atomically with business data in the same DbContext. No separate message broker required.
+Warp provides four patterns — Messages (pub/sub), Jobs (orchestrated background work), Requests (in-memory mediator), and Streams (in-memory IAsyncEnumerable) — through a unified pipeline. It uses the transactional outbox pattern: jobs are committed atomically with business data in the same DbContext. No separate message broker required.
 
 Ships as NuGet packages: Moberg.Warp.Core (also includes always-on durable outbound webhook delivery), Moberg.Warp.Worker, Moberg.Warp.Dashboard, and Moberg.Warp.Http (optional). Observability add-ons: Moberg.Warp.Adapters.Http and Moberg.Warp.Adapters.Refit (observe outbound calls the app makes to other services). A provider package — Moberg.Warp.Provider.PostgreSql or Moberg.Warp.Provider.SqlServer — is required: it supplies `opt.UsePostgreSql()` / `opt.UseSqlServer()` and the row-locking / DB-push SQL specific to that engine.
+
+Requirements: .NET 10. PostgreSQL 17 and 18 or SQL Server 2022 and 2025 are the tested versions. A server refuses to start on PostgreSQL older than 13 or on a SQL Server database with compatibility level below 130. On PostgreSQL, Warp's time columns must be `timestamp with time zone`: Npgsql's legacy timestamp mode (`Npgsql.EnableLegacyTimestampBehavior`) is not supported.
+
+Every docs page is also available as plain Markdown by appending `.md` to its URL (index: https://moberghr.github.io/warp/llms.txt).
 
 ---
 
@@ -114,7 +118,7 @@ app.Run();
 
 ---
 
-## Three Patterns
+## Four Patterns
 
 ### Type Hierarchy
 
@@ -125,6 +129,8 @@ public interface IRequest<out TResponse>;     // Base — all types implement th
 public interface IJob : IRequest<Unit>;        // Persistent, single handler
 public interface IMessage : IRequest<Unit>;    // Persistent, multiple handlers
 // IRequest<TResponse> used directly           // In-memory, returns TResponse
+public interface IStreamRequest<out TResponse> // In-memory, returns IAsyncEnumerable<TResponse>
+    : IRequest<IAsyncEnumerable<TResponse>>;
 ```
 
 | Pattern | Interface | Persistence | Handlers | Response | Dispatch |
@@ -132,6 +138,7 @@ public interface IMessage : IRequest<Unit>;    // Persistent, multiple handlers
 | Messages | `IMessage` | Database | Multiple | Unit | `publisher.Publish()` |
 | Jobs | `IJob` | Database | Single | Unit | `publisher.Enqueue()` / `Schedule()` |
 | Requests | `IRequest<T>` | In-memory | Single | Typed `T` | `mediator.Send()` |
+| Streams | `IStreamRequest<T>` | In-memory | Single | `IAsyncEnumerable<T>` | `mediator.CreateStream()` |
 
 ---
 
@@ -179,7 +186,7 @@ await context.SaveChangesAsync(); // Committed atomically with business data
 ### How message routing works
 
 1. `Publish()` creates a `Job` entity with `Kind = Message` in the database
-2. `MessageRouter` (background task, polls every 1s) discovers all registered `IMessageHandler<T>` implementations
+2. `MessageRouter` (background task; woken by a signal when a message is published, and otherwise runs every `MessageRoutingInterval`, default 10s) discovers all registered `IMessageHandler<T>` implementations
 3. For each handler, a child `Job` is created with `Kind = Job` and the handler pre-assigned
 4. Workers pick up each child job independently
 5. When all children complete, the parent message transitions to `Completed` or `Failed`
@@ -308,10 +315,10 @@ Only one job per mutex key can be processing at a time:
 ```csharp
 await publisher.Enqueue(
     new ProcessPayment { CustomerId = 123 },
-    new JobParameters { Mutex = "payment:123" });
+    new JobParameters().WithMutex("payment:123"));
 ```
 
-If a worker picks up a job whose mutex is already held by another processing job, the new job is cancelled automatically. Jobs without a mutex skip the check entirely (zero overhead).
+Requires `opt.AddConcurrency()`. `JobParameters` has no `Mutex` property; use `.WithMutex(key)` or the `[Mutex("key")]` attribute. If a worker picks up a job whose mutex is already held by another processing job, the new job is moved to `Deleted` (the default `Skip` mode; `ConcurrencyMode.Wait` requeues it instead). Jobs without a mutex skip the check entirely (zero overhead).
 
 ### NoRestart (stale-recovery opt-out)
 
@@ -348,23 +355,25 @@ Jobs rescheduled by an open circuit do NOT increment Retry's `RetriedTimes` — 
 
 ### Batched Completions (Dispatcher Mode)
 
-When `UseDispatcher = true`, each worker buffers job completions and commits them as a single multi-row transaction. Tune via `CompletionBatchSize` (default `50`) and `CompletionFlushInterval` (default `100ms`). Set `CompletionBatchSize = 1` to opt out.
+Dispatcher mode is the default since 8.0 (`UseDispatcher = true`). Each worker group has one completion buffer and one flusher, which writes the buffered completions in one set-based statement; workers never write completions themselves. Tune via `CompletionBatchSize` (default `50`) and `CompletionFlushInterval` (default `100ms`). `CompletionBatchSize = 1` starts a write as soon as anything is buffered. Set `UseDispatcher = false` for the 7.x single-worker mode.
 
 Poison-entry isolation: a single bad row in a batch of 50 is dropped via recursive split, the other 49 still commit. SIGTERM mid-flush is safe — `FlushAsync()` commits to completion using `CancellationToken.None` internally. Trade-off: at-least-once semantics. Pair with `[NoRestart]` for non-idempotent handlers.
 
 ### JobParameters
 
-For full control, pass a `JobParameters` object:
+For full control, pass a `JobParameters` object. Its properties are `Queue`, `ScheduleTime`, `ParentId`, `State` and `Metadata`; addon policy (retry, mutex, semaphore, rate limit, timeout, restart) is set with the `With...` extension methods, not with properties:
 
 ```csharp
-await publisher.Enqueue(new MyJob(), new JobParameters
+var parameters = new JobParameters
 {
-    MaxRetries = 3,
     Queue = "critical",
-    Mutex = "my-resource-key",
     ScheduleTime = DateTime.UtcNow.AddMinutes(30),
     ParentId = parentJobId,  // continuation
-});
+}
+.WithRetry(maxRetries: 3)
+.WithMutex("my-resource-key");
+
+await publisher.Enqueue(new MyJob(), parameters);
 ```
 
 ---
@@ -417,6 +426,47 @@ public class UserController : ControllerBase
 - Errors bubble up to the caller (no automatic retries)
 - Not visible in the dashboard
 - Use `IMediator.Send()`, not `IPublisher.Enqueue()`
+
+---
+
+## Pattern 4: Streams (In-Memory)
+
+A stream request implements `IStreamRequest<TResponse>` and returns `IAsyncEnumerable<TResponse>`. Like a request it runs in-process with one handler and nothing is stored.
+
+```csharp
+public class GetUsers : IStreamRequest<UserDto>
+{
+    public string Role { get; set; } = "";
+}
+
+public class GetUsersHandler(AppDbContext db) : IStreamRequestHandler<GetUsers, UserDto>
+{
+    public async IAsyncEnumerable<UserDto> HandleAsync(
+        GetUsers request,
+        [EnumeratorCancellation] CancellationToken ct)
+    {
+        var users = db.Users.Where(x => x.Role == request.Role).AsAsyncEnumerable();
+
+        await foreach (var user in users.WithCancellation(ct))
+        {
+            yield return new UserDto { Id = user.Id, Name = user.Name };
+        }
+    }
+}
+
+await foreach (var user in mediator.CreateStream(new GetUsers { Role = "Admin" }, ct))
+{
+    // ...
+}
+```
+
+- Request-level `IPipelineBehavior<TRequest, IAsyncEnumerable<TResponse>>` applies as for any request.
+- For concerns that wrap the enumeration itself, implement `IStreamPipelineBehavior<TRequest, TResponse>`: `IAsyncEnumerable<TResponse> HandleAsync(TRequest request, StreamHandlerDelegate<TRequest, TResponse> next, CancellationToken ct)`, calling `next(request, ct)`.
+- `Moberg.Warp.Http` can expose a stream handler as a Server-Sent Events endpoint (see HTTP Endpoints).
+
+### A DI scope per send (opt-in)
+
+`opt.Mediator.ScopePerSend = true` gives every `Send` and `CreateStream` its own DI scope (for a stream, the scope lives for the enumeration). It is off by default. Use it where one long-lived scope would otherwise be shared, such as Blazor Server. Implement `ISendScopeInitializer.Initialize(IServiceProvider parent, IServiceProvider child)` to carry scoped state across. Jobs are unaffected, and `Moberg.Warp.Http` keeps dispatching in the request scope.
 
 ---
 
@@ -474,16 +524,18 @@ public class LoggingBehavior<TRequest, TResponse> : IPipelineBehavior<TRequest, 
 
     public async Task<TResponse> HandleAsync(
         TRequest request,
-        RequestHandlerDelegate<TResponse> next,
+        RequestHandlerDelegate<TRequest, TResponse> next,
         CancellationToken ct)
     {
         _logger.LogInformation("Handling {RequestType}", typeof(TRequest).Name);
-        var response = await next();
+        var response = await next(request, ct);
         _logger.LogInformation("Handled {RequestType}", typeof(TRequest).Name);
         return response;
     }
 }
 ```
+
+The delegate is `RequestHandlerDelegate<TRequest, TResponse>` and takes the request and the token: call `next(request, ct)`, not `next()`.
 
 ### Registration
 
@@ -512,9 +564,9 @@ public class RefuseRetryBehavior<T> : IPipelineBehavior<T, Unit> where T : IJob
 
     public RefuseRetryBehavior(IJobContext jobContext) => _jobContext = jobContext;
 
-    public async Task<Unit> HandleAsync(T request, RequestHandlerDelegate<Unit> next, CancellationToken ct)
+    public async Task<Unit> HandleAsync(T request, RequestHandlerDelegate<T, Unit> next, CancellationToken ct)
     {
-        try { return await next(); }
+        try { return await next(request, ct); }
         catch (DomainRefusedException)
         {
             _jobContext.Outcome = new JobOutcome
@@ -615,7 +667,7 @@ await jobCommandService.DeleteJob(jobId);
 ### Flow
 
 1. `DeleteJob` sets `CancellationMode = Graceful` (state stays `Processing`)
-2. `RunJobMonitor` detects it and cancels the handler's `CancellationToken`
+2. The worker group's `RunningJobMonitor` reads it back with its keep-alive renewal, once per `CancellationCheckInterval` (default 5s), and cancels the handler's `CancellationToken`
 3. If handler respects the token: state becomes `Deleted`
 4. If handler completes despite cancellation: state becomes `Completed` (work happened)
 
@@ -644,7 +696,7 @@ public class LongRunningHandler : IJobHandler<LongRunningJob>
 Warp uses a sliding invisibility timeout to detect and recover from worker crashes.
 
 1. When a worker picks up a job, it sets `LastKeepAlive = now`
-2. During execution, keep-alive is refreshed every `InvisibilityTimeout / 5` (default: every 60s with a 5-minute timeout)
+2. During execution, the worker group's `RunningJobMonitor` renews the keep-alive every `CancellationCheckInterval` (default 5s)
 3. If the worker crashes, the keep-alive stops
 4. After `InvisibilityTimeout` (default 5 minutes), the job is requeued automatically
 5. Crash requeues do NOT count against `MaxRetries`
@@ -670,6 +722,9 @@ public class ProcessOrderHandler : IJobHandler<ProcessOrder>
         // These jobs automatically inherit the trace from ProcessOrder
         var items = orders.Select(i => new ShipItem { ItemId = i.Id }).ToList();
         await _batchPublisher.StartNew(items);
+
+        // Since 8.0 the worker does not save for the handler: without this the batch is discarded.
+        await _batchPublisher.SaveChangesAsync(ct);
     }
 }
 ```
@@ -685,7 +740,7 @@ Attach key-value metadata to jobs at publish time. Metadata is inherited by chil
 ```csharp
 await publisher.Enqueue(new ProcessOrder { OrderId = 123 }, new JobParameters
 {
-    Metadata = new Dictionary<string, string>
+    Metadata = new Dictionary<string, object>
     {
         ["tenant"] = "acme-corp",
         ["priority"] = "high",
@@ -763,7 +818,7 @@ POST /api/groups/{groupId}/resume
 ### How it works
 
 1. Pause request sets `PausedAt` timestamp on the server or worker group
-2. `Heartbeat` task (every ~3s) reads pause state from database into `PauseStateHolder`
+2. `Heartbeat` task (every `HealthCheckInterval`, default 5s) reads pause state from database into `PauseStateHolder`
 3. Workers check `PauseStateHolder` before each poll — if paused, skip
 4. Resume clears `PausedAt`, next heartbeat propagates the change
 
@@ -775,7 +830,7 @@ Paused workers stop picking up new jobs. Jobs already in progress continue to co
 
 Handler `ILogger` output is flushed to the database every ~1 second during execution (not just after completion). Logs are visible in the dashboard while the job is still processing.
 
-The `RunJobMonitor` task runs alongside each handler execution, periodically draining the log collector and persisting entries. This also handles keep-alive updates and cancellation detection.
+`RunningJobMonitor` does this: one loop per worker group (not one per job) drains every running job's log collector and persists the entries in one save. The same loop renews keep-alives and detects cancellation.
 
 ---
 
@@ -799,7 +854,7 @@ explicit metadata at publish (WithMutex / WithRetry / WithRateLimit / WithTimeou
 - **`CircuitBreaker` is resolved but never stamped** — its threshold describes a shared dependency group whose live state is a DB row.
 - **Messages behave exactly like jobs.** Each routed child resolves handler-then-contract at its own first execution: a contract declaration is the shared default across the fan-out (children declaring nothing contend on the one key), a handler declaration overrides it for that handler's children only, and global defaults reach message handlers too. A `Deleted` child (Skip-mode concurrency / rate limit) counts as settled for parent finalization.
 - **Exemptions:** in-memory `IMediator.Send` of an `IJob`-shaped type (no row to skip or reschedule), and `IPolicyExemptHandler` — the saga proxy, which owns its own serialization and reschedules.
-- **Build-time diagnostics** (no startup validation — a misconfigured policy fails its own job, not the process): `WARP001` = policy attribute on a stream / in-memory-request handler; `WARP002` = `[Timeout(Scope = Total)]` on a handler. Where the generator cannot see the handler, `Scope = Total` is inert at runtime and logged once per request type.
+- **Build-time diagnostics** (no startup validation — a misconfigured policy fails its own job, not the process): `WARP001` = policy attribute on a stream / in-memory-request handler; `WARP002` = `[Timeout(Scope = Total)]` on a handler; `WARP003` (warning) = a job or message contract that nothing in the compilation handles. Where the generator cannot see the handler, `Scope = Total` is inert at runtime and logged once per request type.
 - **`Timeout(Scope = Total)` is the one publish-stamped, contract-only policy** — a wall-clock budget from enqueue must exist before any handler is known.
 - **Recurring jobs** honour contract-declared policy (firings bypass the publish pipeline, but resolution is at execution anyway); a contract `Scope = Total` timeout is refused with a one-time warning.
 
@@ -856,9 +911,10 @@ Opt-in addon: `opt.AddNoRestart()`. Controls whether a job requeues or fails whe
 
 ## Batched Completions (Dispatcher Mode)
 
-Automatic when `UseDispatcher = true` — each `WarpDispatcherWorker` buffers job completions and flushes them as one multi-row transaction, collapsing N commits into one.
+Automatic in dispatcher mode, which is the default since 8.0 (`UseDispatcher = true`). Each worker group has one completion buffer and one flusher that writes the buffered completions in one set-based statement; workers never write completions themselves.
 
-- `CompletionBatchSize` (default 50), `CompletionFlushInterval` (default 100 ms). Set `CompletionBatchSize = 1` to opt out (immediate flush).
+- `CompletionBatchSize` (default 50), `CompletionFlushInterval` (default 100 ms). `CompletionBatchSize = 1` starts a write as soon as anything is buffered.
+- Backpressure: when 4 × `CompletionBatchSize` completions (never fewer than 200) are waiting to be written, workers wait.
 - Poison-entry isolation: a failing batch splits in half recursively; a single bad row is dropped, the rest commit. `StaleJobRecovery` handles orphaned `Processing` rows.
 - At-least-once: a crash between handler completion and flush leaves the job `Processing` → recovered per `CanBeRestarted`. Pair non-idempotent handlers with `[NoRestart]`. Throughput optimization, not latency.
 
@@ -877,7 +933,7 @@ Base feature (no addon opt-in for the schema — `AddWarp<TContext>` always adds
 
 - Subclass `WarpBackgroundService`; override `Scope` → `ServiceScope.PerServer` (default, one instance per server) or `ServiceScope.Singleton` (one active cluster-wide, coordinated via `BackgroundServiceLease` 30 s TTL renewed in `Heartbeat`; ~30 s failover on hard-kill / ~0 s on graceful shutdown).
 - Subclasses are **singletons** — inject `IServiceScopeFactory`, never `DbContext` (`ValidateScopes = true` catches the captive-dependency foot-gun at startup).
-- `opt.DisableWorker()` → service-only server (background services + `Heartbeat`/`ServerCleanup`/`ExpirationCleanup`, no job worker or job tasks; provider still required).
+- `opt.DisableWorker()` → service-only server: background services plus the tasks every server runs (`Heartbeat`, `ServerCleanup`, `ExpirationCleanup`, `StatisticRollup`, `MetricRollup`, `CounterAggregator`, `ErrorGroupAggregator`, `SloEvaluator`). No job worker and no job-only tasks; it never claims a job. A provider is still required.
 - Log capture auto-wired (`MinLogLevel` default Information, 100/s cap, 4 KB truncation, 1000-row/7-day retention). Dashboard `/warp/services`.
 
 ## Connection Pooling (session mode required)
@@ -912,15 +968,17 @@ Both must return `t`. A `f` on the unlock means the connection is transaction-po
 
 If Warp does run behind a session-mode pooler, size `default_pool_size` for its long-lived connections: the worker pool, the server context, the lock connections, and the `LISTEN` connection under push. Under-sizing surfaces as client-login timeouts, not lock errors.
 
+**Three Npgsql pools per process (PostgreSQL).** Besides your `DbContext`'s pool, Warp opens a lock pool (`Application Name` suffixed `:warp-locks`) and, since 8.0, a server-work pool (`:warp-server`). Each sizes to its own demand, so budget `max_connections` for the sum of their peaks, not for one shared pool. A host that registers its `DbContext` with an `NpgsqlDataSource` (Aspire, Managed Identity, client certificates) does not get the separate lock pool automatically: build a second data source configured like the first and pass it as `opt.UsePostgreSql(lockDataSource)`. SQL Server is unaffected.
+
 Scale-to-zero Postgres (Neon autosuspend, 5 min default) terminates sessions, dropping held session locks and `LISTEN` registrations. A continuously running server stays inside the window; an idling publisher/dashboard host can see release warnings after a suspend.
 
 ## Database Push
 
 Opt-in addon: call the provider first, then `opt.UseDatabasePush()`. Replaces polling wake-up with PostgreSQL `LISTEN`/`NOTIFY` or SQL Server Service Broker.
 
-- Accelerates (< 50 ms): dispatcher fetch (`JobEnqueued`, only when `UseDispatcher = true`), `MessageRouter` (`MessageEnqueued`), `Orchestrator` (`JobFinalized`). Individual-worker mode keeps polling (thundering-herd avoidance).
-- In-process every `WarpWorker` already shortcuts backoff on a same-server `JobEnqueued` signal regardless of push. Scheduled jobs are still bounded by `ScheduledActivationInterval` (default 5 s) — push accelerates only what happens after activation.
-- Transports never throw from publish (log + `warp.notifications.publish_failures`); missed notifications caught by drain-on-reconnect. SQL Server requires `ALTER DATABASE ... SET ENABLE_BROKER` (degrades to polling with an actionable log otherwise).
+- Accelerates (< 50 ms): job pickup (`JobEnqueued`, in both dispatcher and single-worker mode), `MessageRouter` (`MessageEnqueued`), `Orchestrator` (`JobFinalized`).
+- In-process every `WarpWorker` already shortcuts backoff on a same-server `JobEnqueued` signal regardless of push. Scheduled jobs are still bounded by `ScheduledActivationInterval` (default 10 s) — push accelerates only what happens after activation.
+- Transports never throw from publish (log + `warp.notifications.publish_failures`); missed notifications caught by drain-on-reconnect. SQL Server requires `ALTER DATABASE ... SET ENABLE_BROKER` (degrades to polling with an actionable log otherwise). Since 8.0 each listening process creates its own Service Broker queue and service at run time, so the application's login needs `CREATE QUEUE` and `CREATE SERVICE` on the database (`db_ddladmin` and `db_owner` have them).
 
 ## Dashboard Push
 
@@ -959,17 +1017,18 @@ builder.Services.AddWarpServer<AppDbContext>(options =>
 {
     // Worker
     options.WorkerCount = 10;                                  // Concurrent workers (default: min(CPU*5, 20))
-    options.PollingInterval = TimeSpan.FromSeconds(1);         // Poll delay when idle; also floor for backoff (default: 1s)
+    options.PollingInterval = TimeSpan.FromSeconds(10);        // Poll delay when idle; also floor for backoff (default: 10s)
     options.MaxPollingInterval = TimeSpan.FromSeconds(30);     // Ceiling for exponential backoff (default: 30s)
     options.PollingIntervalFactor = 2.0;                       // Multiplier per empty poll; 1.0 disables backoff (default: 2.0)
-    options.Queues = ["a-critical", "b-default", "c-low"];     // Subscribed queues (default: ["default"])
+    options.Queues = ["a-critical", "b-default", "c-low"];     // Subscribed queues (default: follows DefaultQueue)
 
     // Handler logging
     options.EnableHandlerLogging = true;                       // false to suppress ILogger capture (default: true)
     options.LogFlushInterval = TimeSpan.FromSeconds(1);        // How often handler logs drain to DB (default: 1s)
 
     // Dispatcher mode (batch-fetch instead of per-worker polling)
-    options.UseDispatcher = false;                             // default: false
+    options.UseDispatcher = true;                              // default: true since 8.0; false = 7.x single-worker mode
+    options.PrefetchCount = null;                              // Dispatcher only (default: null = no prefetch)
     options.CompletionBatchSize = 50;                          // Dispatcher only. Max completions per flush (default: 50)
     options.CompletionFlushInterval = TimeSpan.FromMilliseconds(100); // Dispatcher only (default: 100ms)
     // Stale recovery opt-out default — with NoRestart addon and [NoRestart]/[Restart] attributes, flip per-type
@@ -983,7 +1042,7 @@ builder.Services.AddWarpServer<AppDbContext>(options =>
     options.ServerId = Guid.NewGuid();                          // Auto-generated
 
     // Health & crash recovery
-    options.HealthCheckInterval = TimeSpan.FromSeconds(10);    // default: 10s
+    options.HealthCheckInterval = TimeSpan.FromSeconds(5);     // Heartbeat; also how fast pause propagates (default: 5s)
     options.HealthCheckTimeout = TimeSpan.FromMinutes(5);      // Server considered dead after this (default: 5m)
     options.InvisibilityTimeout = TimeSpan.FromMinutes(5);     // Stale job requeue threshold (default: 5m)
 
@@ -992,13 +1051,15 @@ builder.Services.AddWarpServer<AppDbContext>(options =>
     options.ExpirationBatchSize = 1000;                        // default: 1000
     options.MaxExpirableJobCount = null;                        // null = unlimited (default: null)
 
-    // Background task intervals
+    // Background task intervals (the values shown are the defaults)
     options.OrchestrationInterval = TimeSpan.FromSeconds(10);
-    options.MessageRoutingInterval = TimeSpan.FromSeconds(1);
-    options.CounterAggregationInterval = TimeSpan.FromSeconds(5);
+    options.MessageRoutingInterval = TimeSpan.FromSeconds(10);
+    options.ScheduledActivationInterval = TimeSpan.FromSeconds(10); // worst-case delay before a scheduled job becomes runnable
+    options.CounterAggregationInterval = TimeSpan.FromMinutes(1);
+    options.StatisticRollupInterval = TimeSpan.FromMinutes(10);
     options.ServerCleanupInterval = TimeSpan.FromSeconds(30);
     options.StaleJobRecoveryInterval = TimeSpan.FromSeconds(30);
-    options.ExpirationCleanupInterval = TimeSpan.FromSeconds(60);
+    options.ExpirationCleanupInterval = TimeSpan.FromMinutes(5);
 
     // Inherited from WarpConfiguration
     options.DefaultQueue = "default";
@@ -1303,10 +1364,12 @@ Apply runs after handler return, before body serialization. Only fires for `IReq
 |------------|----------|-----------|
 | `WHTTP001` | Error    | Handler tagged with `[WarpHttp...]` either doesn't implement `IRequestHandler<,>` / `IStreamRequestHandler<,>`, or its request type implements `IJob` / `IMessage`. |
 | `WHTTP002` | Error    | Handler has multiple `[WarpHttp...]` attributes but at least one is missing `Name = "..."`. |
+| `WHTTP004` | Error    | Body verb (POST / PUT / PATCH) handler has more than one body-bound parameter. Wrap the body fields in a single `[FromBody]` sub-record. |
+| `WHTTP005` | Warning  | A non-nullable value-typed query parameter on a GET / DELETE handler carries a C# default. Binding ignores the default and makes the parameter required. Make it nullable and apply the default in the handler. |
 
 ### Pipeline behaviors
 
-The HTTP path runs `IPipelineBehavior<TRequest, TResponse>` — same chain as in-memory `IMediator.Send`. Auth, validation, logging behaviors apply for free. `RetryPipelineBehavior` (constraint `IJob`) and `MutexPipelineBehavior` (`is not IJob` runtime check) self-scope to the worker path and never run on HTTP.
+The HTTP path runs `IPipelineBehavior<TRequest, TResponse>` — same chain as in-memory `IMediator.Send`. Auth, validation, logging behaviors apply for free. `RetryPipelineBehavior` (constraint `IJob`) and `ConcurrencyPipelineBehavior` (`is not IJob` runtime check) self-scope to the worker path and never run on HTTP.
 
 ### OpenAPI / Swagger
 
@@ -1379,7 +1442,7 @@ var id = await dispatcher.SendAsync(new WebhookSend
 
 ## Inbound Endpoint Observability (Moberg.Warp.Http)
 
-The inbound mirror of adapters: observes requests **made to** your Warp HTTP endpoints (handlers exposed via `MapWarpHttp`). Opt in with `opt.AddEndpointObservability(o => ...)` inside the `AddWarp` lambda **and** `app.UseWarpHttpObservability()` after `UseRouting()`. The middleware no-ops unless the matched endpoint carries `WarpEndpointIdentity` — it never observes your own controllers, the dashboard, health, or static files.
+The inbound mirror of adapters: observes requests **made to** your Warp HTTP endpoints (handlers exposed via `MapWarpHttp`). Opt in with `opt.AddEndpointObservability(o => ...)` inside the `AddWarp` lambda **and** `app.UseWarpHttpObservability()` after `UseRouting()`. The middleware no-ops unless the matched endpoint carries `WarpEndpointIdentity` — so by default it does not observe your own controllers, the dashboard, health, or static files. To observe your own endpoints, opt them in: `.WithWarpObservability()` (optionally with an operation name) on `MapControllers()`, a minimal-API endpoint or a `MapGroup`, or `[WarpObserved]` / `[WarpObserved(Operation = "...")]` on a controller or action; `[ExcludeFromWarpObservability]` keeps one endpoint out.
 
 **Identity = HTTP method + route TEMPLATE** (`GET /orders/{id}`) — already bounded (inline constraints normalized: `{id:int}` → `{id}`), no path-cardinality heuristic. Counter dimensions are Total + optional low-cardinality Group (from `o.GroupSelector(HttpContext)` — a channel/client/tenant key, never raw IP/user id).
 
@@ -1400,6 +1463,97 @@ app.UseWarpHttpObservability();
 
 ---
 
+## Error Grouping (Issues)
+
+Always on. Failures from jobs, HTTP endpoints, outbound adapters and the browser are folded into one `ErrorGroup` per fingerprint (source, exception type and location, with the message normalised), so the dashboard's Issues page shows one row per problem instead of one per occurrence. The `ErrorGroupAggregator` server task does the folding every `ErrorGroupingInterval` (default 60s; `null` disables it).
+
+- Status through `IErrorGroupCommandService.SetStatus(fingerprint, ...)`: Unresolved, Resolved or Ignored. A Resolved issue that occurs again is reopened and raises `WarpEventType.IssueRegressed`.
+- Settings on `WarpConfiguration`: `ErrorGroupRetention` (default 30 days), `ErrorGroupRetentionCount`, `MaxDistinctErrorGroups` (default 2000), `CaptureErrorSamples`, `InAppNamespaceDenylist`.
+- Detail: https://moberghr.github.io/warp/docs/features/error-grouping.md
+
+## Queue Metrics
+
+Always on. Warp records how long each job waited before a worker claimed it (queue wait) and samples each queue's depth and oldest job age (`BacklogSampler`, every `BacklogSampleInterval`, default 60s). Meters: `warp.job.queue.wait` (histogram, ms), `warp.job.queue.depth`, `warp.job.queue.oldest_age_seconds`. Worker-side counters are buffered in memory and flushed every `CounterBufferFlushInterval` (default 2s), so dashboard statistics trail a job by up to that long. Detail: https://moberghr.github.io/warp/docs/features/queue-metrics.md
+
+## SLOs and Error Budgets
+
+Opt-in: `opt.AddSlo(o => ...)` turns evaluation on (`SloEvaluationInterval`, default 1 minute). The objective tables and the read and command services are always in the schema, so a dashboard-only process can view and edit objectives. Objectives can be defined over Warp's own aggregates (success rate, execution latency, queue-wait latency, backlog depth, deadline attainment) and over custom metrics (`AddMetricRatio`, `AddMetricThreshold`, `AddMetricVolumeFloor`, `AddMetricGap`, `AddMetricLatency`). Each objective reports its error budget and burn rate. Detail: https://moberghr.github.io/warp/docs/features/slo-error-budget.md
+
+## Custom Application Metrics
+
+Opt-in. Warp collects instruments your code already emits through `System.Diagnostics.Metrics`, stores them in your database, charts them on the Metrics page and can hold them to an SLO.
+
+```csharp
+opt.AddMetrics(m => m
+    .CollectMeter("Shop.Payments")      // every instrument of this meter
+    .CollectAspNetCoreHttp()            // http.server.request.duration
+    .CollectHttpClient());              // http.client.request.duration
+```
+
+Nothing is collected until a meter is named. Tags are capped at 6 per instrument by default. It is not a time-series database: no query language and no custom dashboards. Detail: https://moberghr.github.io/warp/docs/features/custom-metrics.md
+
+## Metrics Retention Tiers
+
+Time-series statistics are kept at three resolutions and rolled up by the `StatisticRollup` server task (every `StatisticRollupInterval`, default 10 minutes): fine buckets (`FineResolutionMinutes` 5, kept for `FineResolutionRetention` 6 hours), hourly (`HourlyStatisticsRetention` 7 days) and daily (`DailyStatisticsRetention` 90 days; `null` keeps them forever). Lifetime totals are not affected. Detail: https://moberghr.github.io/warp/docs/features/metrics-retention.md
+
+## Multi-Application Observability
+
+When several applications share one Warp schema, set `opt.ApplicationName` (and optionally `ApplicationVersion`, `ApplicationEnvironment`) so the dashboard can group and filter by application. `null` leaves the feature off. The same name means the same application. This is visibility, not isolation: every server still picks up every job. Use a separate `opt.Schema` to isolate. A process that only publishes (`AddWarp`) reports itself with a lightweight heartbeat when `ApplicationName` is set. Detail: https://moberghr.github.io/warp/docs/features/applications.md
+
+## Client (Browser) Observability
+
+Opt-in. Collects errors, Core Web Vitals, logs and custom events from your frontend.
+
+```csharp
+opt.AddClientObservability(o =>
+{
+    o.AddIngestKey("shop-web", "pk_live_abc123");   // public write-only key -> trusted app name
+    o.AllowedOrigins.Add("https://shop.example.com");
+    o.CaptureRemoteIp = false;                       // IP is personal data; opt in explicitly
+});
+
+app.MapWarpClientObservability();   // POST /warp/ingest + GET /warp/ingest/client.js
+```
+
+Detail: https://moberghr.github.io/warp/docs/features/client-observability.md
+
+## Observability Sinks and OpenTelemetry
+
+Warp always emits spans and meters through an `ActivitySource` and a `Meter` both named `Warp`; subscribe to them from OpenTelemetry as usual. The `RecordingSink` setting (`Database = 1`, `Otel = 2`, `Both = 3`) only decides whether Warp also writes the records to its own tables: `o.Sink` on `AddAdapters` and `AddEndpointObservability`, and `opt.JobMetricsSink` for job-type and handler statistics. Detail: https://moberghr.github.io/warp/docs/features/observability-sinks.md
+
+## Operational Notifications
+
+Warp hands operational events to notifiers you implement; it ships no channel integrations. Register with `opt.AddNotifier<T>()` (several can coexist; with none registered the feature is inert).
+
+- Implement `IWarpNotifier.NotifyAsync(WarpOperationalEvent, CancellationToken)`. Notifiers are singletons: inject `IServiceScopeFactory`, not scoped services.
+- Delivery is after commit and best-effort. Events are not stored, and an exception from a notifier is logged and swallowed.
+- Events include `WebhookDeliveryExhausted`, `SagaForceCompleted`, `InstanceDown`, `ClockSkewDetected` and `IssueRegressed`.
+- These are not webhooks: webhooks deliver your domain events to subscribers.
+- Detail: https://moberghr.github.io/warp/docs/features/operational-notifications.md
+
+## Multi-Project Source Generation
+
+The source generator registers handlers in the project that defines them and `AddWarp` replays those registrations into the host, including handlers in referenced projects. `opt.ExcludeHandlersFromAssembly(assembly)` removes an assembly's handler registrations from a host that should not run them (it does not remove pipeline behaviors). Detail: https://moberghr.github.io/warp/docs/operations/multi-project-source-gen.md
+
+## Testing
+
+`Warp.Core.Testing.InMemoryPublisher` implements `IPublisher` and `IBatchPublisher` without a database and records what was staged (`Published`, `Batches`, `SaveChangesCount`). Detail: https://moberghr.github.io/warp/docs/operations/ef-core-integration.md
+
+## Upgrading to 8.0
+
+The changes that need action when coming from 7.7:
+
+1. **Handlers save their own DbContext.** The worker no longer calls `SaveChangesAsync` after a job or message handler returns. Add `await publisher.SaveChangesAsync(ct)` (or `db.SaveChangesAsync(ct)`) to every handler that changes entities or stages jobs. The fix is safe on 7.x, so make it before deploying 8.0.
+2. **Dispatcher mode is the default** (`UseDispatcher = true`). Set it to `false` to keep single-worker mode.
+3. **A migration is required**, and it must be applied before any 8.0 process starts. It adds columns and the `ClusterTask` table and rebuilds four job-table indexes as filtered indexes; `migrationBuilder.RecreateWarpJobIndexesOnline(TargetModel)` rebuilds them online in a migration of its own.
+4. **Database requirements**: PostgreSQL 13 or newer with `timestamp with time zone` columns (no Npgsql legacy timestamp mode); SQL Server compatibility level 130 or higher.
+5. **Connections**: a third Npgsql pool (`:warp-server`) raises peak connections per process.
+6. **SQL Server with `UseDatabasePush()`**: the login needs `CREATE QUEUE` and `CREATE SERVICE`.
+
+Full list, including the rolling-deploy notes: https://moberghr.github.io/warp/docs/operations/upgrading-to-8.md
+
+---
+
 ## DI Services Available
 
 After calling `AddWarp<TContext>()` or `AddWarpServer<TContext>()`, these services are available via dependency injection:
@@ -1407,7 +1561,7 @@ After calling `AddWarp<TContext>()` or `AddWarpServer<TContext>()`, these servic
 | Service | Purpose |
 |---------|---------|
 | `IPublisher` | Enqueue jobs, publish messages, schedule jobs |
-| `IMediator` | Send in-memory requests |
+| `IMediator` | Send in-memory requests and create streams |
 | `IBatchPublisher` | Create batches with continuations |
 | `IRecurringJobPublisher` | Register/update recurring job definitions |
 | `IJobQueryService` | Query jobs, job details, traces |
@@ -1458,34 +1612,59 @@ public interface IRequestHandler<in TRequest, TResponse> where TRequest : IReque
 }
 
 // Pipeline behavior — wraps all handler types
-public interface IPipelineBehavior<in TRequest, TResponse> where TRequest : IRequest<TResponse>
+public delegate Task<TResponse> RequestHandlerDelegate<TRequest, TResponse>(TRequest request, CancellationToken cancellationToken)
+    where TRequest : IRequest<TResponse>;
+
+public interface IPipelineBehavior<TRequest, TResponse> where TRequest : IRequest<TResponse>
 {
-    Task<TResponse> HandleAsync(TRequest request, RequestHandlerDelegate<TResponse> next, CancellationToken cancellationToken);
+    Task<TResponse> HandleAsync(TRequest request, RequestHandlerDelegate<TRequest, TResponse> next, CancellationToken cancellationToken);
+}
+
+// Stream request and handler — in-memory, returns IAsyncEnumerable<TResponse>
+public interface IStreamRequest<out TResponse> : IRequest<IAsyncEnumerable<TResponse>>;
+
+public interface IStreamRequestHandler<in TRequest, out TResponse> where TRequest : IStreamRequest<TResponse>
+{
+    IAsyncEnumerable<TResponse> HandleAsync(TRequest request, CancellationToken cancellationToken);
+}
+
+// Enumeration-level behavior for streams
+public delegate IAsyncEnumerable<TResponse> StreamHandlerDelegate<in TRequest, out TResponse>(TRequest request, CancellationToken cancellationToken)
+    where TRequest : IStreamRequest<TResponse>;
+
+public interface IStreamPipelineBehavior<TRequest, TResponse> where TRequest : IStreamRequest<TResponse>
+{
+    IAsyncEnumerable<TResponse> HandleAsync(TRequest request, StreamHandlerDelegate<TRequest, TResponse> next, CancellationToken cancellationToken);
 }
 ```
 
 ### IJobContext & IJobMetadata
 
 ```csharp
-public interface IJobMetadata
-{
-    IReadOnlyDictionary<string, string> Metadata { get; }
-}
+// Marker for typed metadata interfaces (IRetryMetadata, IConcurrencyMetadata, ...)
+public interface IJobMetadata;
 
-public interface IJobContext : IJobMetadata
+public interface IJobContext
 {
     Guid JobId { get; }
     Guid TraceId { get; }
+    Type? HandlerType { get; }
+    JobOutcome? Outcome { get; set; }
+    Dictionary<string, object> Metadata { get; }
+    T GetMetadata<T>() where T : class, IJobMetadata;
+    void ReportProgress(int percent);                // handler progress, shown in the dashboard
+    void ReportProgress(string name, int percent);   // several named bars
 }
 ```
 
 ### IPublishPipelineBehavior
 
 ```csharp
-public class PublishContext<T> : IJobMetadata
+public class PublishContext<T>
 {
     public required T Job { get; init; }
-    public Dictionary<string, string> Metadata { get; init; } = new();
+    public Dictionary<string, object> Metadata { get; set; } = [];
+    public TMeta GetMetadata<TMeta>();
 }
 
 public interface IPublishPipelineBehavior<T>
@@ -1496,7 +1675,7 @@ public interface IPublishPipelineBehavior<T>
 
 ### IPublisher
 
-The most common overloads are shown below. For full control, use the `JobParameters` overload which accepts all options in a single call.
+This is the complete interface. For anything it has no overload for (retries, mutex, metadata), use the `JobParameters` overload.
 
 ```csharp
 public interface IPublisher
@@ -1505,19 +1684,22 @@ public interface IPublisher
     Task<Guid> Publish<T>(T message) where T : class, IMessage;
     Task<Guid> Publish<T>(T message, string? queue) where T : class, IMessage;
 
-    // Jobs — common overloads (additional combinations of maxRetries, queue, parentJobId exist)
+    // Jobs
     Task<Guid> Enqueue<T>(T job) where T : class, IJob;
-    Task<Guid> Enqueue<T>(T job, int maxRetries) where T : class, IJob;
-    Task<Guid> Enqueue<T>(T job, Guid parentJobId) where T : class, IJob;
-    Task<Guid> Enqueue<T>(T job, string queue) where T : class, IJob;
-    Task<Guid> Enqueue<T>(T job, JobParameters parameters) where T : class, IJob;  // Full control
+    Task<Guid> Enqueue<T>(T job, string? queue) where T : class, IJob;
+    Task<Guid> Enqueue<T>(T job, Guid parentJobId) where T : class, IJob;                 // continuation
+    Task<Guid> Enqueue<T>(T job, Guid parentJobId, string? queue) where T : class, IJob;
+    Task<Guid> Enqueue<T>(T job, JobParameters jobParameters) where T : class, IJob;      // Full control
     Task<Guid> Schedule<T>(T job, DateTime scheduleTime) where T : class, IJob;
+    Task<Guid> Schedule<T>(T job, DateTime scheduleTime, string? queue) where T : class, IJob;
+    Task<Guid> Schedule<T>(T job, DateTime scheduleTime, Guid parentJobId) where T : class, IJob;
+    Task<Guid> Schedule<T>(T job, DateTime scheduleTime, Guid parentJobId, string? queue) where T : class, IJob;
 
     Task SaveChangesAsync(CancellationToken cancellationToken = default);
 }
 ```
 
-Note: `publisher.SaveChangesAsync()` and `context.SaveChangesAsync()` flush the same underlying DbContext — they are interchangeable. Use whichever is available. The outbox pattern examples use `context.SaveChangesAsync()` to emphasize that jobs and business data are committed together.
+Note: `publisher.SaveChangesAsync()` and `context.SaveChangesAsync()` flush the same underlying DbContext — they are interchangeable. Use whichever is available. One of them must be called, in handlers too: since 8.0 the worker does not save the handler's DbContext, so a job or message handler that changes entities or stages jobs and returns without saving loses them (staged jobs log a Warning, `WarnOnUnsavedStagedJobs`; entity changes are dropped silently). Saga handlers are the exception: the saga proxy saves for them. The outbox pattern examples use `context.SaveChangesAsync()` to emphasize that jobs and business data are committed together.
 
 ### IMediator
 
@@ -1525,6 +1707,7 @@ Note: `publisher.SaveChangesAsync()` and `context.SaveChangesAsync()` flush the 
 public interface IMediator
 {
     Task<TResponse> Send<TResponse>(IRequest<TResponse> request, CancellationToken cancellationToken = default);
+    IAsyncEnumerable<TResponse> CreateStream<TResponse>(IStreamRequest<TResponse> request, CancellationToken cancellationToken = default);
 }
 ```
 
@@ -1533,11 +1716,13 @@ public interface IMediator
 ```csharp
 public interface IBatchPublisher
 {
-    Task<Guid> StartNew<T>(List<T> jobs, string? name = null, ContinuationOptions options = ContinuationOptions.OnlyOnSucceeded) where T : class, IJob;
-    Task<Guid> ContinueBatchWith<T>(List<T> jobs, Guid parentId, string? name = null, ContinuationOptions options = ContinuationOptions.OnlyOnSucceeded) where T : class, IJob;
+    Task<Guid> StartNew<T>(List<T> batchJobMessages, string? name = null, ContinuationOptions options = ContinuationOptions.OnlyOnSucceeded, Dictionary<string, object>? metadata = null, string? queue = null) where T : class, IJob;
+    Task<Guid> ContinueBatchWith<T>(List<T> batchJobMessages, Guid parentId, string? name = null, ContinuationOptions options = ContinuationOptions.OnlyOnSucceeded, Dictionary<string, object>? metadata = null, string? queue = null) where T : class, IJob;
     Task SaveChangesAsync(CancellationToken cancellationToken = default);
 }
 ```
+
+A continuation does not inherit the parent batch's queue; pass `queue` again.
 
 ### IRecurringJobPublisher
 
@@ -1562,19 +1747,26 @@ public interface IWarpCredentialValidator
 ```csharp
 public class JobParameters
 {
-    public int? MaxRetries { get; set; }
-    public string? Queue { get; set; }
-    public string? Mutex { get; set; }
     public DateTime? ScheduleTime { get; set; }
+    public string? Queue { get; set; }
     public Guid? ParentId { get; set; }
-    public Dictionary<string, string>? Metadata { get; set; }
+    public State? State { get; set; }
+    public Dictionary<string, object>? Metadata { get; set; }
+    public JobParameters Configure<T>(Action<T> configure);   // T : IJobMetadata, e.g. Configure<IRetryMetadata>(m => m.MaxRetries = 5)
 }
+
+// Addon policy is set through extension methods (there is no MaxRetries or Mutex property):
+JobParameters.WithRetry(int maxRetries, int[]? delays = null);
+JobParameters.WithMutex(string key, ConcurrencyMode mode = ConcurrencyMode.Skip);
+JobParameters.WithSemaphore(string key, int limit, ConcurrencyMode mode = ConcurrencyMode.Wait);
+JobParameters.WithRestart(bool canBeRestarted);
+// plus WithRateLimit(...) and WithTimeout(...)
 ```
 
 ### Enums
 
 ```csharp
-public enum State { Enqueued = 1, Awaiting = 2, Processing = 3, Completed = 4, Failed = 5, Deleted = 6 }
+public enum State { Enqueued = 1, Awaiting = 2, Processing = 3, Completed = 4, Failed = 5, Deleted = 6, Scheduled = 7 }  // Schedule() creates Scheduled; it becomes Enqueued when due
 public enum ContinuationOptions { OnlyOnSucceeded = 1, OnAnyFinishedState = 2 }
 public enum JobKind { Job = 1, Message = 2, Batch = 3 }
 public enum CancellationMode { None = 0, Graceful = 1 }
@@ -1610,6 +1802,11 @@ opt.AddAdapter(name, Action<WarpAdapterOptions>);
 opt.AddWebhooks(Action<WarpWebhookOptions>); // OPTIONAL webhook config (custom signer / exhausted-handler); delivery is always on
 opt.AddEndpointObservability(Action<WarpEndpointObservabilityOptions>); // inbound endpoint observability
 opt.ExcludeHandlersFromAssembly(Assembly);   // multi-host opt-out — see Multi-Project page
+opt.AddSlo(...);                             // SLO evaluation
+opt.AddMetrics(...);                         // collect your own System.Diagnostics.Metrics instruments
+opt.AddClientObservability(...);             // browser telemetry; pair with app.MapWarpClientObservability()
+opt.AddNotifier<TNotifier>();                // operational notifications (IWarpNotifier)
+opt.Mediator.ScopePerSend = true;            // a DI scope per IMediator.Send / CreateStream (default false)
 
 // Handlers and pipeline behaviors are source-gen registered — no AddJobHandlers / AddPipelineBehaviors
 // extension methods exist. Define a class implementing the handler/behavior interface and build.
@@ -1631,7 +1828,7 @@ IApplicationBuilder.UseWarpHttpObservability();
 
 ## Common Patterns
 
-### Controller with all three patterns
+### Controller using a request, a job and a message
 
 ```csharp
 public class OrderController : ControllerBase
@@ -1682,7 +1879,7 @@ public class ValidationBehavior<TRequest, TResponse> : IPipelineBehavior<TReques
 
     public async Task<TResponse> HandleAsync(
         TRequest request,
-        RequestHandlerDelegate<TResponse> next,
+        RequestHandlerDelegate<TRequest, TResponse> next,
         CancellationToken ct)
     {
         var failures = _validators
@@ -1694,7 +1891,7 @@ public class ValidationBehavior<TRequest, TResponse> : IPipelineBehavior<TReques
         if (failures.Count > 0)
             throw new ValidationException(failures);
 
-        return await next();
+        return await next(request, ct);
     }
 }
 ```
@@ -1751,7 +1948,7 @@ Both apps share the same database. The worker polls for and executes jobs create
 ## Key Design Rules
 
 1. **DbContext must be Scoped** (not Transient) — required for the outbox pattern to work
-2. **Call SaveChangesAsync()** after publishing — jobs are not committed until you save
+2. **Call SaveChangesAsync()** after publishing — jobs are not committed until you save. This includes job and message handlers: since 8.0 the worker does not save the handler's DbContext
 3. **Failed jobs never auto-delete** — they persist until manually handled
 4. **Queue order is alphabetical** — use prefixes like "a-", "b-", "c-" for priority
 5. **AddWarpServer includes AddWarp** — don't call both
@@ -1759,7 +1956,7 @@ Both apps share the same database. The worker polls for and executes jobs create
 7. **TimeProvider is injectable** — use it for testability, Warp registers TimeProvider.System by default
 8. **Handler ILogger output is captured** — logs are flushed every ~1s and appear in the dashboard in real time
 9. **Job metadata is inherited** — child jobs automatically inherit parent metadata via ambient context
-10. **Pause is propagated via heartbeat** — there may be a ~3s delay between pause command and workers stopping
+10. **Pause is propagated via heartbeat** — workers stop fetching within one `HealthCheckInterval` (default 5s) of the pause command
 11. **Warp tables use the `warp` schema by default** — configurable via `WarpConfiguration.Schema`, set to `null` for default schema
 12. **Warp needs a session-mode connection** — a transaction-mode pooler (Neon `-pooler`, Supabase `6543`, Azure `6432`) breaks session-scoped advisory locks and `LISTEN`/`NOTIFY`
 13. **Naming conventions are respected** — entity configs don't hardcode table/column names, so `UseSnakeCaseNamingConvention()` works

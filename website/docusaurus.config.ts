@@ -2,6 +2,7 @@ import {themes as prismThemes} from 'prism-react-renderer';
 import type {Config} from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
 import {visit} from 'unist-util-visit';
+import agentDocs from './plugins/agentDocs';
 
 // Maps a top-level version-pattern heading (e.g. `## 0.12.0`) to an explicit
 // id like `v0-12-0`. Without this, Docusaurus's slugifier would strip the
@@ -74,11 +75,32 @@ const config: Config = {
         href: '/warp/llms-full.txt',
       },
     },
+    {
+      tagName: 'script',
+      attributes: { type: 'application/ld+json' },
+      innerHTML: JSON.stringify({
+        '@context': 'https://schema.org',
+        '@type': 'SoftwareSourceCode',
+        name: 'Warp',
+        alternateName: 'Moberg.Warp',
+        description:
+          'Background jobs, pub/sub messages and an in-process mediator for .NET 10, stored in your PostgreSQL or SQL Server database through EF Core. Transactional outbox, no broker, real-time dashboard.',
+        url: 'https://moberghr.github.io/warp/',
+        codeRepository: 'https://github.com/moberghr/warp',
+        programmingLanguage: 'C#',
+        runtimePlatform: '.NET 10',
+        license: 'https://opensource.org/licenses/MIT',
+        keywords:
+          'background jobs, job queue, message queue, transactional outbox, mediator, recurring jobs, sagas, .NET, EF Core, PostgreSQL, SQL Server, Hangfire alternative, MediatR alternative',
+        author: { '@type': 'Organization', name: 'Moberg', url: 'https://github.com/moberghr' },
+      }),
+    },
   ],
 
   // The dashboard docs lived under /docs/ui/ until the section was renamed and grouped to match the
   // dashboard's own nav. These keep every published URL working instead of 404ing a bookmark.
   plugins: [
+    agentDocs,
     [
       '@docusaurus/plugin-client-redirects',
       {
@@ -121,6 +143,13 @@ const config: Config = {
 
   themeConfig: {
     image: 'img/showcase/dashboard-light.png',
+    metadata: [
+      {
+        name: 'keywords',
+        content:
+          'background jobs, job queue, message queue, transactional outbox, mediator, recurring jobs, sagas, .NET, EF Core, PostgreSQL, SQL Server, Hangfire alternative, MediatR alternative',
+      },
+    ],
     colorMode: {
       respectPrefersColorScheme: false,
       disableSwitch: false,

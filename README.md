@@ -157,8 +157,23 @@ Runs on .NET 10 with PostgreSQL 17 and 18 or SQL Server 2022 and 2025.
 
 ## Coming from another library
 
+Warp covers the ground of a job scheduler such as Hangfire or Quartz.NET, an in-process mediator such as MediatR, and a database-backed outbox and message bus such as Wolverine, MassTransit or NServiceBus on a SQL transport.
+
 - [Migrating from Hangfire](https://moberghr.github.io/warp/docs/operations/migrating-from-hangfire)
 - [Migrating from Wolverine](https://moberghr.github.io/warp/docs/operations/migrating-from-wolverine)
+
+## For AI assistants and agents
+
+Warp publishes its docs in a form a coding assistant can read directly:
+
+| File | Use it for |
+|---|---|
+| [`llms.txt`](https://moberghr.github.io/warp/llms.txt) | The index: what Warp is, the facts to get right, and a one-line summary of every docs page. |
+| [`llms-full.txt`](https://moberghr.github.io/warp/llms-full.txt) | One self-contained reference with every pattern, the API, configuration and examples. |
+| Any docs URL + `.md` | That page as plain Markdown, for example [`/docs/getting-started.md`](https://moberghr.github.io/warp/docs/getting-started.md). |
+| [`AGENTS.md`](AGENTS.md) | Rules for an agent changing this repository, as opposed to using Warp. |
+
+To have an assistant add Warp to your project, give it `https://moberghr.github.io/warp/llms-full.txt`.
 
 ## Development
 
@@ -172,6 +187,10 @@ cd src/ui && npm install && npm run dev                                         
 ```
 
 The source is under `src/core` (libraries and providers), `src/ui` (dashboard), `src/tests`, `src/benchmarks` and `src/demo`. The docs site is in `website/`.
+
+## Contributing
+
+Issues and pull requests are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). Report a security problem privately, as described in [SECURITY.md](SECURITY.md).
 
 ## License
 

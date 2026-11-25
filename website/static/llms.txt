@@ -1,50 +1,129 @@
 # Warp
 
-> Distributed job processing, message queue, and in-memory mediator library for .NET 10. Four patterns, one unified pipeline, a real-time dashboard.
+> Warp is an MIT-licensed .NET 10 library for background jobs, pub/sub messages, in-process requests and streams. It stores work in your own PostgreSQL or SQL Server database through your EF Core DbContext (transactional outbox, no message broker) and ships a real-time operations dashboard.
 
-Warp ships as core packages — Moberg.Warp.Core (publishing; also includes always-on durable outbound webhook delivery), Moberg.Warp.Worker (processing), Moberg.Warp.Dashboard (dashboard) — plus optional add-ons: Moberg.Warp.Http (exposes IRequest<T> / IStreamRequest<T> handlers as ASP.NET endpoints, and observes inbound calls to them), Moberg.Warp.Adapters.Http and Moberg.Warp.Adapters.Refit (observe outbound calls your app makes to other services). Supports PostgreSQL and SQL Server. Uses the transactional outbox pattern — jobs are committed atomically with your business data.
+Facts an agent should get right:
 
-## Docs
+- NuGet package ids are `Moberg.Warp.*`; namespaces are `Warp.*`. Use the same version for every package.
+- Packages: `Moberg.Warp.Core` (always), `Moberg.Warp.Worker` (the server), one provider (`Moberg.Warp.Provider.PostgreSql` or `Moberg.Warp.Provider.SqlServer`), `Moberg.Warp.Dashboard`. Optional: `Moberg.Warp.Http`, `Moberg.Warp.Adapters.Http`, `Moberg.Warp.Adapters.Refit`.
+- Register with `AddWarpServer<TContext>(opt => { opt.UsePostgreSql(); })` in a process that runs jobs, `AddWarp<TContext>` in one that only publishes. `AddWarpWorker` no longer exists.
+- Contracts and handlers: `IJob` / `IJobHandler<T>`, `IMessage` / `IMessageHandler<T>`, `IRequest<TResponse>` / `IRequestHandler<T, TResponse>`, `IStreamRequest<TResponse>` / `IStreamRequestHandler<T, TResponse>`. A source generator registers handlers; there is nothing to register by hand.
+- Publish with `IPublisher` (`Enqueue`, `Schedule`, `Publish`), then call `SaveChangesAsync` on the same DbContext: the job commits with your data.
+- Requires .NET 10 and PostgreSQL 17/18 or SQL Server 2022/2025.
+- Source: https://github.com/moberghr/warp. Every page below is plain Markdown; any docs URL also works with `.md` appended.
 
-- [Why Warp](https://moberghr.github.io/warp/docs/why-warp): What Warp is, what it replaces, when another tool fits better
-- [Getting Started](https://moberghr.github.io/warp/docs/getting-started): Installation, DbContext setup, service registration, first handler
-- [Messages](https://moberghr.github.io/warp/docs/patterns/messages): Pub/sub IMessage with multiple handlers, fan-out routing
-- [Jobs](https://moberghr.github.io/warp/docs/patterns/jobs): IJob with scheduling, retries, continuations, batches, named queues, mutex
-- [Requests](https://moberghr.github.io/warp/docs/patterns/requests): In-memory IRequest<TResponse> via IMediator.Send(), no persistence
-- [Patterns Overview](https://moberghr.github.io/warp/docs/patterns): Type hierarchy, unified pipeline behaviors
-- [Outbox Pattern](https://moberghr.github.io/warp/docs/features/outbox-pattern): Transactional outbox — jobs committed with business data
-- [Recurring Jobs](https://moberghr.github.io/warp/docs/features/recurring-jobs): Cron-based scheduling, deduplication, execution history
-- [Job Metadata](https://moberghr.github.io/warp/docs/features/metadata): Key-value metadata, publish pipeline behaviors, IJobContext
-- [Mutex](https://moberghr.github.io/warp/docs/features/mutex): ConcurrencyKey-based mutual exclusion for jobs
-- [Semaphore](https://moberghr.github.io/warp/docs/features/semaphore): Bounded concurrency (limit > 1) via [Semaphore], Wait/Skip policies
-- [Timeout](https://moberghr.github.io/warp/docs/features/timeout): Per-attempt / total deadlines, Delete vs Fail modes
-- [Rate Limiting](https://moberghr.github.io/warp/docs/features/rate-limit): Fixed / sliding / token-bucket styles, Skip vs Wait, per-key buckets
-- [Circuit Breaker](https://moberghr.github.io/warp/docs/features/circuit-breaker): Trip on failure threshold, half-open probe recovery
-- [No-Restart](https://moberghr.github.io/warp/docs/features/no-restart): [NoRestart] / [Restart] for non-idempotent work and stale-job recovery
-- [Batched Completions](https://moberghr.github.io/warp/docs/features/batched-completions): Coalesced completion writes for throughput
-- [Sagas](https://moberghr.github.io/warp/docs/features/sagas): Correlated stateful workflows, [Correlate] / [StartsSaga], delete-on-completion
-- [Background Services](https://moberghr.github.io/warp/docs/features/background-services): WarpBackgroundService supervisor loops, PerServer / Singleton lease scope
-- [Database Push](https://moberghr.github.io/warp/docs/features/db-push): LISTEN/NOTIFY & Service Broker wake-up, opt-in low-latency pickup
-- [Dashboard Push](https://moberghr.github.io/warp/docs/features/dashboard-push): SignalR realtime dashboard updates
-- [DB-Generated IDs](https://moberghr.github.io/warp/docs/features/db-generated-ids): Database-assigned identifiers
-- [Job Cancellation](https://moberghr.github.io/warp/docs/features/cancellation): Graceful CancellationMode, handler CancellationToken, transitive batch cancel
-- [Pause / Resume](https://moberghr.github.io/warp/docs/features/pause): Pause servers and worker groups, resume processing
-- [Job Tracing](https://moberghr.github.io/warp/docs/features/tracing): TraceId and SpawnedByJobId for cross-job flow visibility
-- [HTTP Endpoints](https://moberghr.github.io/warp/docs/features/http): Expose IRequest<T> / IStreamRequest<T> handlers as ASP.NET endpoints via [WarpHttp...] on handler classes (inbound)
-- [Endpoint Observability](https://moberghr.github.io/warp/docs/features/endpoint-observability): Observe inbound requests to your Warp HTTP endpoints — caller, duration, status, bodies (AddEndpointObservability)
-- [Outbound Adapters](https://moberghr.github.io/warp/docs/features/adapters): Observe outbound calls to other services, cluster-shared rate limiting, capture on failure (AddAdapters)
-- [Durable Webhooks](https://moberghr.github.io/warp/docs/features/webhooks): Durable outbound webhook delivery — retries, signing, redelivery, exhaustion (built into Core, always on; AddWebhooks only for optional custom signer / exhausted-handler)
-- [Performance](https://moberghr.github.io/warp/docs/performance): Per-job cost, how Warp keeps database load low, settings for throughput
-- [Warp vs Hangfire](https://moberghr.github.io/warp/docs/performance/warp-vs-hangfire): Measured throughput, statements, CPU, WAL and allocation per job on PostgreSQL
-- [Migrating from Hangfire](https://moberghr.github.io/warp/docs/operations/migrating-from-hangfire): API mapping, what changes in how a job is written, gradual migration
-- [Migrating from Wolverine](https://moberghr.github.io/warp/docs/operations/migrating-from-wolverine): API mapping and wiring differences
-- [Configuration](https://moberghr.github.io/warp/docs/operations/configuration): Worker, polling, retention (age + count), dispatcher mode, worker groups, schema, naming conventions
-- [EF Core Integration](https://moberghr.github.io/warp/docs/operations/ef-core-integration): DbContext setup, server-internal context, migrations, naming conventions
-- [Connection Pooling](https://moberghr.github.io/warp/docs/operations/connection-pooling): Warp needs a session-mode connection — transaction-mode poolers (Neon -pooler, Supabase 6543, Azure 6432) break advisory locks and LISTEN/NOTIFY
-- [Crash Recovery](https://moberghr.github.io/warp/docs/operations/crash-recovery): Sliding invisibility timeout, keep-alive, stale job recovery
-- [Dashboard Auth](https://moberghr.github.io/warp/docs/operations/dashboard-auth): MapWarpDashboard + RequireAuthorization, built-in cookie login, localhost-only
-- [Releases](https://moberghr.github.io/warp/docs/releases): Version history and upgrade notes
+## Start here
+
+- [Why Warp](https://moberghr.github.io/warp/docs/why-warp.md): What Warp is, what it replaces (Hangfire, MediatR, a broker-backed outbox), and when another tool fits better
+- [Getting Started](https://moberghr.github.io/warp/docs/getting-started.md): Packages, DbContext setup, AddWarpServer / AddWarp registration, migrations, first handler
+- [Patterns Overview](https://moberghr.github.io/warp/docs/patterns.md): The four patterns, the type hierarchy, and the IPipelineBehavior pipeline they share
+- [Jobs](https://moberghr.github.io/warp/docs/patterns/jobs.md): IJob with one handler: enqueue, schedule, retries, continuations, batches, named queues
+- [Messages](https://moberghr.github.io/warp/docs/patterns/messages.md): Pub/sub IMessage: every handler runs as its own job, fan-out routing
+- [Requests and Streams](https://moberghr.github.io/warp/docs/patterns/requests.md): In-process IRequest<TResponse> via IMediator.Send() and IStreamRequest<TResponse> via CreateStream(), no persistence
+
+## Jobs and workflows
+
+- [Outbox Pattern](https://moberghr.github.io/warp/docs/features/outbox-pattern.md): Transactional outbox: a job is saved in the same transaction as your business data
+- [Recurring Jobs](https://moberghr.github.io/warp/docs/features/recurring-jobs.md): Cron-based scheduling, deduplication, execution history
+- [Sagas](https://moberghr.github.io/warp/docs/features/sagas.md): Correlated stateful workflows, [Correlate] / [StartsSaga], delete-on-completion
+- [Background Services](https://moberghr.github.io/warp/docs/features/background-services.md): WarpBackgroundService supervisor loops, PerServer / Singleton lease scope
+- [Job Metadata](https://moberghr.github.io/warp/docs/features/metadata.md): Key-value metadata, publish pipeline behaviors, IJobContext
+- [Job Cancellation](https://moberghr.github.io/warp/docs/features/cancellation.md): Graceful CancellationMode, handler CancellationToken, transitive batch cancel
+- [Pause / Resume](https://moberghr.github.io/warp/docs/features/pause.md): Pause servers and worker groups, resume processing
+- [DB-Generated IDs](https://moberghr.github.io/warp/docs/features/db-generated-ids.md): Database-assigned identifiers
+
+## Flow control
+
+- [Mutex](https://moberghr.github.io/warp/docs/features/mutex.md): [Mutex] key-based mutual exclusion for jobs
+- [Semaphore](https://moberghr.github.io/warp/docs/features/semaphore.md): Bounded concurrency (limit > 1) via [Semaphore], Wait / Skip policies
+- [Rate Limiting](https://moberghr.github.io/warp/docs/features/rate-limit.md): Fixed / sliding / token-bucket styles, Skip vs Wait, per-key buckets
+- [Timeout](https://moberghr.github.io/warp/docs/features/timeout.md): Per-attempt / total deadlines, Delete vs Fail modes
+- [Circuit Breaker](https://moberghr.github.io/warp/docs/features/circuit-breaker.md): Trip on failure threshold, half-open probe recovery
+- [No-Restart](https://moberghr.github.io/warp/docs/features/no-restart.md): [NoRestart] / [Restart] for non-idempotent work and stale-job recovery
+
+## Performance
+
+- [Performance](https://moberghr.github.io/warp/docs/performance.md): Per-job cost, how Warp keeps database load low, settings for throughput
+- [Warp vs Hangfire](https://moberghr.github.io/warp/docs/performance/warp-vs-hangfire.md): Measured throughput, statements, CPU, WAL and allocation per job on PostgreSQL
+- [Batched Completions](https://moberghr.github.io/warp/docs/features/batched-completions.md): Dispatcher mode and coalesced completion writes
+- [Database Push](https://moberghr.github.io/warp/docs/features/db-push.md): LISTEN/NOTIFY and Service Broker wake-up, opt-in low-latency pickup
+- [Memory Benchmarks](https://moberghr.github.io/warp/docs/operations/benchmarks.md): Memory benchmarks that verify the server does not leak
+
+## HTTP and integrations
+
+- [HTTP Endpoints](https://moberghr.github.io/warp/docs/features/http.md): Expose IRequest<T> / IStreamRequest<T> handlers as ASP.NET endpoints via [WarpHttp...] attributes (inbound)
+- [Outbound Adapters](https://moberghr.github.io/warp/docs/features/adapters.md): Observe outbound calls to other services, cluster-shared rate limiting, capture on failure (AddAdapters)
+- [Durable Webhooks](https://moberghr.github.io/warp/docs/features/webhooks.md): Durable outbound webhook delivery: retries, signing, redelivery, exhaustion (built into Core, always on)
+
+## Observability
+
+- [Job Tracing](https://moberghr.github.io/warp/docs/features/tracing.md): TraceId and SpawnedByJobId: one trace across every job and message a request started
+- [Multi-Application Observability](https://moberghr.github.io/warp/docs/features/applications.md): Many applications on one schema, each identified and filterable in the dashboard
+- [Queue Metrics](https://moberghr.github.io/warp/docs/features/queue-metrics.md): Queue wait and backlog depth per queue
+- [Error Grouping](https://moberghr.github.io/warp/docs/features/error-grouping.md): Failures from jobs, endpoints, adapters and the browser grouped into issues by fingerprint
+- [SLOs and Error Budgets](https://moberghr.github.io/warp/docs/features/slo-error-budget.md): Objectives over Warp's own aggregates, error budget and burn rate
+- [Custom Metrics](https://moberghr.github.io/warp/docs/features/custom-metrics.md): Collect your own System.Diagnostics.Metrics instruments, chart them, hold them to an SLO
+- [Metrics Retention Tiers](https://moberghr.github.io/warp/docs/features/metrics-retention.md): How counters roll up into hourly and daily tiers and how long each is kept
+- [Endpoint Observability](https://moberghr.github.io/warp/docs/features/endpoint-observability.md): Observe inbound requests to Warp HTTP endpoints: caller, duration, status, bodies
+- [Client Observability](https://moberghr.github.io/warp/docs/features/client-observability.md): Browser errors, Core Web Vitals, logs and custom events through the ingest endpoint
+- [Observability Sinks and OpenTelemetry](https://moberghr.github.io/warp/docs/features/observability-sinks.md): Meters, activity sources and sinks for exporting what Warp records
+- [Operational Notifications](https://moberghr.github.io/warp/docs/features/operational-notifications.md): IWarpNotifier: hand operational events (webhook exhausted, instance down) to your own channel
+- [Dashboard Push](https://moberghr.github.io/warp/docs/features/dashboard-push.md): SignalR realtime dashboard updates
+
+## Operations
+
+- [Configuration](https://moberghr.github.io/warp/docs/operations/configuration.md): Workers, polling, retention, dispatcher mode, worker groups, schema, naming conventions
+- [EF Core Integration](https://moberghr.github.io/warp/docs/operations/ef-core-integration.md): DbContext setup, the server-internal context, migrations, naming conventions
+- [Connection Pooling](https://moberghr.github.io/warp/docs/operations/connection-pooling.md): Which lock shapes need a session-mode connection; transaction-mode poolers (Neon -pooler, Supabase 6543, Azure 6432)
+- [Crash Recovery](https://moberghr.github.io/warp/docs/operations/crash-recovery.md): Sliding invisibility timeout, keep-alive, stale job recovery
+- [Dashboard Auth](https://moberghr.github.io/warp/docs/operations/dashboard-auth.md): MapWarpDashboard + RequireAuthorization, built-in cookie login, localhost-only
+- [Multi-Project Source Generation](https://moberghr.github.io/warp/docs/operations/multi-project-source-gen.md): How the source generators find handlers across several projects
+
+## Upgrading and migrating
+
+- [Upgrading to 8.0](https://moberghr.github.io/warp/docs/operations/upgrading-to-8.md): What to change going from 7.7 to 8.0: handler saves, index migration, rolling deploy
+- [Migrating from Hangfire](https://moberghr.github.io/warp/docs/operations/migrating-from-hangfire.md): API mapping, what changes in how a job is written, gradual migration
+- [Migrating from Wolverine](https://moberghr.github.io/warp/docs/operations/migrating-from-wolverine.md): API mapping and wiring differences
+- [Releases](https://moberghr.github.io/warp/docs/releases.md): Version history and upgrade notes
 
 ## Optional
 
-- [Full AI Reference](https://moberghr.github.io/warp/llms-full.txt): Complete self-contained reference with all patterns, API, configuration, and examples
+- [Full AI Reference](https://moberghr.github.io/warp/llms-full.txt): One self-contained file with all patterns, API, configuration and examples
+- [Dashboard: Overview](https://moberghr.github.io/warp/docs/dashboard/overview.md): The built-in dashboard: home page, timestamps, navigation
+- [Dashboard: Jobs](https://moberghr.github.io/warp/docs/dashboard/jobs.md): Browse jobs by state, job detail, state history, logs
+- [Dashboard: Retrying](https://moberghr.github.io/warp/docs/dashboard/retrying.md): Jobs whose last attempt threw and are waiting to retry
+- [Dashboard: Trace](https://moberghr.github.io/warp/docs/dashboard/trace.md): Trace visualization across jobs
+- [Dashboard: Workers](https://moberghr.github.io/warp/docs/dashboard/workers.md): Worker activity log
+- [Dashboard: Messages](https://moberghr.github.io/warp/docs/dashboard/workloads/messages.md): Pub/sub messages and the jobs each one spawned
+- [Dashboard: Batches](https://moberghr.github.io/warp/docs/dashboard/workloads/batches.md): Batch progress and child jobs
+- [Dashboard: Recurring Jobs](https://moberghr.github.io/warp/docs/dashboard/workloads/recurring.md): Schedules, next and last run, last outcome
+- [Dashboard: Background Services](https://moberghr.github.io/warp/docs/dashboard/workloads/background-services.md): WarpBackgroundService instances, leases and logs
+- [Dashboard: Endpoints](https://moberghr.github.io/warp/docs/dashboard/traffic/endpoints.md): Inbound HTTP requests to Warp-exposed handlers
+- [Dashboard: Adapters](https://moberghr.github.io/warp/docs/dashboard/traffic/adapters.md): Outbound calls to other services
+- [Dashboard: Webhooks](https://moberghr.github.io/warp/docs/dashboard/traffic/webhooks.md): Outbound webhook deliveries and redelivery
+- [Dashboard: Client](https://moberghr.github.io/warp/docs/dashboard/traffic/client.md): Browser telemetry
+- [Dashboard: Concurrency Limits](https://moberghr.github.io/warp/docs/dashboard/runtime/concurrency-limits.md): Admin overrides for [Mutex] / [Semaphore] limits
+- [Dashboard: Rate Limits](https://moberghr.github.io/warp/docs/dashboard/runtime/rate-limits.md): Admin rate-limit overrides
+- [Dashboard: Sagas](https://moberghr.github.io/warp/docs/dashboard/runtime/sagas.md): Live saga instances
+- [Dashboard: Applications](https://moberghr.github.io/warp/docs/dashboard/health/applications.md): Running Warp processes grouped by application
+- [Dashboard: Issues](https://moberghr.github.io/warp/docs/dashboard/health/issues.md): Errors grouped by fingerprint
+- [Dashboard: SLOs](https://moberghr.github.io/warp/docs/dashboard/health/slo.md): Objectives with error budget and burn rate
+- [Dashboard: Counters](https://moberghr.github.io/warp/docs/dashboard/health/counters.md): Every durable metric, grouped by the subsystem that wrote it
+- [Dashboard: Counters: Job outcomes](https://moberghr.github.io/warp/docs/dashboard/health/counters/job-outcomes.md): stats: keys, totals and per-reason breakdown
+- [Dashboard: Counters: Job types](https://moberghr.github.io/warp/docs/dashboard/health/counters/job-types.md): jobstat: keys by job type
+- [Dashboard: Counters: Handlers](https://moberghr.github.io/warp/docs/dashboard/health/counters/handlers.md): jobstat: keys by handler
+- [Dashboard: Counters: Queues](https://moberghr.github.io/warp/docs/dashboard/health/counters/queues.md): qwait: and qbacklog: keys
+- [Dashboard: Counters: Deadlines](https://moberghr.github.io/warp/docs/dashboard/health/counters/deadlines.md): deadline: keys, total-timeout attainment
+- [Dashboard: Counters: Adapters](https://moberghr.github.io/warp/docs/dashboard/health/counters/adapters.md): adapter: keys
+- [Dashboard: Counters: Endpoints](https://moberghr.github.io/warp/docs/dashboard/health/counters/endpoints.md): endpoint: keys
+- [Dashboard: Counters: Client](https://moberghr.github.io/warp/docs/dashboard/health/counters/client.md): clientevent: keys
+- [Dashboard: Counters: Issues](https://moberghr.github.io/warp/docs/dashboard/health/counters/issues.md): errorgroup: keys
+- [Dashboard: Counters: System](https://moberghr.github.io/warp/docs/dashboard/health/counters/system.md): warpsys: keys, dropped records
+- [Dashboard: Counters: Other](https://moberghr.github.io/warp/docs/dashboard/health/counters/other.md): Unrecognised keys
+- [Demo shop (worked example): Demo shop](https://moberghr.github.io/warp/docs/demo-shop.md): Every Warp feature in the setting of one online store
+- [Demo shop (worked example): Orders and checkout](https://moberghr.github.io/warp/docs/demo-shop/orders-and-checkout.md): One order from checkout to paid: outbox, jobs, messages, sagas
+- [Demo shop (worked example): Reliability](https://moberghr.github.io/warp/docs/demo-shop/reliability.md): Retries, timeouts, circuit breakers and rate limits against slow partners
+- [Demo shop (worked example): Scheduling and background work](https://moberghr.github.io/warp/docs/demo-shop/scheduling.md): Recurring jobs and background services
+- [Demo shop (worked example): Integrations](https://moberghr.github.io/warp/docs/demo-shop/integrations.md): Adapters, HTTP endpoints and webhooks
+- [Demo shop (worked example): Observability](https://moberghr.github.io/warp/docs/demo-shop/observability.md): Traces, issues and the dashboard
+- [Demo shop (worked example): Metrics and SLOs](https://moberghr.github.io/warp/docs/demo-shop/metrics-and-slos.md): Custom metrics and objectives
