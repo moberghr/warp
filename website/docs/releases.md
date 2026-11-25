@@ -6,7 +6,7 @@ sidebar_position: 6
 
 ## 8.0.0
 
-*unreleased*
+*2026-11-25*
 
 Major release with **a much faster worker and much less database work**, **dispatcher mode as the default** (`UseDispatcher = true`; set it to `false` to keep 7.x's single-worker mode), **one breaking change in behaviour** (job and message handlers must save their own `DbContext`), **one migration** (additive columns, one new table, and four job indexes rebuilt as partial), and a few breaking API changes, mostly for custom providers. A rolling deploy from 7.7 is supported: the parts that changed how servers coordinate are bridged to 7.7 for one release. Read [Upgrading to 8.0](operations/upgrading-to-8.md) before you deploy.
 
