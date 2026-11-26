@@ -18,11 +18,15 @@ export interface DeliveryPoint {
   delivered: number;
   exhausted: number;
   pending: number;
+  /** Waiting for a failing endpoint to recover (8.1); absent from older servers. */
+  parked?: number;
+  /** Cancelled by an operator (8.1); absent from older servers. */
+  cancelled?: number;
   total: number;
 }
 
 // Delivery-statistics chart: hourly stacked bars of deliveries created that hour, split by current status
-// (Delivered green / Exhausted red / Pending amber). Rebuilds imperatively when the points change (so it
+// (Delivered green / Exhausted red / Pending amber / Parked violet / Cancelled gray). Rebuilds imperatively when the points change (so it
 // re-reads the light/dark theme). Muted placeholder until there is data.
 export function WebhookDeliveryChart({ points, height = 240 }: { points: DeliveryPoint[]; height?: number }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -37,7 +41,7 @@ export function WebhookDeliveryChart({ points, height = 240 }: { points: Deliver
     const gridColor = isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)';
     const textColor = isDark ? '#888' : '#666';
 
-    const at = (n: keyof DeliveryPoint) => points.map((p) => ({ x: new Date(p.hour).getTime(), y: p[n] as number }));
+    const at = (n: keyof DeliveryPoint) => points.map((p) => ({ x: new Date(p.hour).getTime(), y: (p[n] as number | undefined) ?? 0 }));
 
     chartRef.current = new Chart(canvasRef.current, {
       type: 'bar',
@@ -46,6 +50,8 @@ export function WebhookDeliveryChart({ points, height = 240 }: { points: Deliver
           { label: 'Delivered', backgroundColor: 'rgba(34, 197, 94, 0.6)', data: at('delivered'), stack: 's' },
           { label: 'Pending', backgroundColor: 'rgba(245, 158, 11, 0.65)', data: at('pending'), stack: 's' },
           { label: 'Exhausted', backgroundColor: 'rgba(239, 68, 68, 0.7)', data: at('exhausted'), stack: 's' },
+          { label: 'Parked', backgroundColor: 'rgba(139, 92, 246, 0.65)', data: at('parked'), stack: 's' },
+          { label: 'Cancelled', backgroundColor: 'rgba(156, 163, 175, 0.6)', data: at('cancelled'), stack: 's' },
         ],
       },
       options: {

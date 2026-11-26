@@ -19,6 +19,7 @@ using Warp.Core.RateLimit;
 using Warp.Core.Retry;
 using Warp.Core.Services;
 using Warp.Core.Timeout;
+using Warp.Core.Webhooks;
 using Warp.Provider.PostgreSql;
 using Warp.Provider.SqlServer;
 using Warp.Tests.Fixtures;
@@ -330,6 +331,11 @@ public class WarpTestServer : IAsyncDisposable
 
                     // Tests expect a woken server task to run at once (rule 6.18 folds wakes in production).
                     config.ServerTaskSignalInterval = TimeSpan.Zero;
+
+                    // The public-address guard is on by default since 8.1 and would replace the stub primary handlers
+                    // the webhook tests install (and refuse example.test / loopback receivers). The tests that cover
+                    // the guard turn it back on explicitly in their own configure.
+                    config.AddWebhooks(w => w.PublicAddressesOnly = false);
 
                     configure?.Invoke(config);
 

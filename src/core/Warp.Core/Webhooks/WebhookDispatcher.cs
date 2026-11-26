@@ -23,17 +23,23 @@ internal sealed class WebhookDispatcher<TContext> : IWebhookDispatcher
     private readonly IPublisher _publisher;
     private readonly TimeProvider _timeProvider;
     private readonly WarpConfiguration _configuration;
+    private readonly WebhookSendBehavior _behavior;
+    private readonly bool _publicAddressesOnly;
 
     public WebhookDispatcher(
         TContext context,
         IPublisher publisher,
         TimeProvider timeProvider,
-        IOptions<WarpConfiguration> configuration)
+        IOptions<WarpConfiguration> configuration,
+        IOptions<WebhookSendBehavior> behavior,
+        IOptions<WebhookAddressPolicy> addressPolicy)
     {
+        _publicAddressesOnly = addressPolicy.Value.PublicAddressesOnly;
         _context = context;
         _publisher = publisher;
         _timeProvider = timeProvider;
         _configuration = configuration.Value;
+        _behavior = behavior.Value;
     }
 
     public async Task<Guid> SendAsync(WebhookSend send, CancellationToken cancellationToken = default)
@@ -55,6 +61,17 @@ internal sealed class WebhookDispatcher<TContext> : IWebhookDispatcher
                 && !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.Ordinal)))
         {
             throw new ArgumentException("WebhookSend.Url must be an absolute http or https URL.", nameof(send));
+        }
+
+        // With the public-address guard on in this process, a destination that can only be non-public is refused
+        // here, where the caller gets a clear error, instead of failing every attempt. A host NAME is resolved at
+        // attempt time by the guard (a DNS answer can change); only literals and localhost are known now.
+        if (_publicAddressesOnly && IsNonPublicLiteral(uri))
+        {
+            throw new ArgumentException(
+                $"WebhookSend.Url host '{uri.Host}' is not a public address, and PublicAddressesOnly is on. "
+                + "Use a public destination, or set AddWebhooks(w => w.PublicAddressesOnly = false) for local development.",
+                nameof(send));
         }
 
         if (send.Url.Length > WebhookColumnCaps.Url)
@@ -83,7 +100,31 @@ internal sealed class WebhookDispatcher<TContext> : IWebhookDispatcher
 
         if (send.Signing == WebhookSigning.StandardWebhooks)
         {
-            ValidateStandardWebhooksSecret(send.Secret);
+            WebhookSecretValidation.ValidateStandardWebhooksSecret(send.Secret, nameof(send));
+        }
+
+        var eventId = Clamp(string.IsNullOrWhiteSpace(send.EventId) ? Guid.NewGuid().ToString() : send.EventId, WebhookColumnCaps.EventId);
+        var groupName = ClampOptional(send.Group, WebhookColumnCaps.GroupName);
+
+        // Dedupe (8.1, opt-in): the same event to the same URL returns the delivery already stored, in any status,
+        // until retention deletes it. The unique index on DedupeKey backs the check against a concurrent send.
+        string? dedupeKey = null;
+        if (_behavior.DeduplicateByEventId)
+        {
+            // The caller's own event id, not the stored (clamped) one: two ids that differ only past the column
+            // cap are different events.
+            dedupeKey = WebhookDedupe.Key(string.IsNullOrWhiteSpace(send.EventId) ? eventId : send.EventId, send.Url);
+
+            var existing = await _context.Set<WebhookDelivery>()
+                .AsNoTracking()
+                .Where(x => x.DedupeKey == dedupeKey)
+                .Select(x => (Guid?)x.Id)
+                .FirstOrDefaultAsync(cancellationToken);
+
+            if (existing is { } existingId)
+            {
+                return existingId;
+            }
         }
 
         var now = _timeProvider.GetUtcNow().UtcDateTime;
@@ -93,10 +134,10 @@ internal sealed class WebhookDispatcher<TContext> : IWebhookDispatcher
         {
             Id = Warp.Core.Data.WarpId.Next(),
             EventType = Clamp(send.EventType, WebhookColumnCaps.EventType),
-            EventId = Clamp(string.IsNullOrWhiteSpace(send.EventId) ? Guid.NewGuid().ToString() : send.EventId, WebhookColumnCaps.EventId),
+            EventId = eventId,
             Url = send.Url,
             HeadersJson = send.Headers is { Count: > 0 } ? JsonSerializer.Serialize(send.Headers) : null,
-            GroupName = ClampOptional(send.Group, WebhookColumnCaps.GroupName),
+            GroupName = groupName,
             Reference = ClampOptional(send.Reference, WebhookColumnCaps.Reference),
             PayloadJson = send.Payload,
             SigningMode = send.Signing,
@@ -109,6 +150,8 @@ internal sealed class WebhookDispatcher<TContext> : IWebhookDispatcher
             CreatedAt = now,
             Application = _configuration.ApplicationName,
             ExpireAt = now + _configuration.WebhookDeliveryRetention,
+            TrackEndpointHealth = _behavior.TrackEndpointHealth && groupName is not null,
+            DedupeKey = dedupeKey,
         };
 
         await _context.Set<WebhookDelivery>().AddAsync(delivery, cancellationToken);
@@ -121,26 +164,18 @@ internal sealed class WebhookDispatcher<TContext> : IWebhookDispatcher
         return delivery.Id;
     }
 
-    // StandardWebhooks signs with the base64-decoded secret (optionally whsec_-prefixed). A missing or
-    // non-base64 secret would only fault at attempt time (a caught, recorded failed attempt that never
-    // succeeds); reject it up front where the caller gets a clear error.
-    private static void ValidateStandardWebhooksSecret(string? secret)
+    private static bool IsNonPublicLiteral(Uri uri)
     {
-        if (string.IsNullOrEmpty(secret))
+        if (uri.HostNameType is UriHostNameType.IPv4 or UriHostNameType.IPv6)
         {
-            throw new ArgumentException(
-                "WebhookSigning.StandardWebhooks requires a non-empty Secret (the whsec_ signing secret).",
-                nameof(secret));
+            return System.Net.IPAddress.TryParse(uri.IdnHost, out var address) && !WebhookAddressGuard.IsPublic(address);
         }
 
-        var encoded = secret.StartsWith("whsec_", StringComparison.Ordinal) ? secret["whsec_".Length..] : secret;
-        var buffer = new byte[encoded.Length];
-        if (!Convert.TryFromBase64String(encoded, buffer, out _))
-        {
-            throw new ArgumentException(
-                "WebhookSigning.StandardWebhooks Secret must be base64 (optionally whsec_-prefixed).",
-                nameof(secret));
-        }
+        // RFC 6761: localhost and every name under it resolve to loopback (a trailing root dot is the same name).
+        var host = uri.IdnHost.TrimEnd('.');
+
+        return string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase)
+            || host.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string Clamp(string value, int max)

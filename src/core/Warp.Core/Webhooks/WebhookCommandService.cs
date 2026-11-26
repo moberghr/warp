@@ -46,24 +46,133 @@ public class WebhookCommandService<TContext> : IWebhookCommandService
         _redeliveryEnqueuers = redeliveryEnqueuers;
     }
 
-    public async Task<WebhookRedeliveryResult> Redeliver(Guid deliveryId, CancellationToken ct = default)
+    public Task<WebhookRedeliveryResult> Redeliver(Guid deliveryId, CancellationToken ct = default)
+        => RedeliverCoreAsync(deliveryId, newSecret: null, ct);
+
+    public Task<WebhookRedeliveryResult> Redeliver(Guid deliveryId, WebhookRedeliveryOptions options, CancellationToken ct = default)
     {
-        var status = await _context.Set<WebhookDelivery>()
+        ArgumentNullException.ThrowIfNull(options);
+
+        if (options.Secret is { Length: > WebhookColumnCaps.Secret })
+        {
+            throw new ArgumentException(
+                $"WebhookRedeliveryOptions.Secret exceeds the {WebhookColumnCaps.Secret}-character limit.",
+                nameof(options));
+        }
+
+        return RedeliverCoreAsync(deliveryId, options.Secret, ct);
+    }
+
+    public async Task<WebhookCancelResult> Cancel(Guid deliveryId, CancellationToken ct = default)
+    {
+        var cancelled = await CancelWhere(_context.Set<WebhookDelivery>().Where(x => x.Id == deliveryId), ct);
+        if (cancelled == 1)
+        {
+            return WebhookCancelResult.Cancelled;
+        }
+
+        var exists = await _context.Set<WebhookDelivery>()
             .AsNoTracking()
             .Where(x => x.Id == deliveryId)
-            .Select(x => (WebhookDeliveryStatus?)x.Status)
+            .AnyAsync(ct);
+
+        return exists ? WebhookCancelResult.Rejected : WebhookCancelResult.NotFound;
+    }
+
+    public Task<int> CancelGroup(string groupName, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(groupName);
+
+        // Same identity as the endpoint groups view and the list filter: the group name, or the URL of deliveries
+        // sent without a group.
+        return CancelWhere(_context.Set<WebhookDelivery>().Where(x => (x.GroupName ?? x.Url) == groupName), ct);
+    }
+
+    public async Task<WebhookProbeResult> ProbeEndpoint(string groupName, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(groupName);
+
+        var state = await _context.Set<WebhookEndpoint>()
+            .AsNoTracking()
+            .Where(x => x.Name == groupName)
+            .Select(x => (WebhookEndpointState?)x.State)
             .FirstOrDefaultAsync(ct);
 
-        if (status is null)
+        if (state is null)
+        {
+            return WebhookProbeResult.NotFound;
+        }
+
+        if (state == WebhookEndpointState.Healthy)
+        {
+            return WebhookProbeResult.NotFailing;
+        }
+
+        // Same reason as Redeliver: without an enqueuer the released delivery would be Pending with no job.
+        var enqueuer = _redeliveryEnqueuers.FirstOrDefault();
+        if (enqueuer is null)
+        {
+            return WebhookProbeResult.Unavailable;
+        }
+
+        var now = _timeProvider.GetUtcNow().UtcDateTime;
+
+        await using var transaction = await _context.Database.BeginTransactionAsync(ct);
+
+        // One attempt left: on failure the delivery runs out of retries again and, the endpoint still failing, parks.
+        var probed = await WebhookParkedRelease.ProbeOldestAsync(_context, groupName, now, now + _configuration.WebhookDeliveryRetention, ct);
+        if (probed is not { } deliveryId)
+        {
+            await transaction.RollbackAsync(ct);
+
+            return WebhookProbeResult.NothingParked;
+        }
+
+        await WebhookParkedRelease.DeferNextProbeAsync(_context, groupName, now + _configuration.WebhookEndpointProbeInterval, ct);
+        await enqueuer.EnqueueAsync(deliveryId, ct);
+        await transaction.CommitAsync(ct);
+
+        return WebhookProbeResult.Probing;
+    }
+
+    // Pending or Parked -> Cancelled in one guarded statement: a row that settled in the meantime is left alone.
+    private static Task<int> CancelWhere(IQueryable<WebhookDelivery> deliveries, CancellationToken ct)
+        => deliveries
+            .Where(x => x.Status == WebhookDeliveryStatus.Pending || x.Status == WebhookDeliveryStatus.Parked)
+            .ExecuteUpdateAsync(
+                s => s
+                    .SetProperty(x => x.Status, WebhookDeliveryStatus.Cancelled)
+                    .SetProperty(x => x.NextAttemptAt, (DateTime?)null),
+                ct);
+
+    private async Task<WebhookRedeliveryResult> RedeliverCoreAsync(Guid deliveryId, string? newSecret, CancellationToken ct)
+    {
+        var current = await _context.Set<WebhookDelivery>()
+            .AsNoTracking()
+            .Where(x => x.Id == deliveryId)
+            .Select(x =>
+                new
+                {
+                    x.Status,
+                    x.SigningMode,
+                })
+            .FirstOrDefaultAsync(ct);
+
+        if (current is null)
         {
             return WebhookRedeliveryResult.NotFound;
         }
 
         // A Pending delivery already has a live executor job — requeuing would double-attempt. Only settled
         // (Delivered / Exhausted) deliveries are redeliverable; reject without side effects.
-        if (status == WebhookDeliveryStatus.Pending)
+        if (current.Status == WebhookDeliveryStatus.Pending)
         {
             return WebhookRedeliveryResult.Rejected;
+        }
+
+        if (newSecret is not null)
+        {
+            ValidateNewSecret(newSecret, current.SigningMode, nameof(WebhookRedeliveryOptions));
         }
 
         // No worker in this process to run an executor job, and nothing scans NextAttemptAt: a Pending reset
@@ -80,7 +189,8 @@ public class WebhookCommandService<TContext> : IWebhookCommandService
         await using var transaction = await _context.Database.BeginTransactionAsync(ct);
 
         // Guarded settled→Pending transition: the status guard lives in the WHERE, so exactly one of two
-        // racing redelivers flips the row (rowcount 1) and the other matches zero rows.
+        // racing redelivers flips the row (rowcount 1) and the other matches zero rows. A rotated secret is
+        // written by the same statement, so the row is never Pending with the old key or settled with the new.
         var updated = await _context.Set<WebhookDelivery>()
             .Where(x => x.Id == deliveryId)
             .Where(x => x.Status != WebhookDeliveryStatus.Pending)
@@ -89,7 +199,8 @@ public class WebhookCommandService<TContext> : IWebhookCommandService
                     .SetProperty(x => x.Status, WebhookDeliveryStatus.Pending)
                     .SetProperty(x => x.AttemptCount, 0)
                     .SetProperty(x => x.NextAttemptAt, now)
-                    .SetProperty(x => x.ExpireAt, expireAt),
+                    .SetProperty(x => x.ExpireAt, expireAt)
+                    .SetProperty(x => x.Secret, x => newSecret ?? x.Secret),
                 ct);
 
         if (updated == 0)
@@ -117,6 +228,23 @@ public class WebhookCommandService<TContext> : IWebhookCommandService
         WarpTelemetry.WebhookRedeliveries.Add(1);
 
         return WebhookRedeliveryResult.Enqueued;
+    }
+
+    // Validated before anything is written: the attempt reads the secret only at send time, so a bad value
+    // would otherwise surface as failed attempts long after this call returned Enqueued.
+    private static void ValidateNewSecret(string secret, WebhookSigning signingMode, string paramName)
+    {
+        if (signingMode == WebhookSigning.None)
+        {
+            throw new ArgumentException(
+                "The delivery is not signed (WebhookSigning.None), so a new secret would never be used.",
+                paramName);
+        }
+
+        if (signingMode == WebhookSigning.StandardWebhooks)
+        {
+            WebhookSecretValidation.ValidateStandardWebhooksSecret(secret, paramName);
+        }
     }
 }
 

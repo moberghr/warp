@@ -181,6 +181,7 @@ public sealed class SloEvaluator<TContext> : IServerTask
             SloKind.MetricGap => ComputeMetricGapAsync(def, now, ct),
             SloKind.MetricLatency => ComputeMetricLatencyAsync(def, now, ct),
             SloKind.MetricGaugeThreshold => ComputeMetricGaugeThresholdAsync(def, now, ct),
+            SloKind.WebhookDeliveryLatency => ComputeWebhookDeliveryLatencyAsync(def, now, ct),
             _ => UnsupportedKindAsync(def),
         };
 
@@ -224,6 +225,61 @@ public sealed class SloEvaluator<TContext> : IServerTask
         var (_, _, burnShort) = SloMath.EvaluateRate(succS, succS + failS, def.TargetValue);
 
         return new EvalResult(att, budget, burnShort, burnLong, HasData: succW + failW > 0);
+    }
+
+    // Webhook delivery latency (8.1): the share of deliveries delivered within TargetValue minutes of being sent must be
+    // at least Percentile%. A delivery counts once it is TargetValue old (a younger one may still arrive in time), so
+    // both windows END at that settle point and keep their full length: a threshold longer than the fast-burn window
+    // never leaves it empty. Exhausted, parked, still-pending and late deliveries are bad; cancelled ones and Delivered
+    // rows from before 8.1 (no LastAttemptAt, so no delivery time) are not counted. One grouped count in the database
+    // over the delivery rows (durable within WebhookDeliveryRetention), no aggregate involved.
+    private async Task<EvalResult> ComputeWebhookDeliveryLatencyAsync(SloDefinition def, DateTime now, CancellationToken ct)
+    {
+        // Whole seconds: SQL Server's DATEADD takes an integer.
+        var thresholdSeconds = Math.Round(def.TargetValue * 60);
+        var settledBy = now.AddSeconds(-thresholdSeconds);
+        var windowStart = settledBy.AddSeconds(-def.WindowSeconds);
+        var shortStart = settledBy - (now - ShortWindowStart(def, now));
+
+        var deliveries = _context.Set<WebhookDelivery>()
+            .AsNoTracking()
+            .Where(x => x.CreatedAt >= windowStart)
+            .Where(x => x.CreatedAt <= settledBy)
+            .Where(x => x.Status != WebhookDeliveryStatus.Cancelled)
+            .Where(x => x.Status != WebhookDeliveryStatus.Delivered || x.LastAttemptAt != null);
+
+        if (!string.Equals(def.Dimension, "*", StringComparison.Ordinal))
+        {
+            deliveries = deliveries.Where(x => x.GroupName == def.Dimension);
+        }
+
+        if (def.Application is not null)
+        {
+            deliveries = deliveries.Where(x => x.Application == def.Application);
+        }
+
+        var counts = await deliveries
+            .GroupBy(x => 1)
+            .Select(g =>
+                new
+                {
+                    TotalW = g.LongCount(),
+                    GoodW = g.LongCount(x => x.Status == WebhookDeliveryStatus.Delivered && x.LastAttemptAt <= x.CreatedAt.AddSeconds(thresholdSeconds)),
+                    TotalS = g.LongCount(x => x.CreatedAt >= shortStart),
+                    GoodS = g.LongCount(x => x.CreatedAt >= shortStart && x.Status == WebhookDeliveryStatus.Delivered && x.LastAttemptAt <= x.CreatedAt.AddSeconds(thresholdSeconds)),
+                })
+            .FirstOrDefaultAsync(ct);
+
+        if (counts is null)
+        {
+            return NoDataResult;
+        }
+
+        var target = (def.Percentile ?? SloValidation.DefaultLatencyPercentile) / 100.0;
+        var (att, budget, burnLong) = SloMath.EvaluateRate(counts.GoodW, counts.TotalW, target);
+        var (_, _, burnShort) = SloMath.EvaluateRate(counts.GoodS, counts.TotalS, target);
+
+        return new EvalResult(att, budget, burnShort, burnLong, HasData: counts.TotalW > 0);
     }
 
     private async Task<EvalResult> ComputeDeadlineAsync(SloDefinition def, DateTime now, Dictionary<string, IReadOnlyList<KeyVal>> cache, CancellationToken ct)

@@ -8,6 +8,71 @@ sidebar_position: 6
 
 *unreleased*
 
+Outbound webhook hardening and **webhook endpoint health**: endpoints that go down hold their deliveries and catch up by themselves once they are back. **One migration** (additive: five columns on the webhook delivery table, one new table and three indexes, see [Migration](#migration-81)) and no breaking API change; **four behaviour changes for webhooks** (see below), each marked *Behaviour change* with its one-line way back. Applications can also boot their own test hosts without Warp getting in the way (`RemoveWarpHostedServices()`, `RequireDatabaseAtStartup = false`).
+
+### Webhooks: bounded attempts
+
+- **The response body is no longer buffered.** Attempts are sent with `HttpCompletionOption.ResponseHeadersRead`; only the captured prefix of the body is read (8 KiB by default, nothing when body capture is off) and the rest is never drained. Before, the whole body was buffered (up to 2 GB) before the bounded capture read.
+- **New `WebhookAttemptTimeout`** on `WarpConfiguration` (default **30 seconds**) bounds the send, the response headers and the capture read. An attempt whose response headers do not arrive in time is an ordinary failed attempt, retried per the delivery's `RetrySchedule`; if only the body capture runs out of time, the status code still decides (a `2xx` stays `Delivered`). It is a cancellation token, not `HttpClient.Timeout`, so a `warp-webhooks` client you configure keeps its settings. **Behaviour change:** before, an attempt could run for the client's 100 s `Timeout`; a receiver that legitimately takes longer than 30 s now fails its attempts, so raise the setting for it. See [Attempt limits](features/webhooks.md#attempt-limits).
+
+**Behaviour change — to go back:** `opt.WebhookAttemptTimeout = TimeSpan.FromSeconds(100)` (the old effective limit: the client's own 100 s `Timeout`).
+
+### Webhooks: redirects are no longer followed
+
+**Behaviour change.** The `warp-webhooks` client's default primary handler is now a `SocketsHttpHandler` with `AllowAutoRedirect = false`. A `3xx` response is the attempt's result: under the default success codes it is a failed attempt, retried per the schedule. Before, the client followed up to 50 redirects. Reasons: a `301`/`302`/`303` turns the POST into a GET, so the payload is silently dropped, and the signature headers would be re-sent to whatever host the redirect names. Point subscriptions at their final URL; a receiver that really needs redirects can turn them back on with `UseSocketsHttpHandler((handler, _) => handler.AllowAutoRedirect = true)`. A primary handler you register yourself keeps its own setting. See [Redirects are not followed](features/webhooks.md#redirects-are-not-followed).
+
+**To go back:** configure the client with `UseSocketsHttpHandler((handler, _) => handler.AllowAutoRedirect = true)`. Do this (or, better, point the subscription at the final URL) for **any receiver behind a `307`/`308`**: it delivered before and now fails every attempt.
+
+### Webhooks: public addresses only, on by default
+
+**Behaviour change.** `PublicAddressesOnly` is now **on by default** in every process (before: off). A tenant-chosen webhook URL could make your servers POST to `10.x`, `localhost` or `169.254.169.254`; now the `warp-webhooks` client connects only to public addresses, and `SendAsync` throws `ArgumentException` for a URL whose host is a non-public IP literal or `localhost`. Turn it off for local development with `opt.AddWebhooks(w => w.PublicAddressesOnly = false)`. **Tests that stub the `warp-webhooks` client** with `ConfigurePrimaryHttpMessageHandler` must turn it off too: with the guard on, a non-`SocketsHttpHandler` primary handler cannot be guarded, so every attempt through it fails closed.
+
+**Check before upgrading: a `warp-webhooks` client configured with `ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { … })`** (a proxy, client certificates for mTLS) cannot carry the guard. Warp keeps your handler — the proxy and certificates are never dropped — but **every webhook attempt fails closed** with an error naming the fix, logged once at Warning when a server with a worker starts. Move those settings into `UseSocketsHttpHandler((handler, _) => { handler.Proxy = …; handler.SslOptions.ClientCertificates = …; })`, which the guard keeps, or set `PublicAddressesOnly = false`. See [Public addresses only](features/webhooks.md#public-addresses-only).
+
+**To go back:** `opt.AddWebhooks(w => w.PublicAddressesOnly = false)` (local development; in production prefer moving a proxy or certificate into `UseSocketsHttpHandler`).
+
+### Webhooks: their own worker group
+
+**Behaviour change.** Webhook attempts now run on a dedicated worker group with `WebhookWorkerCount` workers (default 4), and the default group no longer polls `warp:webhooks`, so a slow or hanging receiver cannot starve your job workers. It also caps concurrent attempts per server at that count: raise it for high webhook volume, or set `0` to go back to the shared shape. The new group is a worker group like any other: a server's reported worker count includes its workers, and **pausing the default group no longer pauses webhook delivery** — pause the webhook group too, or the server. Routing `warp:webhooks` yourself (in `Queues` or an `AddWorkerGroup` group) still wins. See [Webhook workers](features/webhooks.md#webhook-workers).
+
+**To go back:** `opt.WebhookWorkerCount = 0` (the default group drains `warp:webhooks` again, alongside your jobs).
+
+### Webhooks: public-address guard details
+
+The guard makes the `warp-webhooks` client connect only to publicly routable addresses: it resolves the host itself, drops loopback, private, link-local (cloud metadata), shared, documentation, multicast and reserved addresses, and connects to exactly the addresses that passed, so DNS rebinding and redirects cannot get around it. A refused host fails the attempt with `WebhookAddressNotPublicException`. It applies in the process that runs the attempt, so keep it on in every server that runs a worker. With an HTTP proxy the guard checks the proxy, so the proxy must enforce the policy. A `SocketsHttpHandler` you configure gets the guard and keeps its settings; any other primary handler you registered is kept, and every attempt through it fails closed with the fix in the error (and one Warning at startup). See [Public addresses only](features/webhooks.md#public-addresses-only).
+
+### Webhooks: redeliver with a rotated secret
+
+`IWebhookCommandService.Redeliver(deliveryId, new WebhookRedeliveryOptions { Secret = ... }, ct)` replaces the delivery's stamped signing secret in the same atomic settled→`Pending` flip, so a redelivery after a key rotation is signed with the new key. The new overload has a default implementation, so your own `IWebhookCommandService` implementations keep compiling (with a secret, the default throws `NotSupportedException` rather than signing with the old key). The dashboard's Redeliver is unchanged. See [Redelivery](features/webhooks.md#redelivery).
+
+### Webhooks: endpoint health (opt-in)
+
+`opt.AddWebhooks(w => w.TrackEndpointHealth = true)` tracks the health of each endpoint, where an endpoint is a delivery's `Group` (one group never marks another healthy, even on the same URL; deliveries without a group are not tracked). The choice is stamped on each delivery at `SendAsync`.
+
+- A tracked delivery that runs out of retries is **`Parked`** (new `WebhookDeliveryStatus` value 4) instead of `Exhausted`, and the first one marks its group **Failing** (the Failing signal is the alert; the exhausted callback does not fire for parked deliveries). While the group fails, deliveries are still sent and retried; those that run out park too.
+- The new `WebhookEndpointMonitor` server task probes each failing group every `WebhookEndpointProbeInterval` (5 min) by re-sending its oldest parked delivery once. Any success (the probe, a retry, a new delivery) recovers the group, and the monitor releases its parked deliveries back to `Pending`, oldest first, through the normal queue.
+- Host callbacks through the new `IWebhookEndpointHealthHandler` (`w.OnEndpointHealthChanged<T>()`) and new operational events `WebhookEndpointFailing`, `WebhookEndpointRecovered` and `WebhookEndpointStillFailing` (after `WebhookEndpointStillFailingAfter`, 30 days). Warp never disables anything itself.
+- "Retry now": `IWebhookCommandService.ProbeEndpoint(group)`, `POST {prefix}/api/webhooks/groups/retry?group=…` and a dashboard button.
+- New settings `WebhookEndpointMonitorInterval` (30 s), `WebhookEndpointProbeInterval` (5 min), `WebhookEndpointStillFailingAfter` (30 days).
+
+See [Endpoint health](features/webhooks.md#endpoint-health).
+
+### Webhooks: cancel, dedupe, last attempt
+
+- **Cancel** a `Pending` or `Parked` delivery, or all of a group's: `IWebhookCommandService.Cancel(id)` / `CancelGroup(group)`, `POST {prefix}/api/webhooks/{id}/cancel`, `POST {prefix}/api/webhooks/groups/cancel?group=…`, and dashboard buttons. New status **`Cancelled`** (value 5). See [Cancelling deliveries](features/webhooks.md#cancelling-deliveries).
+- **Dedupe** (opt-in, `w.DeduplicateByEventId = true`): `SendAsync` returns the existing delivery for the same `EventId` and `Url` while it is retained. See [Deduplication](features/webhooks.md#deduplication).
+- **Last attempt** (#357): `LastStatusCode`, `LastFailureReason` (`WebhookFailureReason`) and `LastAttemptAt` on every delivery, in `IWebhookQueryService`, the REST list and detail, and the dashboard. See [Last attempt](features/webhooks.md#last-attempt).
+
+`IWebhookCommandService` gains `Cancel`, `CancelGroup` and `ProbeEndpoint` as default interface members, so an implementation of your own keeps compiling (they throw `NotSupportedException` until you implement them). **If you `switch` over `WebhookDeliveryStatus`, handle `Parked` and `Cancelled`.** `Redeliver` also accepts `Parked` and `Cancelled` deliveries (anything but `Pending`). The retention sweeps skip `Parked` deliveries, like `Pending` ones.
+
+### Webhooks: dashboard
+
+The endpoint table on the Webhooks page is now **Endpoint health**: state, failing since, parked count, last success and failure, success rate and p95 send-to-delivered time over 24 hours, with **Retry now** and **Cancel all**. The delivery list and detail show `Parked` / `Cancelled`, the last attempt's result, and **Cancel**.
+
+### SLO: webhook delivery latency
+
+New objective kind `WebhookDeliveryLatency` (value 12): at least `Percentile`% of an endpoint's deliveries delivered within `TargetValue` minutes of being sent, `Dimension` = the group or `*`. Builder: `o.AddWebhookDeliveryLatency(group, minutes, percentile: 99)`. Read from the delivery rows, so keep the window within `WebhookDeliveryRetention`. See [Webhook delivery latency](features/slo-error-budget.md#webhook-delivery-latency).
+
 ### `RemoveWarpHostedServices()` for an application's own tests
 
 Controller and API tests that boot the app through `WebApplicationFactory` but do not exercise Warp can now start it with no database, or on EF Core in-memory: call `services.RemoveWarpHostedServices()` (`Warp.Core.Testing`) in `ConfigureTestServices`. It removes every hosted service that belongs to a Warp package (workers, server tasks, server registration, heartbeat, background-service host, flushers, seeders, dashboard push, startup checks) and keeps the app's own. Warp's hosted services are recognised by an assembly marker every Warp package carries, not by a list, so new ones are covered. Everything else stays registered: `IMediator` works, and publishing still stages `Job` rows on the app's context; nothing runs them.
@@ -25,6 +90,16 @@ The provider packages coordinate this through a new public type, `WarpStartupGat
 ### Startup checks stand down on a non-relational context
 
 The PostgreSQL time-column and server-version checks, the SQL Server compatibility-level check and the storage-type check on Warp's columns now skip, with a `Debug` log, when the application's context runs on another provider (EF in-memory in a test, for example). Before, the PostgreSQL time-column check failed the host with `Relational-specific methods can only be used when the context is using a relational database provider.`
+
+### Migration (8.1)
+
+Generate it with your normal `dotnet ef migrations add <Name>` and apply it before any 8.1 process starts (an 8.1 server reads and writes the new columns). It contains, all additive:
+
+- On the webhook delivery table: `LastStatusCode` (int, null), `LastFailureReason` (int, null), `LastAttemptAt` (timestamp, null), `TrackEndpointHealth` (bool, not null, default false), `DedupeKey` (string(64), null), a unique index on `DedupeKey` (filtered to non-null values on SQL Server; PostgreSQL treats nulls as distinct), and an index on `(GroupName, Status, CreatedAt)`.
+- An index on the rate-limit bucket table's `UpdatedAt` (for the stale-bucket sweep).
+- A new table for `WebhookEndpoint` (key `Name`, string(200); `State`, `FailingSince`, `LastSuccessAt`, `LastFailureAt`, `NextProbeAt`, `StillFailingNotifiedAt`, `CreatedAt`) with an index on `(State, NextProbeAt)`.
+
+A rolling deploy from 8.0 is safe after the migration: an 8.0 server ignores the new columns and never parks, and 8.0 deliveries carry `TrackEndpointHealth = false`. While 8.0 servers still run, their retention sweep treats `Parked` as settled and may delete a parked delivery once its `ExpireAt` passes (30 days after it was sent by default). Do not roll back to 8.0 while deliveries are `Parked` or `Cancelled`: 8.0 does not know those statuses.
 
 ## 8.0.0
 

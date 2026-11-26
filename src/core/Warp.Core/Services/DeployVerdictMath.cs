@@ -168,6 +168,7 @@ internal static class DeployVerdictMath
         {
             SloKind.MetricGaugeThreshold => $"{Percent(slo.Attainment)} compliant",
             SloKind.MetricLatency => $"{Percent(slo.Attainment)} ≤ {Plain(slo.TargetValue)}",
+            SloKind.WebhookDeliveryLatency => $"{Percent(slo.Attainment)} delivered within {Plain(slo.TargetValue)} min",
             SloKind.MetricRatio when slo.BaselineDays is not null => $"a drop of {Points(slo.Attainment)}",
             SloKind.MetricVolumeFloor => $"{Percent(slo.Attainment)} of baseline",
             _ => ObjectiveValue(slo.Kind, slo.Attainment),
@@ -186,6 +187,7 @@ internal static class DeployVerdictMath
             SloKind.MetricGaugeThreshold
                 => $"{GaugeAggregate(slo.GaugeAggregate)} {(slo.Comparison == SloComparison.AtLeast ? "≥" : "≤")} {Plain(slo.TargetValue)} in {percentile}%",
             SloKind.MetricLatency => $"p{percentile} ≤ {Plain(slo.TargetValue)}",
+            SloKind.WebhookDeliveryLatency => $"{percentile}% delivered within {Plain(slo.TargetValue)} min",
             SloKind.MetricRatio when slo.BaselineDays is { } days
                 => $"a drop of at most {Points(slo.TargetValue)} from the {days.ToString(CultureInfo.InvariantCulture)}-day baseline",
             SloKind.MetricVolumeFloor => $"≥ {Percent(slo.TargetValue)} of baseline",
@@ -436,7 +438,7 @@ internal static class DeployVerdictMath
     };
 
     // The kinds whose attainment is the share of events (latency) or observed time (gauge) on the right side of a threshold.
-    private static bool SharesWithinThreshold(SloKind kind) => kind is SloKind.MetricLatency or SloKind.MetricGaugeThreshold;
+    private static bool SharesWithinThreshold(SloKind kind) => kind is SloKind.MetricLatency or SloKind.MetricGaugeThreshold or SloKind.WebhookDeliveryLatency;
 
     // sloDisplay.formatObjectiveValue: rate kinds as a percentage, count kinds rounded, the job latency kinds in ms.
     private static string ObjectiveValue(SloKind kind, double value) => kind switch
