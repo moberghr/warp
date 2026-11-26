@@ -89,6 +89,7 @@ const sidebars: SidebarsConfig = {
         "operations/crash-recovery",
         "operations/dashboard-auth",
         "operations/multi-project-source-gen",
+        "operations/testing-apps",
       ],
     },
     {

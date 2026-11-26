@@ -28,7 +28,10 @@ public sealed class ServerTaskHost<TContext> : BackgroundService
     private readonly ClusterTaskScheduler<TContext>? _scheduler;
     private readonly List<PerServerTaskLoop<TContext>> _perServer = [];
     private readonly List<IDisposable> _signalSubscriptions = [];
+    private readonly WarpStartupGate? _startupGate;
 
+    // The 8.0 constructor, kept so code built against it still binds. Without a startup gate the host behaves as
+    // if registration had completed in StartAsync (RequireDatabaseAtStartup on).
     public ServerTaskHost(
         IServiceScopeFactory scopes,
         IWarpLockProvider lockProvider,
@@ -36,7 +39,20 @@ public sealed class ServerTaskHost<TContext> : BackgroundService
         ILoggerFactory loggerFactory,
         IOptions<WarpServerConfiguration> configuration,
         ServerTaskSignals<TContext> signals)
+        : this(scopes, lockProvider, time, loggerFactory, configuration, signals, startupGate: null)
     {
+    }
+
+    public ServerTaskHost(
+        IServiceScopeFactory scopes,
+        IWarpLockProvider lockProvider,
+        [FromKeyedServices(DatabaseClock.Key)] TimeProvider time,
+        ILoggerFactory loggerFactory,
+        IOptions<WarpServerConfiguration> configuration,
+        ServerTaskSignals<TContext> signals,
+        WarpStartupGate? startupGate)
+    {
+        _startupGate = startupGate;
         var logger = loggerFactory.CreateLogger<ServerTaskHost<TContext>>();
         var signalInterval = configuration.Value.ServerTaskSignalInterval ?? TimeSpan.Zero;
         _runner = new ServerTaskRunner<TContext>(scopes, lockProvider);
@@ -103,6 +119,13 @@ public sealed class ServerTaskHost<TContext> : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Not before the server is registered: with RequireDatabaseAtStartup off and the database unreachable at
+        // startup, registration retries in the background and this loop starts when it succeeds.
+        if (!await WarpStartupGate.WaitForServerAsync(_startupGate, stoppingToken))
+        {
+            return;
+        }
+
         var loops = _perServer.ConvertAll(x => x.RunAsync(stoppingToken));
         if (_scheduler != null)
         {

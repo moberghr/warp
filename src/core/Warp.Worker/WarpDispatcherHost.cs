@@ -37,8 +37,11 @@ public class WarpDispatcherHost<TContext> : IHostedService
     private readonly ILoggerFactory _loggerFactory;
     private readonly IDatabaseExceptionClassifier _exceptionClassifier;
     private readonly List<BackgroundService> _workers = [];
+    private readonly GatedStart _gatedStart;
     private readonly List<CompletionFlusher<TContext>> _flushers = [];
 
+    // The 8.0 constructor, kept so code built against it still binds. Without a startup gate the host behaves as
+    // if registration had completed in StartAsync (RequireDatabaseAtStartup on).
     public WarpDispatcherHost(
         IOptions<WarpServerConfiguration> configuration,
         IServiceScopeFactory serviceScopeFactory,
@@ -52,7 +55,26 @@ public class WarpDispatcherHost<TContext> : IHostedService
         IDatabaseExceptionClassifier exceptionClassifier,
         WarpCounterBuffer counterBuffer,
         IWarpSqlQueries<TContext> sqlQueries)
+        : this(configuration, serviceScopeFactory, timeProvider, pauseStateHolder, notificationTransport, state, signals, dispatcherRegistry, loggerFactory, exceptionClassifier, counterBuffer, sqlQueries, startupGate: null)
     {
+    }
+
+    public WarpDispatcherHost(
+        IOptions<WarpServerConfiguration> configuration,
+        IServiceScopeFactory serviceScopeFactory,
+        [FromKeyedServices(DatabaseClock.Key)] TimeProvider timeProvider,
+        PauseStateHolder pauseStateHolder,
+        IWarpNotificationTransport notificationTransport,
+        ServerRegistrationState state,
+        ServerTaskSignals<TContext> signals,
+        DispatcherRegistry dispatcherRegistry,
+        ILoggerFactory loggerFactory,
+        IDatabaseExceptionClassifier exceptionClassifier,
+        WarpCounterBuffer counterBuffer,
+        IWarpSqlQueries<TContext> sqlQueries,
+        WarpStartupGate? startupGate)
+    {
+        _gatedStart = new GatedStart(startupGate, loggerFactory.CreateLogger<WarpDispatcherHost<TContext>>());
         _counterBuffer = counterBuffer;
         _sqlQueries = sqlQueries;
         _configuration = configuration.Value;
@@ -68,13 +90,31 @@ public class WarpDispatcherHost<TContext> : IHostedService
         _exceptionClassifier = exceptionClassifier;
     }
 
-    public async Task StartAsync(CancellationToken cancellationToken)
-    {
-        if (!_configuration.UseDispatcher)
-        {
-            return;
-        }
+    // Starts the dispatchers once the server is registered: now, or (RequireDatabaseAtStartup off, database
+    // unreachable) when the background registration succeeds.
+    public Task StartAsync(CancellationToken cancellationToken) =>
+        _configuration.UseDispatcher
+            ? _gatedStart.StartAsync(StartDispatchersAsync, cancellationToken)
+            : Task.CompletedTask;
 
+    public async Task StopAsync(CancellationToken cancellationToken)
+    {
+        await _gatedStart.StopAsync();
+
+        var tasks = _workers.Select(x => x.StopAsync(cancellationToken));
+        await Task.WhenAll(tasks);
+
+        // Only once every worker has stopped: nothing is added after this, and the final flush writes
+        // the last completions.
+        await Task.WhenAll(_flushers.Select(x => x.StopAsync(cancellationToken)));
+        foreach (var flusher in _flushers)
+        {
+            flusher.Dispose();
+        }
+    }
+
+    private async Task StartDispatchersAsync(CancellationToken cancellationToken)
+    {
         foreach (var registration in _state.Groups)
         {
             var dispatcher = new WarpDispatcher<TContext>(
@@ -140,20 +180,6 @@ public class WarpDispatcherHost<TContext> : IHostedService
                 await worker.StartAsync(cancellationToken);
                 _workers.Add(worker);
             }
-        }
-    }
-
-    public async Task StopAsync(CancellationToken cancellationToken)
-    {
-        var tasks = _workers.Select(x => x.StopAsync(cancellationToken));
-        await Task.WhenAll(tasks);
-
-        // Only once every worker has stopped: nothing is added after this, and the final flush writes
-        // the last completions.
-        await Task.WhenAll(_flushers.Select(x => x.StopAsync(cancellationToken)));
-        foreach (var flusher in _flushers)
-        {
-            flusher.Dispose();
         }
     }
 }

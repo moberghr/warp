@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 using Warp.Core;
 using Warp.Core.Entities;
@@ -68,7 +69,7 @@ public sealed class WarpModelExtensionsTests
     public async Task ValidationService_Throws_WhenModelMissing()
     {
         await using var provider = BuildProvider<BareContext>();
-        var service = new WarpModelValidationService<BareContext>(provider.GetRequiredService<IServiceScopeFactory>());
+        var service = new WarpModelValidationService<BareContext>(provider.GetRequiredService<IServiceScopeFactory>(), NullLogger<WarpModelValidationService<BareContext>>.Instance);
 
         await Should.ThrowAsync<InvalidOperationException>(() => service.StartAsync(CancellationToken.None));
     }
@@ -77,7 +78,7 @@ public sealed class WarpModelExtensionsTests
     public async Task ValidationService_Passes_WhenModelPresent()
     {
         await using var provider = BuildProvider<AppliedContext>();
-        var service = new WarpModelValidationService<AppliedContext>(provider.GetRequiredService<IServiceScopeFactory>());
+        var service = new WarpModelValidationService<AppliedContext>(provider.GetRequiredService<IServiceScopeFactory>(), NullLogger<WarpModelValidationService<AppliedContext>>.Instance);
 
         await Should.NotThrowAsync(() => service.StartAsync(CancellationToken.None));
     }

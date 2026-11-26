@@ -35,7 +35,10 @@ public class WarpSingleWorkerHost<TContext> : IHostedService
     private readonly WarpCounterBuffer _counterBuffer;
     private readonly ILoggerFactory _loggerFactory;
     private readonly List<BackgroundService> _workers = [];
+    private readonly GatedStart _gatedStart;
 
+    // The 8.0 constructor, kept so code built against it still binds. Without a startup gate the host behaves as
+    // if registration had completed in StartAsync (RequireDatabaseAtStartup on).
     public WarpSingleWorkerHost(
         IOptions<WarpServerConfiguration> configuration,
         IServiceScopeFactory serviceScopeFactory,
@@ -47,7 +50,24 @@ public class WarpSingleWorkerHost<TContext> : IHostedService
         ServerTaskSignals<TContext> signals,
         ILoggerFactory loggerFactory,
         WarpCounterBuffer counterBuffer)
+        : this(configuration, serviceScopeFactory, timeProvider, pauseStateHolder, notificationTransport, sqlQueries, state, signals, loggerFactory, counterBuffer, startupGate: null)
     {
+    }
+
+    public WarpSingleWorkerHost(
+        IOptions<WarpServerConfiguration> configuration,
+        IServiceScopeFactory serviceScopeFactory,
+        [FromKeyedServices(DatabaseClock.Key)] TimeProvider timeProvider,
+        PauseStateHolder pauseStateHolder,
+        IWarpNotificationTransport notificationTransport,
+        IWarpSqlQueries<TContext> sqlQueries,
+        ServerRegistrationState state,
+        ServerTaskSignals<TContext> signals,
+        ILoggerFactory loggerFactory,
+        WarpCounterBuffer counterBuffer,
+        WarpStartupGate? startupGate)
+    {
+        _gatedStart = new GatedStart(startupGate, loggerFactory.CreateLogger<WarpSingleWorkerHost<TContext>>());
         _counterBuffer = counterBuffer;
         _configuration = configuration.Value;
         _configurationOptions = configuration;
@@ -61,13 +81,23 @@ public class WarpSingleWorkerHost<TContext> : IHostedService
         _loggerFactory = loggerFactory;
     }
 
-    public async Task StartAsync(CancellationToken cancellationToken)
-    {
-        if (_configuration.UseDispatcher)
-        {
-            return;
-        }
+    // Starts the workers once the server is registered: now, or (RequireDatabaseAtStartup off, database
+    // unreachable) when the background registration succeeds.
+    public Task StartAsync(CancellationToken cancellationToken) =>
+        _configuration.UseDispatcher
+            ? Task.CompletedTask
+            : _gatedStart.StartAsync(StartWorkersAsync, cancellationToken);
 
+    public async Task StopAsync(CancellationToken cancellationToken)
+    {
+        await _gatedStart.StopAsync();
+
+        var tasks = _workers.Select(x => x.StopAsync(cancellationToken));
+        await Task.WhenAll(tasks);
+    }
+
+    private async Task StartWorkersAsync(CancellationToken cancellationToken)
+    {
         // No "push without dispatcher" warning: a cross-server JobEnqueued push reaches every bare worker too. The
         // listener (NotificationListenerTask) fires ServerTaskSignals.SignalJobEnqueued, which each WarpWorker subscribes
         // to, as well as the dispatcher wake (§2.9).
@@ -109,11 +139,5 @@ public class WarpSingleWorkerHost<TContext> : IHostedService
                 _workers.Add(worker);
             }
         }
-    }
-
-    public async Task StopAsync(CancellationToken cancellationToken)
-    {
-        var tasks = _workers.Select(x => x.StopAsync(cancellationToken));
-        await Task.WhenAll(tasks);
     }
 }
