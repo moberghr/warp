@@ -15,6 +15,7 @@ using Warp.Core.Webhooks;
 using Warp.Dashboard;
 using Warp.Dashboard.Endpoints;
 using Warp.Tests.Fixtures;
+using Warp.Tests.Helpers;
 
 namespace Warp.Tests.Webhooks;
 
@@ -175,7 +176,7 @@ public abstract class WebhookEndpointHealthRouteTestsBase : IAsyncLifetime
         app.MapWarpApiEndpoints(new WarpDashboardOptions(), []);
         await app.StartAsync(CancellationToken.None);
 
-        return new EndpointHost(app, app.GetTestClient());
+        return new EndpointHost(app, app.GetDashboardTestClient());
     }
 
     private async Task SeedEndpointAsync()

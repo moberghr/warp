@@ -49,8 +49,9 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
         await first.PassAsync(Ct);
         (await task.Barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue("the first server did not run the task");
         await second.PassAsync(Ct);
+        var running = first.RunningTask(PinnedTask.TaskName) ?? throw new InvalidOperationException("the first server is not running the task");
         task.Barrier.CanFinish.Release();
-        await first.RunningTask(PinnedTask.TaskName)!;
+        await running;
 
         // Assert
         task.Runs.ShouldBe(1);
@@ -92,7 +93,7 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
         // Assert
         sleep.ShouldBeLessThanOrEqualTo(TimeSpan.FromSeconds(15));
         sleep.ShouldBeGreaterThan(TimeSpan.FromSeconds(4));
-        await scheduler.RunningTask(IdleTask.TaskName)!;
+        await (scheduler.RunningTask(IdleTask.TaskName) ?? Task.CompletedTask);
     }
 
     [TimedFact]
@@ -324,10 +325,10 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
         scheduler.Signal(PinnedTask.TaskName);
         await scheduler.PassAsync(Ct);
         task.Barrier.CanFinish.Release();
-        await scheduler.RunningTask(PinnedTask.TaskName)!;
+        await (scheduler.RunningTask(PinnedTask.TaskName) ?? Task.CompletedTask);
         task.Barrier.CanFinish.Release();
         await scheduler.PassAsync(Ct);
-        await scheduler.RunningTask(PinnedTask.TaskName)!;
+        await (scheduler.RunningTask(PinnedTask.TaskName) ?? Task.CompletedTask);
 
         // Assert: run again although its next scheduled run is an hour away.
         task.Runs.ShouldBe(2);
@@ -361,7 +362,7 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
 
         // Assert: when the hold ends the completion makes the task due, and the next pass reruns it.
         clock.Advance(TimeSpan.FromMinutes(30));
-        await first.RunningTask(SignaledTask.TaskName)!;
+        await (first.RunningTask(SignaledTask.TaskName) ?? Task.CompletedTask);
         await RunOnceAsync(first, SignaledTask.TaskName);
         task.Runs.ShouldBe(2);
     }
@@ -401,7 +402,7 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
         }
 
         // Assert
-        await scheduler.RunningTask(PinnedTask.TaskName)!.WaitAsync(TimeSpan.FromSeconds(5), Ct);
+        await (scheduler.RunningTask(PinnedTask.TaskName) ?? Task.CompletedTask).WaitAsync(TimeSpan.FromSeconds(5), Ct);
         task.Cancelled.ShouldBeTrue();
     }
 

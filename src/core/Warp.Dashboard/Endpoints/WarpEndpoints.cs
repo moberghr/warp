@@ -36,6 +36,11 @@ public static class WarpEndpoints
         // convention that reaches these endpoints (WithWarpObservability on the dashboard builder).
         apiGroup.WithMetadata(new ExcludeFromWarpObservabilityAttribute());
 
+        // Every state-changing API call must carry the SPA's request header (WarpRequestHeaderGuard). Applied here,
+        // not in MapWarpDashboard, so a host that maps the API through this method directly gets it too; it is a
+        // group convention, so the login/logout endpoints MapWarpDashboard adds to the group later are covered.
+        apiGroup.RequireRequestHeader();
+
         // Pin the dashboard's own JSON shape (camelCase, numeric enums) instead of inheriting the
         // host's process-wide ConfigureHttpJsonOptions — see WarpDashboardJson. Registered first so it
         // wraps every route under the prefix, extension sub-groups included.
