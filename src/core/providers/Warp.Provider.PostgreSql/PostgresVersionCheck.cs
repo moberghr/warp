@@ -40,19 +40,23 @@ internal static class PostgresVersionCheck
 
 // Runs the check when a Warp server starts. A process that only publishes (AddWarp) claims nothing, so it is
 // left alone. The query goes through the application's context so a host's own data source is honoured.
-// A context on another provider (EF in-memory in an application's own tests) has no server to ask.
+// A context on another provider (EF in-memory in an application's own tests) has no server to ask. With
+// RequireDatabaseAtStartup off, an unreachable server defers the check through the startup gate, and the server
+// registration waits for it to pass.
 internal sealed class PostgresVersionCheckService<TContext> : IHostedService
     where TContext : DbContext
 {
     private readonly IServiceScopeFactory _scopes;
     private readonly IEnumerable<IWarpServerPresence> _servers;
     private readonly ILogger<PostgresVersionCheckService<TContext>> _logger;
+    private readonly WarpStartupGate _gate;
 
-    public PostgresVersionCheckService(IServiceScopeFactory scopes, IEnumerable<IWarpServerPresence> servers, ILogger<PostgresVersionCheckService<TContext>> logger)
+    public PostgresVersionCheckService(IServiceScopeFactory scopes, IEnumerable<IWarpServerPresence> servers, ILogger<PostgresVersionCheckService<TContext>> logger, WarpStartupGate gate)
     {
         _scopes = scopes;
         _servers = servers;
         _logger = logger;
+        _gate = gate;
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -74,8 +78,20 @@ internal sealed class PostgresVersionCheckService<TContext> : IHostedService
             return;
         }
 
-        await PostgresVersionCheck.EnsureAsync(context, cancellationToken);
+        await _gate.RunCheckAsync("PostgreSQL version check", EnsureAsync, _logger, cancellationToken, ProbeAsync);
     }
 
-    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    public Task StopAsync(CancellationToken cancellationToken) => _gate.StopAsync();
+
+    private async Task ProbeAsync(CancellationToken cancellationToken)
+    {
+        await using var scope = _scopes.CreateAsyncScope();
+        await WarpStartupGate.ProbeConnectionAsync(scope.ServiceProvider.GetRequiredService<TContext>(), cancellationToken);
+    }
+
+    private async Task EnsureAsync(CancellationToken cancellationToken)
+    {
+        await using var scope = _scopes.CreateAsyncScope();
+        await PostgresVersionCheck.EnsureAsync(scope.ServiceProvider.GetRequiredService<TContext>(), cancellationToken);
+    }
 }

@@ -28,14 +28,29 @@ public class NotificationListenerTask<TContext> : BackgroundService
     private readonly ServerTaskSignals<TContext> _signals;
     private readonly IReadOnlyList<IDispatcherWake> _dispatcherWakes;
     private readonly ILogger<NotificationListenerTask<TContext>> _logger;
+    private readonly WarpStartupGate? _startupGate;
 
+    // The 8.0 constructor, kept so code built against it still binds. Without a startup gate the host behaves as
+    // if registration had completed in StartAsync (RequireDatabaseAtStartup on).
     public NotificationListenerTask(
         IWarpNotificationTransport transport,
         WarpDatabasePushConfiguration options,
         ServerTaskSignals<TContext> signals,
         IEnumerable<IDispatcherWake> dispatcherWakes,
         ILogger<NotificationListenerTask<TContext>> logger)
+        : this(transport, options, signals, dispatcherWakes, logger, startupGate: null)
     {
+    }
+
+    public NotificationListenerTask(
+        IWarpNotificationTransport transport,
+        WarpDatabasePushConfiguration options,
+        ServerTaskSignals<TContext> signals,
+        IEnumerable<IDispatcherWake> dispatcherWakes,
+        ILogger<NotificationListenerTask<TContext>> logger,
+        WarpStartupGate? startupGate)
+    {
+        _startupGate = startupGate;
         _transport = transport;
         _options = options;
         _signals = signals;
@@ -48,6 +63,13 @@ public class NotificationListenerTask<TContext> : BackgroundService
         if (_transport is NullNotificationTransport)
         {
             _logger.LogWarning("NotificationListenerTask started but no real transport is registered; listener will idle.");
+            return;
+        }
+
+        // Not before the server is registered: with RequireDatabaseAtStartup off and the database unreachable at
+        // startup, registration retries in the background and the listener connects when it succeeds.
+        if (!await WarpStartupGate.WaitForServerAsync(_startupGate, stoppingToken))
+        {
             return;
         }
 

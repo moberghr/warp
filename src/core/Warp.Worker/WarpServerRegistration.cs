@@ -16,7 +16,12 @@ namespace Warp.Worker;
 /// Registers the Server, WorkerGroup, and Worker rows in the database on startup and removes
 /// them on graceful shutdown. Populates <see cref="ServerRegistrationState"/> with the generated
 /// IDs so the worker host services can find them without re-querying. Also initializes
-/// <see cref="PauseStateHolder"/>.
+/// <see cref="PauseStateHolder"/>, then opens the <see cref="WarpStartupGate"/> the server's loops wait on.
+/// <para>
+/// Runs through the gate: with <see cref="WarpConfiguration.RequireDatabaseAtStartup"/> off and the database
+/// unreachable, registration is retried in the background (after any deferred provider check) and the host
+/// starts; the loops start when it succeeds.
+/// </para>
 /// </summary>
 public class WarpServerRegistration<TContext> : IHostedService
     where TContext : DbContext
@@ -28,7 +33,18 @@ public class WarpServerRegistration<TContext> : IHostedService
     private readonly PauseStateHolder _pauseStateHolder;
     private readonly ServerRegistrationState _state;
     private readonly ILogger<WarpServerRegistration<TContext>> _logger;
+    private readonly WarpStartupGate _gate;
 
+    // Set once the Server/WorkerGroup/Worker rows are committed: a retry after a later step failed does not insert
+    // them again, and StopAsync deletes only rows that were written.
+    private List<ServerRegistrationState.GroupRegistration>? _registrations;
+
+    // Attempts that may have committed rows without this process knowing (a connection lost after COMMIT): the next
+    // attempt removes this server's rows before writing them again.
+    private bool _rowsMayExist;
+
+    // The 8.0 constructor, kept so code built against it still binds. Without a startup gate the host behaves as
+    // if registration had completed in StartAsync (RequireDatabaseAtStartup on).
     public WarpServerRegistration(
         IOptions<WarpServerConfiguration> configuration,
         IOptions<WarpConfiguration> resolvedConfiguration,
@@ -37,6 +53,19 @@ public class WarpServerRegistration<TContext> : IHostedService
         PauseStateHolder pauseStateHolder,
         ServerRegistrationState state,
         ILogger<WarpServerRegistration<TContext>>? logger = null)
+        : this(configuration, resolvedConfiguration, serviceScopeFactory, timeProvider, pauseStateHolder, state, logger, startupGate: null)
+    {
+    }
+
+    public WarpServerRegistration(
+        IOptions<WarpServerConfiguration> configuration,
+        IOptions<WarpConfiguration> resolvedConfiguration,
+        IServiceScopeFactory serviceScopeFactory,
+        [FromKeyedServices(DatabaseClock.Key)] TimeProvider timeProvider,
+        PauseStateHolder pauseStateHolder,
+        ServerRegistrationState state,
+        ILogger<WarpServerRegistration<TContext>>? logger,
+        WarpStartupGate? startupGate)
     {
         _configuration = configuration.Value;
         _resolvedConfiguration = resolvedConfiguration.Value;
@@ -45,9 +74,47 @@ public class WarpServerRegistration<TContext> : IHostedService
         _pauseStateHolder = pauseStateHolder;
         _state = state;
         _logger = logger ?? NullLogger<WarpServerRegistration<TContext>>.Instance;
+        _gate = startupGate ?? new WarpStartupGate(resolvedConfiguration, timeProvider, []);
     }
 
-    public async Task StartAsync(CancellationToken cancellationToken)
+    public Task StartAsync(CancellationToken cancellationToken) =>
+        _gate.RunAfterChecksAsync("server registration", RegisterAsync, _logger, cancellationToken, ProbeAsync);
+
+    public async Task StopAsync(CancellationToken cancellationToken)
+    {
+        // A registration still retrying is stopped first; a server that never reached its write has nothing to remove.
+        await _gate.StopAsync();
+        if (!_rowsMayExist)
+        {
+            return;
+        }
+
+        if (_registrations is not null)
+        {
+            await DeregisterAsync();
+
+            return;
+        }
+
+        // A write that failed, possibly after it committed (RequireDatabaseAtStartup off): removing what may be there
+        // is best effort, and the database may still be down.
+        try
+        {
+            await DeregisterAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Warp could not remove the rows of server {ServerId}, whose registration never completed, on shutdown.", _configuration.ServerId);
+        }
+    }
+
+    private async Task ProbeAsync(CancellationToken cancellationToken)
+    {
+        using var scope = _serviceScopeFactory.CreateScope();
+        await WarpStartupGate.ProbeConnectionAsync(scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context, cancellationToken);
+    }
+
+    private async Task RegisterAsync(CancellationToken cancellationToken)
     {
         // A service-only server (RunWorker = false, set by DisableWorker()) creates no worker
         // groups or workers at all, regardless of WorkerCount / AddWorkerGroup. When the worker
@@ -64,10 +131,66 @@ public class WarpServerRegistration<TContext> : IHostedService
         var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
         var now = _timeProvider.GetUtcNow().UtcDateTime;
 
+        if (_registrations is null)
+        {
+            if (_rowsMayExist)
+            {
+                await RemoveRowsAsync(context, cancellationToken);
+            }
+
+            _rowsMayExist = true;
+            _registrations = await WriteRowsAsync(context, workerGroups, totalWorkerCount, now, cancellationToken);
+        }
+
+        await MeasureClockAsync(scope.ServiceProvider, context, cancellationToken);
+
+        await RecordDeployAsync(context, now, cancellationToken);
+
+        _state.Set(_registrations);
+
+        // Initialize PauseStateHolder from DB before workers start, so they never see a stale
+        // "not paused" default on startup.
+        var groupPauseStates = _registrations.ToDictionary(x => x.GroupEntityId, _ => false);
+        _pauseStateHolder.Update(false, groupPauseStates);
+
+        _gate.Open();
+    }
+
+    // Only on a retry (RequireDatabaseAtStartup off): a first start has nothing to remove, and pays no query.
+    private async Task RemoveRowsAsync(DbContext context, CancellationToken cancellationToken)
+    {
+        var server = await context.Set<Server>().FindAsync([_configuration.ServerId], cancellationToken);
+        if (server is null)
+        {
+            return;
+        }
+
+        context.Set<Warp.Core.Data.Entities.Worker>().RemoveRange(
+            await context.Set<Warp.Core.Data.Entities.Worker>()
+                .Where(x => x.ServerId == server.Id)
+                .ToListAsync(cancellationToken));
+        context.Set<Warp.Core.Data.Entities.WorkerGroup>().RemoveRange(
+            await context.Set<Warp.Core.Data.Entities.WorkerGroup>()
+                .Where(x => x.ServerId == server.Id)
+                .ToListAsync(cancellationToken));
+        context.Set<Server>().Remove(server);
+        await context.SaveChangesAsync(cancellationToken);
+        context.ChangeTracker.Clear();
+    }
+
+    private string ServerName => _configuration.ServerName ?? $"{Environment.MachineName}.{_configuration.ServerId}";
+
+    private async Task<List<ServerRegistrationState.GroupRegistration>> WriteRowsAsync(
+        DbContext context,
+        List<WorkerGroupConfiguration> workerGroups,
+        int totalWorkerCount,
+        DateTime now,
+        CancellationToken cancellationToken)
+    {
         var server = new Server
         {
             Id = _configuration.ServerId,
-            ServerName = _configuration.ServerName ?? $"{Environment.MachineName}.{_configuration.ServerId}",
+            ServerName = ServerName,
             Application = _configuration.ApplicationName,
             Version = _configuration.ApplicationVersion,
             Environment = _configuration.ApplicationEnvironment,
@@ -143,19 +266,10 @@ public class WarpServerRegistration<TContext> : IHostedService
 
         await context.SaveChangesAsync(cancellationToken);
 
-        await MeasureClockAsync(scope.ServiceProvider, context, cancellationToken);
-
-        await RecordDeployAsync(context, server, now, cancellationToken);
-
-        _state.Set(registrations);
-
-        // Initialize PauseStateHolder from DB before workers start, so they never see a stale
-        // "not paused" default on startup.
-        var groupPauseStates = registrations.ToDictionary(x => x.GroupEntityId, _ => false);
-        _pauseStateHolder.Update(false, groupPauseStates);
+        return registrations;
     }
 
-    public async Task StopAsync(CancellationToken cancellationToken)
+    private async Task DeregisterAsync()
     {
         // Cleanup must happen even if the shutdown token is already cancelled — otherwise stale
         // Server/Worker/WorkerGroup rows are left behind. In production this happens when the
@@ -209,15 +323,15 @@ public class WarpServerRegistration<TContext> : IHostedService
     // A server is an application instance (§8.23), so its registration records a deploy when it is the first instance
     // of a new ApplicationVersion — after the Server row committed, in its own SaveChanges, so a duplicate-key race
     // never rolls registration back. Deploy history is a diagnostic: any other failure is logged, never fatal.
-    private async Task RecordDeployAsync(DbContext context, Server server, DateTime now, CancellationToken ct)
+    private async Task RecordDeployAsync(DbContext context, DateTime now, CancellationToken ct)
     {
         try
         {
-            await ApplicationDeployRecorder.RecordAsync(context, _configuration, server.Id, server.ServerName, now, ct);
+            await ApplicationDeployRecorder.RecordAsync(context, _configuration, _configuration.ServerId, ServerName, now, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogWarning(ex, "Failed to record the deploy of application version {Version} for server {ServerId}.", _configuration.ApplicationVersion, server.Id);
+            _logger.LogWarning(ex, "Failed to record the deploy of application version {Version} for server {ServerId}.", _configuration.ApplicationVersion, _configuration.ServerId);
         }
     }
 

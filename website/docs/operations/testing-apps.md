@@ -43,6 +43,29 @@ What that gives you:
   Without the second `RemoveAll`, EF Core fails with "Services for database providers ... have been registered". Compute the database name once, outside the lambda, if several scopes of one test should see the same data: the lambda runs per scope.
 - **Everything else Warp registered stays.** `IMediator` works as in production. Publishing still stages `Job` rows on whatever context the app uses and saves them with it (on in-memory you can read them back with `context.Set<Job>()`), but nothing runs them: no worker, no message routing, no scheduling.
 
+### Or: let Warp start without the database
+
+Instead of removing Warp's hosted services, a test can keep them and let them wait: set [`RequireDatabaseAtStartup = false`](configuration.md#starting-without-the-database). The host starts, Warp logs one Warning that it could not reach the database, and its server (registration, workers, server tasks, background services) waits in the background and retries quietly at Debug until the database is reachable, which in such a test is never. Stopping the host is clean.
+
+The setting is code, on the app's own `AddWarp` / `AddWarpServer`, so let the test reach it through configuration:
+
+```csharp
+// Program.cs
+builder.Services.AddWarpServer<AppDbContext>(opt =>
+{
+    opt.UsePostgreSql();
+    opt.BindConfiguration(builder.Configuration.GetSection("Warp"));
+});
+
+// the test's factory
+builder.UseSetting("Warp:RequireDatabaseAtStartup", "false");
+```
+
+Which to use:
+
+- `RemoveWarpHostedServices()` takes Warp's background work out of the test entirely: nothing tries the database, and it also works when the context is EF Core in-memory.
+- `RequireDatabaseAtStartup = false` changes nothing in the app's registrations and also serves production (a service started before its database). It needs a relational provider: on an EF Core in-memory context the server cannot register at all, so use `RemoveWarpHostedServices()` there.
+
 ## Tests that need jobs to run: a real database
 
 When the test is about what a job does once it runs (a handler's effect, a message's fan-out, retries, a mutex, a saga, a schedule), run the real server against a real database. Keep the app exactly as it is and point it at a container with [Testcontainers](https://dotnet.testcontainers.org/):
@@ -71,4 +94,4 @@ Apply your migrations when the factory starts (they include Warp's tables) and r
 
 Without `RemoveWarpHostedServices()`, Warp checks a few things when the host starts. The checks that read the database or its column types skip, with a `Debug` log, when your context runs on a provider they do not apply to (EF in-memory, or the other database): the storage-type check on Warp's columns, the PostgreSQL time-column and server-version checks, and the SQL Server compatibility-level check. The check that Warp's model is on your context is provider-agnostic and still runs.
 
-Skipping the checks is not enough to run a server on EF in-memory: `AddWarpServer`'s workers and server tasks use transactions, bulk updates and provider SQL that only a relational database supports. Remove the hosted services, or use a real database.
+Skipping the checks is not enough to run a server on EF in-memory: `AddWarpServer`'s workers and server tasks use transactions, bulk updates and provider SQL that only a relational database supports. Remove the hosted services, or use a real database. [`RequireDatabaseAtStartup = false`](configuration.md#starting-without-the-database) is about an unreachable database, not a non-relational one.

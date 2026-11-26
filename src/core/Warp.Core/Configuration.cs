@@ -36,6 +36,28 @@ public class WarpConfiguration
     public bool WarnOnUnsavedStagedJobs { get; set; } = true;
 
     /// <summary>
+    /// Whether the host refuses to start when Warp cannot reach the database at startup. Default <c>true</c>:
+    /// server registration, the application-instance registration and the provider's server checks throw from
+    /// <c>StartAsync</c>, as before.
+    /// <para>
+    /// <c>false</c>: a startup step that fails because the database is unreachable (a connection, socket or
+    /// timeout failure) logs one Warning with the exception and the host starts. The steps are retried in the
+    /// background with backoff, the provider checks first, then the server registration; repeats log at Debug.
+    /// Until the server is registered, Warp's server does not run (workers, server tasks, background services, the
+    /// counter flusher, the notification listener, the SLO and metric-board seeders); once it is, everything starts
+    /// as if startup had succeeded. Whether a failure means "unreachable" is decided by SQLSTATE on PostgreSQL and
+    /// by error number on SQL Server (<see cref="Data.IDatabaseExceptionClassifier.IsConnectionFailure"/>). Any other failure (a server version Warp does not support, a failed check) still throws at
+    /// startup, and once found by a background retry it is logged at Error and the server stays stopped.
+    /// </para>
+    /// <para>
+    /// For hosts that must come up while their database does not: controller tests that do not exercise Warp,
+    /// or services started before the database in a container group. Publishing is unaffected: it writes on the
+    /// application's own context when the application saves.
+    /// </para>
+    /// </summary>
+    public bool RequireDatabaseAtStartup { get; set; } = true;
+
+    /// <summary>
     /// How long completed and deleted jobs are retained before cleanup.
     /// Failed jobs are never auto-expired.
     /// </summary>

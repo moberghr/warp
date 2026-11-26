@@ -39,7 +39,8 @@ internal static class SqlServerCompatibilityCheck
 
 // Runs the check when a Warp server starts. A process that only publishes (AddWarp) runs none of the
 // statements that need the level, so it is left alone. A context on another provider (EF in-memory in an
-// application's own tests) has no database to ask, so the check stands down.
+// application's own tests) has no database to ask, so the check stands down. With RequireDatabaseAtStartup off,
+// an unreachable server defers the check through the startup gate, and the server registration waits for it.
 internal sealed class SqlServerCompatibilityCheckService<TContext> : IHostedService
     where TContext : DbContext
 {
@@ -47,17 +48,20 @@ internal sealed class SqlServerCompatibilityCheckService<TContext> : IHostedServ
     private readonly IEnumerable<IWarpServerPresence> _servers;
     private readonly IServiceScopeFactory _scopes;
     private readonly ILogger<SqlServerCompatibilityCheckService<TContext>> _logger;
+    private readonly WarpStartupGate _gate;
 
     public SqlServerCompatibilityCheckService(
         WarpDatabaseConnection<TContext> connection,
         IEnumerable<IWarpServerPresence> servers,
         IServiceScopeFactory scopes,
-        ILogger<SqlServerCompatibilityCheckService<TContext>> logger)
+        ILogger<SqlServerCompatibilityCheckService<TContext>> logger,
+        WarpStartupGate gate)
     {
         _connection = connection;
         _servers = servers;
         _scopes = scopes;
         _logger = logger;
+        _gate = gate;
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -79,8 +83,12 @@ internal sealed class SqlServerCompatibilityCheckService<TContext> : IHostedServ
             return;
         }
 
-        await SqlServerCompatibilityCheck.EnsureAsync(_connection.ConnectionString, cancellationToken);
+        await _gate.RunCheckAsync(
+            "SQL Server compatibility-level check",
+            x => SqlServerCompatibilityCheck.EnsureAsync(_connection.ConnectionString, x),
+            _logger,
+            cancellationToken);
     }
 
-    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    public Task StopAsync(CancellationToken cancellationToken) => _gate.StopAsync();
 }

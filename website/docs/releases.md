@@ -16,6 +16,12 @@ If you wrote your own helper that removes hosted services whose assembly name st
 
 See [Testing apps that use Warp](operations/testing-apps.md), which also covers tests that need jobs to run (a real database in a container).
 
+### Starting without the database: `RequireDatabaseAtStartup`
+
+New Core setting, default `true` (unchanged: the host refuses to start while Warp cannot reach the database). Set it to `false` and a startup step that fails because the database is unreachable (server registration, the PostgreSQL version check, the SQL Server compatibility-level check, a non-server process's instance registration) logs one Warning and the host starts. The steps retry in the background with backoff, checks first, logging at Debug; until the server is registered no worker, server task, background service, counter flush, notification listener or SLO / metric-board seeding runs, and after it registers everything starts as usual. Any other startup failure (an unsupported server version, an authentication error) still fails startup. Shutdown while waiting is clean. See [Starting without the database](operations/configuration.md#starting-without-the-database).
+
+The provider packages coordinate this through a new public type, `WarpStartupGate` (Core); applications do not use it. `IDatabaseExceptionClassifier` gains `IsConnectionFailure` with a default implementation, so a custom provider keeps compiling. The hosts whose constructors take the gate keep their 8.0 constructors.
+
 ### Startup checks stand down on a non-relational context
 
 The PostgreSQL time-column and server-version checks, the SQL Server compatibility-level check and the storage-type check on Warp's columns now skip, with a `Debug` log, when the application's context runs on another provider (EF in-memory in a test, for example). Before, the PostgreSQL time-column check failed the host with `Relational-specific methods can only be used when the context is using a relational database provider.`

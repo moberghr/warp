@@ -425,10 +425,12 @@ internal sealed class MetricBoardSeeder<TContext> : IHostedService, IDisposable
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<MetricBoardSeeder<TContext>> _logger;
     private readonly CancellationTokenSource _stopping = new();
+    private readonly GatedStart _gatedStart;
     private Task? _retry;
 
-    public MetricBoardSeeder(IServiceScopeFactory scopeFactory, MetricBoardSeeds seeds, TimeProvider timeProvider, ILogger<MetricBoardSeeder<TContext>> logger)
+    public MetricBoardSeeder(IServiceScopeFactory scopeFactory, MetricBoardSeeds seeds, TimeProvider timeProvider, ILogger<MetricBoardSeeder<TContext>> logger, WarpStartupGate? startupGate = null)
     {
+        _gatedStart = new GatedStart(startupGate, logger);
         _scopeFactory = scopeFactory;
         _seeds = seeds;
         _timeProvider = timeProvider;
@@ -445,7 +447,23 @@ internal sealed class MetricBoardSeeder<TContext> : IHostedService, IDisposable
     // The background retry, null when none was needed (test seam: completes when every pending tile resolved or gave up).
     internal Task? Retry => _retry;
 
-    public async Task StartAsync(CancellationToken cancellationToken)
+    // On a server whose registration is still retrying (RequireDatabaseAtStartup off, database unreachable) the first
+    // pass runs once it registers, rather than spending its retries while the database is down.
+    public Task StartAsync(CancellationToken cancellationToken) => _gatedStart.StartAsync(FirstPassAsync, cancellationToken);
+
+    public async Task StopAsync(CancellationToken cancellationToken)
+    {
+        await _gatedStart.StopAsync();
+        await _stopping.CancelAsync();
+        if (_retry is not null)
+        {
+            await _retry.WaitAsync(cancellationToken).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+        }
+    }
+
+    public void Dispose() => _stopping.Dispose();
+
+    private async Task FirstPassAsync(CancellationToken cancellationToken)
     {
         var pending = await SeedPassAsync(_seeds.Boards, retriesLeft: MetricBoardSeeds.MaxRetries, cancellationToken);
         if (pending.Count == 0)
@@ -457,17 +475,6 @@ internal sealed class MetricBoardSeeder<TContext> : IHostedService, IDisposable
         var timer = new PeriodicTimer(MetricBoardSeeds.RetryInterval, _timeProvider);
         _retry = RetryAsync(timer, pending, _stopping.Token);
     }
-
-    public async Task StopAsync(CancellationToken cancellationToken)
-    {
-        await _stopping.CancelAsync();
-        if (_retry is not null)
-        {
-            await _retry.WaitAsync(cancellationToken).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
-        }
-    }
-
-    public void Dispose() => _stopping.Dispose();
 
     private async Task RetryAsync(PeriodicTimer timer, List<MetricBoardSeed> pending, CancellationToken ct)
     {

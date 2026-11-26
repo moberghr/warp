@@ -341,6 +341,11 @@ public static class ServiceConfiguration
         // (opt.AddNotifier<T>()), DispatchAsync is a cheap no-op. See Warp.Core.Notifiers.
         services.TryAddSingleton<WarpNotifierDispatcher>();
 
+        // Startup coordination for RequireDatabaseAtStartup: runs the database-dependent startup steps (or defers
+        // them while the database is unreachable) and is the gate the server's loops wait on. Open from the start
+        // in a process without a Warp server.
+        services.TryAddSingleton<WarpStartupGate>();
+
         // Fail-fast model validation at host startup (plain IHostedService → awaited to completion
         // before the app starts). AddHostedService dedups via TryAddEnumerable, so the second AddWarp
         // call from AddWarpServer's AddServerHostCore doesn't double-register. The Publisher /

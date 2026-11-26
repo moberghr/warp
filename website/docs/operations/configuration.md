@@ -22,6 +22,31 @@ builder.Services.AddWarp<AppDbContext>(options =>
 | `Schema` | `string?` | `"warp"` | Database schema for all Warp tables. Set to `null` for the database's default schema. |
 | `DefaultQueue` | `string` | `"default"` | Queue used when no queue is specified at publish time. The implicit worker group follows it when `Queues` is left untouched (see the worker options below). |
 | `JobExpirationTimeout` | `TimeSpan` | `1 day` | How long completed/deleted jobs are kept before cleanup. Failed jobs never expire. |
+| `RequireDatabaseAtStartup` | `bool` | `true` | Whether the host refuses to start when Warp cannot reach the database at startup. See [Starting without the database](#starting-without-the-database). |
+
+### Starting without the database
+
+By default a Warp server writes its registration (and checks the server version, on PostgreSQL, or the compatibility level, on SQL Server) inside `StartAsync`, so the host refuses to start while the database is unreachable. A non-server process with `ApplicationName` set does the same for its instance row.
+
+Set `RequireDatabaseAtStartup = false` to let the host come up anyway:
+
+```csharp
+builder.Services.AddWarpServer<AppDbContext>(opt =>
+{
+    opt.UsePostgreSql();
+    opt.RequireDatabaseAtStartup = false;
+});
+```
+
+- A startup step that fails because the database **cannot be reached** (a connection, DNS, socket or timeout failure, a server not accepting connections yet, or a database that does not exist yet) is retried in the background with backoff (1 s doubling to 30 s), the provider's check first, then the registration. PostgreSQL failures are told apart by SQLSTATE, SQL Server ones by error number. The first such failure logs **one Warning** with the exception; the retries log at Debug. Each attempt opens a bare connection first (one pooled connection open, also on a healthy start), so EF Core does not log a connection Error on every attempt.
+- Until the server is registered, Warp's server does not run: no workers, no server tasks, no background services, no counter flusher, no notification listener, and the SLO and metric-board seeders wait too. Once it is registered, everything starts as if startup had succeeded. Dashboard push and the adapter, endpoint and client recording flushers serve your own traffic and already tolerate a database that is down; they are not held back.
+- Any other failure still fails startup: a server version Warp does not support, an authentication or permission error. If a background retry reaches the database and the step then fails, it is logged at Error and the server stays stopped in this process.
+- Stopping the host while it waits is clean: the retries stop and nothing is deregistered, because nothing was registered.
+- Publishing is unaffected: it writes `Job` rows on your own context when you save it, and fails there if the database is down.
+
+Typical uses: an application's controller tests that boot `Program.cs` without a database (see [Testing apps that use Warp](testing-apps.md)), or a service started before its database in a container group.
+
+`RequireDatabaseAtStartup` is a Core setting: set it on either `AddWarp` or `AddWarpServer`.
 
 ### Custom application metrics
 

@@ -30,13 +30,16 @@ internal sealed class CounterBufferFlusher<TContext> : BackgroundService
     private readonly WarpCounterBuffer _buffer;
     private readonly WarpServerConfiguration _configuration;
     private readonly ILogger<CounterBufferFlusher<TContext>> _logger;
+    private readonly WarpStartupGate? _startupGate;
 
     public CounterBufferFlusher(
         IServiceScopeFactory scopeFactory,
         WarpCounterBuffer buffer,
         IOptions<WarpServerConfiguration> configuration,
-        ILogger<CounterBufferFlusher<TContext>> logger)
+        ILogger<CounterBufferFlusher<TContext>> logger,
+        WarpStartupGate? startupGate = null)
     {
+        _startupGate = startupGate;
         _scopeFactory = scopeFactory;
         _buffer = buffer;
         _configuration = configuration.Value;
@@ -45,6 +48,13 @@ internal sealed class CounterBufferFlusher<TContext> : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Not before the server is registered: with RequireDatabaseAtStartup off and the database unreachable at
+        // startup, registration retries in the background and this loop starts when it succeeds.
+        if (!await WarpStartupGate.WaitForServerAsync(_startupGate, stoppingToken))
+        {
+            return;
+        }
+
         var interval = _configuration.CounterBufferFlushInterval;
 
         while (!stoppingToken.IsCancellationRequested)
