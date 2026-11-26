@@ -13,4 +13,11 @@
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
   </PropertyGroup>
+
+  <!-- Marks every Warp package assembly. RemoveWarpHostedServices (Warp.Core.Testing) uses it to tell Warp's
+       own hosted services from the application's, so a new package or hosted service is covered without a
+       hand-kept list. Guard: RemoveWarpHostedServicesTests. -->
+  <ItemGroup>
+    <AssemblyMetadata Include="Warp.Package" Value="true" />
+  </ItemGroup>
 </Project>

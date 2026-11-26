@@ -4,6 +4,22 @@ sidebar_position: 6
 
 # Releases
 
+## 8.1.0
+
+*unreleased*
+
+### `RemoveWarpHostedServices()` for an application's own tests
+
+Controller and API tests that boot the app through `WebApplicationFactory` but do not exercise Warp can now start it with no database, or on EF Core in-memory: call `services.RemoveWarpHostedServices()` (`Warp.Core.Testing`) in `ConfigureTestServices`. It removes every hosted service that belongs to a Warp package (workers, server tasks, server registration, heartbeat, background-service host, flushers, seeders, dashboard push, startup checks) and keeps the app's own. Warp's hosted services are recognised by an assembly marker every Warp package carries, not by a list, so new ones are covered. Everything else stays registered: `IMediator` works, and publishing still stages `Job` rows on the app's context; nothing runs them.
+
+If you wrote your own helper that removes hosted services whose assembly name starts with `Warp.`, replace it: a same-named extension method in scope makes the call ambiguous once you import `Warp.Core.Testing`.
+
+See [Testing apps that use Warp](operations/testing-apps.md), which also covers tests that need jobs to run (a real database in a container).
+
+### Startup checks stand down on a non-relational context
+
+The PostgreSQL time-column and server-version checks, the SQL Server compatibility-level check and the storage-type check on Warp's columns now skip, with a `Debug` log, when the application's context runs on another provider (EF in-memory in a test, for example). Before, the PostgreSQL time-column check failed the host with `Relational-specific methods can only be used when the context is using a relational database provider.`
+
 ## 8.0.0
 
 *2026-11-25*
