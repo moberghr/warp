@@ -139,6 +139,11 @@ public class MyCredentialValidator : IWarpCredentialValidator
 }
 ```
 
+Compare secrets in constant time. A password hash library's verify call (as above) already does; if your
+validator compares a configured password or API key directly, use
+`CryptographicOperations.FixedTimeEquals` rather than `==`, which returns as soon as the first character
+differs and so leaks how much of a guess was right.
+
 Session lifetime is configurable:
 
 ```csharp
@@ -150,6 +155,51 @@ builder.Services.AddWarpDashboard().AddBuiltInLogin<MyCredentialValidator>(optio
 });
 ```
 
+The cookie is always marked `Secure`, so the browser only sends it over HTTPS; there is no setting to turn
+that off. Browsers treat `http://localhost` as a secure context, so local development over plain HTTP still
+works. A dashboard reached over plain HTTP at any other address cannot keep a session: serve it over HTTPS.
+
+### Login throttling
+
+The login endpoint throttles repeated attempts, by caller IP address and by username separately. Each one gets
+five attempts; after that it is locked out for 30 seconds, doubling with every further attempt up to 15 minutes.
+A locked-out attempt is answered `429 Too Many Requests` with a `Retry-After` header, and your validator is not
+called. A successful sign-in clears the username's count and takes back its own attempt from the IP's (clearing
+the IP's count would let one valid account reset an address's budget between guesses at other usernames). An
+attempt refused for its username is not counted against its IP. Tune it, or turn it off, through the options:
+
+```csharp
+builder.Services.AddWarpDashboard().AddBuiltInLogin<MyCredentialValidator>(options =>
+{
+    options.Throttling.FreeAttempts = 10;
+    options.Throttling.LockoutDuration = TimeSpan.FromMinutes(1);
+    options.Throttling.MaxLockoutDuration = TimeSpan.FromHours(1);
+    options.Throttling.ForgetAfter = TimeSpan.FromMinutes(30);   // quiet time after which the count starts over
+    options.Throttling.MaxTrackedKeys = 10_000;                  // bounded; least recently used evicted when full
+    // options.Throttling.Enabled = false;
+});
+```
+
+Like any lockout, the per-username lockout can be used against you: an anonymous caller who fails on purpose
+can keep a known username (`admin`) locked out, for up to `MaxLockoutDuration` at a time. Other usernames are
+unaffected, and the per-IP budget limits how fast one address can do it. If that matters more than guessing
+resistance, give the account a less guessable name, raise `FreeAttempts`, or turn the throttle off and attach
+your own rate-limiting policy. IPv6 callers are counted per /64, so one subscriber's address block is one
+budget. The tracking table never forgets a lockout to make room; when it is full of locked-out keys, a new caller
+goes untracked in that table (the other one, IP or username, still counts it) rather than being refused, so
+filling the table cannot shut the login for everyone. Usernames over 256 characters and passwords over 1,024 are
+rejected with `400` before they reach the throttle or your validator.
+
+The throttle is **in memory and per process**: with several instances behind a load balancer each counts on its
+own, and a restart forgets. Behind a reverse proxy, call `UseForwardedHeaders()` so the client's address is
+seen; otherwise every caller shares the proxy's address and one budget. For a limit shared across instances,
+or any other shape, attach your own [ASP.NET Core rate-limiting](https://learn.microsoft.com/aspnet/core/performance/rate-limit)
+policy to the dashboard:
+
+```csharp
+app.MapWarpDashboard("/warp").RequireRateLimiting("warp-dashboard");
+```
+
 import Screenshot from '@site/src/components/Screenshot';
 
 <Screenshot light="/img/screenshots/11-login.png" dark="/img/screenshots/11-login-dark.png" alt="Login" />
@@ -158,7 +208,7 @@ import Screenshot from '@site/src/components/Screenshot';
 
 1. The REST API and the hub are protected; the SPA shell stays anonymous — the shell *is* the login page, so gating it would challenge the page that collects the credentials
 2. The SPA posts credentials to `/warp/api/auth/login`, which calls your validator and signs the user in
-3. Warp sets an HTTP-only, `SameSite=Strict` cookie whose expiry is **enforced server-side**
+3. Warp sets an HTTP-only, `Secure`, `SameSite=Strict` cookie whose expiry is **enforced server-side**
 4. API requests carry the cookie; a 401 sends the SPA back to the login form
 5. `POST /warp/api/auth/logout` signs the user out
 
@@ -174,6 +224,17 @@ app.MapWarpDashboard("/warp").RequireLocalRequests();
 
 A remote caller gets 403 — signing in cannot change the answer, so there is nothing to challenge. This covers the shell, the API and the hub.
 
+A request passes only when it arrives over a loopback connection **and** names a loopback host:
+`localhost`, `127.0.0.1` or `[::1]`, on any port. The host check defeats DNS rebinding, where an attacker's
+domain is pointed at `127.0.0.1` so that a page open in the local user's browser reaches the dashboard over
+loopback; the browser then sends the attacker's host name, which is refused.
+
+:::warning Reverse proxies
+The check reads the connection's remote address. A reverse proxy on the same machine that does not forward
+the client address (no `UseForwardedHeaders()`) makes every request look local, wherever it came from. Gate
+such a deployment with a real policy, not `RequireLocalRequests()`.
+:::
+
 The same mechanism is available for any rule that signing in cannot satisfy — an API-key check, an allowlist — even in a host with no identity provider at all. Pin `WarpDashboardDefaults.DenyScheme` on the policy and its denials render as 403 instead of failing on a challenge that has no scheme to use:
 
 ```csharp
@@ -187,6 +248,30 @@ builder.Services.AddAuthorizationBuilder()
 
 app.MapWarpDashboard("/warp").RequireAuthorization("WarpApiKey");
 ```
+
+## Cross-site request forgery
+
+Every state-changing dashboard API request (anything but `GET`, `HEAD`, `OPTIONS` and `TRACE`), login and
+logout included, must carry the header `X-Warp-Request` (any value); without it the API answers
+`400 Bad Request` and the endpoint never runs. A cross-site page can make the browser send a form post or a
+simple `fetch` with the visitor's ambient credentials (your cookie, Windows authentication, or none at all
+against a loopback-only dashboard), but it cannot add a custom header without a CORS preflight, which the
+dashboard never grants.
+
+The dashboard's own UI sends the header on every call, and so does the `api` client that the extension SDK
+hands to dashboard extensions. A script or tool of your own that calls the dashboard API must add it:
+
+```bash
+curl -X POST -H "X-Warp-Request: 1" https://example.com/warp/api/jobs/failed/delete-by-type?type=...
+```
+
+The check covers endpoints that dashboard extensions map under the API group too.
+
+The SignalR hub (realtime push) cannot take a custom header on its WebSocket, and a browser applies no CORS to
+WebSockets, so the hub checks `Origin` instead: a negotiate or connect request whose `Origin` names another host,
+or another port of the same host, gets `403`. Browsers always send `Origin` on these requests, so one without it
+comes from a non-browser client and passes to authorization as before. Behind a reverse proxy, forward the original `Host`
+(for example `UseForwardedHeaders` with `XForwardedHost`) so the dashboard sees its public host name.
 
 ## What is gated
 

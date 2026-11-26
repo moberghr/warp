@@ -420,6 +420,113 @@ public class CaptureRedactionTests
     }
 
     [TimedFact]
+    public async Task ResponseCapture_EndlessBody_ReadsOnlyTheCapAndCallerStreamsTheRest()
+    {
+        // An endless (or merely huge) forward-only response used to be buffered in full before capture read
+        // it, so the call never returned. Capture must read no more than cap + 1 bytes and leave the caller a
+        // body that starts at byte zero and keeps streaming.
+        var (adapters, recorder) = Harness();
+        var options = new WarpAdapterHttpOptions();
+        options.Recording.CaptureResponseBodies = CaptureMode.Always;
+        options.Recording.MaxCapturedBodySize = 16;
+
+        var body = new EndlessStream();
+        var content = new StreamContent(body);
+        content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("text/plain");
+        var response = new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = content };
+        var handler = new WarpAdapterHandler("vendor", options, adapters, Resolver()) { InnerHandler = new StubHandler(response) };
+        using var invoker = new HttpMessageInvoker(handler);
+
+        using var result = await invoker.SendAsync(Get("https://api.vendor.com/ping"), Xunit.TestContext.Current.CancellationToken);
+
+        body.BytesRead.ShouldBe(17);
+        var stored = recorder.Records.ShouldHaveSingleItem().ResponseBody.ShouldNotBeNull();
+        stored.ShouldStartWith("abcdefghijkl");
+        stored.ShouldEndWith("…");
+        result.Content.Headers.ContentType!.MediaType.ShouldBe("text/plain");
+
+        await using var stream = await result.Content.ReadAsStreamAsync(Xunit.TestContext.Current.CancellationToken);
+        var read = new byte[100_000];
+        await stream.ReadExactlyAsync(read, Xunit.TestContext.Current.CancellationToken);
+        for (var i = 0; i < read.Length; i++)
+        {
+            read[i].ShouldBe(EndlessStream.ByteAt(i));
+        }
+    }
+
+    [TimedTheory]
+    [InlineData("text/event-stream")]
+    [InlineData("application/x-ndjson")]
+    [InlineData("application/grpc+proto")]
+    public async Task ResponseCapture_StreamingMediaType_IsNotPeeked(string mediaType)
+    {
+        // A server-sent-events body can trickle a few bytes a minute: waiting for the capture cap would hold
+        // the caller's response back indefinitely, so the body is not captured at all.
+        var (adapters, recorder) = Harness();
+        var options = new WarpAdapterHttpOptions();
+        options.Recording.CaptureResponseBodies = CaptureMode.Always;
+
+        var body = new EndlessStream();
+        var content = new StreamContent(body);
+        content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(mediaType);
+        var handler = new WarpAdapterHandler("vendor", options, adapters, Resolver())
+        {
+            InnerHandler = new StubHandler(new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = content }),
+        };
+        using var invoker = new HttpMessageInvoker(handler);
+
+        using var result = await invoker.SendAsync(Get("https://api.vendor.com/events"), Xunit.TestContext.Current.CancellationToken);
+
+        body.BytesRead.ShouldBe(0);
+        result.Content.ShouldBeSameAs(content);
+        recorder.Records.ShouldHaveSingleItem().ResponseBody.ShouldBeNull();
+    }
+
+    [TimedFact]
+    public async Task ResponseCapture_BodyFailsPartWay_CallerSeesTheTransportError()
+    {
+        // Capture swallows the failure, but the caller must still get the bytes that arrived and then the real
+        // error, not "the stream was already consumed".
+        var (adapters, recorder) = Harness();
+        var options = new WarpAdapterHttpOptions();
+        options.Recording.CaptureResponseBodies = CaptureMode.Always;
+
+        var response = new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new StreamContent(new FailingAfterStream("head")) };
+        var handler = new WarpAdapterHandler("vendor", options, adapters, Resolver()) { InnerHandler = new StubHandler(response) };
+        using var invoker = new HttpMessageInvoker(handler);
+
+        using var result = await invoker.SendAsync(Get("https://api.vendor.com/ping"), Xunit.TestContext.Current.CancellationToken);
+
+        recorder.Records.ShouldHaveSingleItem().ResponseBody.ShouldBeNull();
+        await using var stream = await result.Content.ReadAsStreamAsync(Xunit.TestContext.Current.CancellationToken);
+        var head = new byte[4];
+        await stream.ReadExactlyAsync(head, Xunit.TestContext.Current.CancellationToken);
+        Encoding.UTF8.GetString(head).ShouldBe("head");
+        await Should.ThrowAsync<IOException>(async () => await stream.ReadExactlyAsync(new byte[16], Xunit.TestContext.Current.CancellationToken));
+    }
+
+    [TimedFact]
+    public async Task ResponseCapture_SeekableBody_IsRewoundForTheCaller()
+    {
+        var (adapters, recorder) = Harness();
+        var options = new WarpAdapterHttpOptions();
+        options.Recording.CaptureResponseBodies = CaptureMode.Always;
+        options.Recording.MaxCapturedBodySize = 4;
+
+        var response = new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            Content = new StreamContent(new MemoryStream(Encoding.UTF8.GetBytes("0123456789"))),
+        };
+        var handler = new WarpAdapterHandler("vendor", options, adapters, Resolver()) { InnerHandler = new StubHandler(response) };
+        using var invoker = new HttpMessageInvoker(handler);
+
+        using var result = await invoker.SendAsync(Get("https://api.vendor.com/ping"), Xunit.TestContext.Current.CancellationToken);
+
+        (await result.Content.ReadAsStringAsync(Xunit.TestContext.Current.CancellationToken)).ShouldBe("0123456789");
+        recorder.Records.ShouldHaveSingleItem().ResponseBody.ShouldBe("0…");
+    }
+
+    [TimedFact]
     public void RedactHeaders_MasksDenylistedValue_KeepsOthers()
     {
         var redacted = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Authorization" };
@@ -723,6 +830,107 @@ internal sealed class CancelObservingStream : Stream
     }
 
     public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+    public override void Flush()
+    {
+    }
+
+    public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+    public override void SetLength(long value) => throw new NotSupportedException();
+
+    public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+}
+
+/// <summary>A forward-only body that never ends: the lowercase alphabet, repeated. Counts what was read.</summary>
+internal sealed class EndlessStream : Stream
+{
+    public long BytesRead { get; private set; }
+
+    public override bool CanRead => true;
+
+    public override bool CanSeek => false;
+
+    public override bool CanWrite => false;
+
+    public override long Length => throw new NotSupportedException();
+
+    public override long Position
+    {
+        get => BytesRead;
+        set => throw new NotSupportedException();
+    }
+
+    public static byte ByteAt(long position) => (byte)('a' + (position % 26));
+
+    public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+
+    public override int Read(Span<byte> buffer)
+    {
+        for (var i = 0; i < buffer.Length; i++)
+        {
+            buffer[i] = ByteAt(BytesRead + i);
+        }
+
+        BytesRead += buffer.Length;
+
+        return buffer.Length;
+    }
+
+    public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        => ValueTask.FromResult(Read(buffer.Span));
+
+    public override void Flush()
+    {
+    }
+
+    public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+    public override void SetLength(long value) => throw new NotSupportedException();
+
+    public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+}
+
+/// <summary>A forward-only body that yields its content and then fails, like a connection reset mid-body.</summary>
+internal sealed class FailingAfterStream : Stream
+{
+    private readonly byte[] _bytes;
+    private int _position;
+
+    public FailingAfterStream(string content) => _bytes = Encoding.UTF8.GetBytes(content);
+
+    public override bool CanRead => true;
+
+    public override bool CanSeek => false;
+
+    public override bool CanWrite => false;
+
+    public override long Length => throw new NotSupportedException();
+
+    public override long Position
+    {
+        get => _position;
+        set => throw new NotSupportedException();
+    }
+
+    public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+
+    public override int Read(Span<byte> buffer)
+    {
+        if (_position >= _bytes.Length)
+        {
+            throw new IOException("connection reset");
+        }
+
+        var count = Math.Min(buffer.Length, _bytes.Length - _position);
+        _bytes.AsSpan(_position, count).CopyTo(buffer);
+        _position += count;
+
+        return count;
+    }
+
+    public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        => ValueTask.FromResult(Read(buffer.Span));
 
     public override void Flush()
     {

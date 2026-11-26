@@ -16,6 +16,10 @@ public static class RateLimitExtensions
         ArgumentOutOfRangeException.ThrowIfLessThan(count, 1);
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(window, TimeSpan.Zero);
 
+        // The same cap as [RateLimit(perSeconds)]. ExpirationCleanup relies on it: a bucket idle for longer
+        // than the longest possible window is deleted as equivalent to a fresh key.
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(window, TimeSpan.FromSeconds(RateLimitAttribute.MaxWindowSeconds));
+
         parameters.Configure<IRateLimitMetadata>(x =>
         {
             x.RateLimitKey = key;

@@ -173,7 +173,7 @@ public class DropWhenFull : IJob { }
 
 1. **Enqueue** always succeeds — the slot is not checked at publish time.
 2. **Worker picks up** the job and marks it as `Processing`.
-3. **Pipeline runs**: the behavior resolves the effective limit (admin row > attribute/extension limit > 1) and asks `IWarpSemaphoreProvider.TryAcquireAsync($"warp:concurrency:{key}", limit, TimeSpan.Zero, ct)` for a slot. If **this process** already holds `limit` slots of the key, it skips that call and treats the key as full. Every slot a process holds is a real database hold, so the acquire could not succeed. This saves a database round trip and a lock-pool connection. The span carries `warp.concurrency.local = true`. Slots held by other servers are not visible to this check, so those refusals still go to the database.
+3. **Pipeline runs**: the behavior resolves the effective limit (admin row > attribute/extension limit > 1) and asks `IWarpSemaphoreProvider.TryAcquireAsync(name, limit, TimeSpan.Zero, ct)` for a slot, where `name` is `warp:concurrency:{key}` at limit 1 and `warp:concurrency-semaphore:{key}` above it. If **this process** already holds `limit` slots of the key, it skips that call and treats the key as full. Every slot a process holds is a real database hold, so the acquire could not succeed. This saves a database round trip and a lock-pool connection. The span carries `warp.concurrency.local = true`. Slots held by other servers are not visible to this check, so those refusals still go to the database.
 4. **If full**: the behavior sets `IJobContext.Outcome` according to the configured `ConcurrencyMode`. `Skip` → `Deleted` with a log entry `Cancelled — '{key}' full ({N} slots)`. `Wait` → `Enqueued` with `ScheduleTime = now` and a log entry `Requeued — '{key}' full ({N} slots)`.
 5. **If a slot is free**: the slot is acquired, the handler executes, and the slot is released when the handler completes (or fails).
 
@@ -189,35 +189,32 @@ There is one subtle window: at `limit > 1`, the provider scans slots linearly. I
 
 Jobs without a concurrency key skip the slot check entirely. The behavior reads the metadata, finds no key, and calls the next behavior immediately.
 
-## `[Mutex]` and `[Semaphore]` on the same key — backend-specific behavior
+## `[Mutex]` and `[Semaphore]` on the same key
 
-If you put both `[Mutex("k")]` and `[Semaphore("k", N)]` against the same key, the resulting concurrency cap depends on which database backend you're using.
+A key at limit 1 and a key at a limit above 1 take **different lock names**, on both databases:
 
-### PostgreSQL: independent caps
+- `[Mutex("k")]` (or any key whose effective limit is 1) acquires the lock `warp:concurrency:k`.
+- `[Semaphore("k", 5)]` acquires one of the slots of `warp:concurrency-semaphore:k` (on PostgreSQL the advisory
+  locks `warp:concurrency-semaphore:k:0`..`warp:concurrency-semaphore:k:4`; on SQL Server a ticket of Medallion's
+  `SqlSemaphore` of that name).
 
-PG uses **disjoint lock names** for the two attributes:
+So the two caps are **independent**: combined concurrency for the same key is `mutex_limit + semaphore_limit`
+(1 + 5 = up to **6** concurrent jobs). The separate prefix also means a mutex key can never name a semaphore's
+slot: `[Mutex("tenantA:0")]` locks `warp:concurrency:tenantA:0`, and slot 0 of `[Semaphore("tenantA", N)]` is
+`warp:concurrency-semaphore:tenantA:0`.
 
-- `[Mutex("k")]` acquires the lock `warp:concurrency:k`.
-- `[Semaphore("k", 5)]` acquires one of `warp:concurrency:k:0`..`warp:concurrency:k:4`.
-
-Combined concurrency for the same key is `mutex_limit + semaphore_limit` (so 1 + 5 = up to **6** concurrent jobs).
-
-### SQL Server: shared slot pool
-
-SQL Server delegates to `Medallion.Threading`'s `SqlDistributedSemaphore`, which uses lock names `k0`, `k1`, ..., `k{N-1}` *regardless* of `maxCount`:
-
-- `[Mutex("k")]` acquires `k0`.
-- `[Semaphore("k", 5)]` acquires one of `k0`..`k4`.
-
-The two attributes **share the slot pool**. Combined concurrency is `max(mutex_limit, semaphore_limit)` — effectively just `semaphore_limit` since Mutex is always 1 (so up to **5** concurrent jobs, including the Mutex one).
-
-### Why the asymmetry
-
-`Medallion.Threading.Postgres` doesn't expose a counted-semaphore primitive (Postgres advisory locks are exclusive-only), so Warp implements the slot trick from scratch on PG. SQL Server reuses Medallion's pre-existing `SqlSemaphore`, which made a different naming choice. Aligning the two would require either reworking the PG fast path (breaks Mutex behavioral parity) or replacing the SQL Server delegation with a custom implementation. Both are deferred.
+:::note Changed in 8.1
+Before 8.1 a semaphore used the same prefix as a mutex (`warp:concurrency:k`, slots `warp:concurrency:k:0`...).
+On PostgreSQL that let a mutex key shaped like a slot (`tenantA:0`) take a semaphore's slot, and on SQL Server
+`[Mutex("k")]` and `[Semaphore("k", N)]` shared one ticket pool. 8.1 moves the **semaphore** to the new prefix;
+mutex lock names are unchanged, so a mutex stays exclusive through a rolling upgrade. While 8.0 and 8.1 servers
+run side by side, a semaphore key can admit up to its limit on each version's name, so up to twice its limit,
+until the last 8.0 server is gone. See the [8.1 release notes](../releases.md).
+:::
 
 ### Practical guidance
 
-**Pick one or the other for a given key.** Don't put both attributes on the same class — if you do, `[Mutex]` wins by registration order and the `[Semaphore]` is silently ignored. If you set both via different jobs sharing a key, the resulting cap will surprise you on at least one backend.
+**Pick one or the other for a given key.** Don't put both attributes on the same class — if you do, `[Mutex]` wins by registration order and the `[Semaphore]` is silently ignored. If you set both via different jobs sharing a key, you get two independent caps (see above), which is rarely what was meant.
 
 ## Admin overrides
 
@@ -241,6 +238,11 @@ The runtime limit is resolved on every job pickup with the precedence:
 3. **Default** of 1 (mutual exclusion)
 
 Admin rows are sticky across redeploys — they live in your application's database, not in source. Once an operator has set `AddOrUpdateLimit("payment-api", 10)`, a future deploy that ships `[Semaphore("payment-api", 5)]` will still run with 10 slots until someone calls `RemoveLimit("payment-api")` or overwrites it.
+
+A limit of 1 and a limit above 1 use different lock names (see above), so changing a key's limit **across** 1,
+from 3 to 1 or from 1 to 3, starts the new limit on a fresh lock: jobs already running under the old limit are
+not counted against it until they finish. To serialize a busy key, change the limit, then wait for the running
+jobs to drain.
 
 `ConcurrencyLimitResolver` is scoped — admin-row lookups are cached for the lifetime of one job execution scope. Cross-job staleness is intentional; admin updates take effect at the next pickup.
 

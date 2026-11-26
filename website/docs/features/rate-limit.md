@@ -63,7 +63,7 @@ public class CallMeteredApi : IJob { }
 
 Use `Fixed`/`Sliding` to enforce a **ceiling** (reject/defer once the count is hit); use `TokenBucket` to enforce a **steady rate** against a downstream that wants smooth traffic. `TokenBucket` reschedules `Wait`-mode starts to sub-window token-refill instants, so — like the other styles — those reschedules ride `ScheduledJobActivation` (§ DB push does not accelerate `Wait`).
 
-`perSeconds` is capped at 7 days (`RateLimitAttribute.MaxWindowSeconds`). Inputs past the cap throw at construction.
+`perSeconds` is capped at 7 days (`RateLimitAttribute.MaxWindowSeconds`). Inputs past the cap throw at construction, and so does `WithRateLimit(...)` with a longer window (since 8.1).
 
 ## Precedence
 
@@ -91,7 +91,12 @@ lowering N takes effect on the next one — including for jobs whose row was sta
 
 The distributed lock is held only for the brief **check-and-increment** — never during handler execution (unlike `[Mutex]` / `[Semaphore]`, where the lock spans the whole handler). That keeps rate limits friendly to long-running jobs: a single 10-minute job doesn't block other tokens for the duration of its run.
 
-Live state lives in `RateLimitBucket`; the entity is contributed only when `AddRateLimit()` is registered.
+Live state lives in `RateLimitBucket`, one row per key. `ExpirationCleanup` deletes a key's row once it has
+been idle for 8 days (the 7-day maximum window plus a day of margin) and holds no Wait-mode cursor still ahead.
+By then every style treats the key exactly as one it has never seen (a fixed window has rolled over, sliding
+timestamps have aged out, a token bucket has refilled), so keys taken from tenants or users do not leave a row
+behind forever. The sweep is batched and capped per tick like Warp's other cleanup. Adapter buckets
+(`warp:adapter:{name}`, one per adapter) are not swept.
 
 ## Refusing a known-exhausted key from memory
 

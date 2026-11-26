@@ -8,6 +8,7 @@ using Microsoft.Extensions.Options;
 using Warp.Core.ClientObservability;
 using Warp.Core.Enums;
 using Warp.Core.Logging;
+using Warp.Http.Observability;
 
 namespace Warp.Http.ClientObservability;
 
@@ -337,18 +338,7 @@ public static class WarpClientObservabilityEndpoints
             return value;
         }
 
-        if (Encoding.UTF8.GetByteCount(value) <= maxBytes)
-        {
-            return value;
-        }
-
-        // Trim to a char boundary that fits the byte budget.
-        var count = value.Length;
-        while (count > 0 && Encoding.UTF8.GetByteCount(value.AsSpan(0, count)) > maxBytes)
-        {
-            count--;
-        }
-
-        return value[..count];
+        // Single pass: this runs on a public endpoint over caller-supplied strings, so it must stay linear.
+        return HttpCaptureHelpers.PrefixWithinBytes(value, maxBytes);
     }
 }

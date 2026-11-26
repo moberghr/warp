@@ -36,6 +36,32 @@ internal static class HttpCaptureHelpers
         return Encoding.UTF8.GetString(bytes, 0, boundary) + "…";
     }
 
+    // The longest prefix of value whose UTF-8 encoding fits in maxBytes,
+    // with no marker appended. One pass over the string, no allocation beyond the result, and never splits a
+    // surrogate pair. A lone surrogate counts as the 3 bytes of the U+FFFD it encodes to, as
+    // Encoding.UTF8 does.
+    public static string PrefixWithinBytes(string value, int maxBytes)
+    {
+        var bytes = 0;
+        var i = 0;
+        while (i < value.Length)
+        {
+            var c = value[i];
+            var pair = char.IsHighSurrogate(c) && i + 1 < value.Length && char.IsLowSurrogate(value[i + 1]);
+            var size = Utf8Size(c, pair);
+
+            if (bytes + size > maxBytes)
+            {
+                return value[..i];
+            }
+
+            bytes += size;
+            i += pair ? 2 : 1;
+        }
+
+        return value;
+    }
+
     // Decode a captured byte PREFIX to a string. `length` bytes are valid content; a complete
     // (non-truncated) body is valid UTF-8 and decodes verbatim. When the prefix was truncated we reserve
     // room for the marker and cut on a UTF-8 boundary — a raw Encoding.UTF8.GetString over a mid-character
@@ -57,6 +83,21 @@ internal static class HttpCaptureHelpers
         var boundary = SafeBoundary(buffer, Math.Max(0, length - markerBytes));
 
         return Encoding.UTF8.GetString(buffer, 0, boundary) + "…";
+    }
+
+    private static int Utf8Size(char c, bool surrogatePair)
+    {
+        if (surrogatePair)
+        {
+            return 4;
+        }
+
+        if (c < 0x80)
+        {
+            return 1;
+        }
+
+        return c < 0x800 ? 2 : 3;
     }
 
     // Walk back off any UTF-8 continuation bytes (0b10xxxxxx) so a multibyte character is never split.

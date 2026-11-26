@@ -20,4 +20,7 @@ public class WarpDashboardLoginOptions
     /// so the dashboard cookie is never sent to the rest of the host app.
     /// </summary>
     public string? CookiePath { get; set; }
+
+    /// <summary>Brute-force throttling of the login endpoint. On by default.</summary>
+    public WarpDashboardLoginThrottleOptions Throttling { get; } = new();
 }

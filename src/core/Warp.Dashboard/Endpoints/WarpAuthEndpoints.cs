@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Claims;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Authentication;
@@ -14,6 +15,9 @@ namespace Warp.Dashboard.Endpoints;
 /// </summary>
 internal static class WarpAuthEndpoints
 {
+    private const int MaxUsernameLength = 256;
+    private const int MaxPasswordLength = 1024;
+
     internal static void MapWarpAuthEndpoints(this RouteGroupBuilder apiGroup, IServiceProvider services)
     {
         // All three endpoints belong to the built-in login and are mapped only with it. In particular the
@@ -37,16 +41,40 @@ internal static class WarpAuthEndpoints
             .AllowAnonymous();
 
         apiGroup
-            .MapPost("auth/login", async (HttpContext context, IWarpCredentialValidator validator) =>
+            .MapPost("auth/login", async (HttpContext context, IWarpCredentialValidator validator, WarpDashboardLoginThrottle throttle) =>
             {
-                var form = await context.Request.ReadFormAsync(context.RequestAborted);
+                var form = await ReadFormAsync(context.Request, context.RequestAborted);
+                if (form == null)
+                {
+                    return Results.BadRequest();
+                }
+
                 var username = form["username"].FirstOrDefault() ?? string.Empty;
                 var password = form["password"].FirstOrDefault() ?? string.Empty;
+
+                // The username becomes a key in the throttle's table, which bounds the number of keys but not their
+                // size; without this one caller could park megabytes per entry.
+                if (username.Length > MaxUsernameLength || password.Length > MaxPasswordLength)
+                {
+                    return Results.BadRequest();
+                }
+
+                var ip = WarpDashboardLoginThrottle.IpKey(context.Connection.RemoteIpAddress);
+
+                var wait = throttle.TryBegin(ip, username);
+                if (wait != null)
+                {
+                    context.Response.Headers.RetryAfter = Math.Ceiling(wait.Value.TotalSeconds).ToString(CultureInfo.InvariantCulture);
+
+                    return Results.StatusCode(StatusCodes.Status429TooManyRequests);
+                }
 
                 if (!await validator.ValidateAsync(username, password))
                 {
                     return Results.Unauthorized();
                 }
+
+                throttle.Succeeded(ip, username);
 
                 var identity = new ClaimsIdentity([new Claim(ClaimTypes.Name, username)], WarpDashboardDefaults.AuthenticationScheme);
                 await context.SignInAsync(WarpDashboardDefaults.AuthenticationScheme, new ClaimsPrincipal(identity));
@@ -63,6 +91,25 @@ internal static class WarpAuthEndpoints
                 return Results.Ok();
             })
             .AllowAnonymous();
+    }
+
+    // A body that is not a form, or a malformed one, is the caller's mistake: answer 400 rather than let
+    // ReadFormAsync's exception surface as a 500.
+    private static async Task<IFormCollection?> ReadFormAsync(HttpRequest request, CancellationToken cancellationToken)
+    {
+        if (!request.HasFormContentType)
+        {
+            return null;
+        }
+
+        try
+        {
+            return await request.ReadFormAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is InvalidDataException or BadHttpRequestException)
+        {
+            return null;
+        }
     }
 
     // The property name is pinned rather than left to the host's JSON naming policy — the SPA reads

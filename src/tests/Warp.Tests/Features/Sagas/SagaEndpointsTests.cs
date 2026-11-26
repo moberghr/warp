@@ -10,6 +10,7 @@ using Warp.Core.Services;
 using Warp.Dashboard;
 using Warp.Dashboard.Endpoints;
 using Warp.Dashboard.Extensions;
+using Warp.Tests.Helpers;
 
 namespace Warp.Tests.Features.Sagas;
 
@@ -134,7 +135,7 @@ public class SagaEndpointsTests
 
         await app.StartAsync(CancellationToken.None);
 
-        return new TestAppContext(app, app.GetTestClient());
+        return new TestAppContext(app, app.GetDashboardTestClient());
     }
 
     private sealed class TestAppContext(WebApplication app, HttpClient client) : IAsyncDisposable

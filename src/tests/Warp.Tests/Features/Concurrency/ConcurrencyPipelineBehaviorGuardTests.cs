@@ -91,7 +91,7 @@ public class ConcurrencyPipelineBehaviorGuardTests
         var ctx = new JobContext { JobId = Guid.NewGuid(), HandlerType = typeof(SemaphoreHandler) };
         var semaphore = new Mock<IWarpSemaphoreProvider>();
         semaphore
-            .Setup(x => x.TryAcquireAsync("warp:concurrency:guard-sem", 2, It.IsAny<TimeSpan>(), It.IsAny<CancellationToken>()))
+            .Setup(x => x.TryAcquireAsync("warp:concurrency-semaphore:guard-sem", 2, It.IsAny<TimeSpan>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(Mock.Of<IAsyncDisposable>());
         var behavior = Build<UnitRequest, Unit>(ctx, semaphore.Object);
 
@@ -105,7 +105,7 @@ public class ConcurrencyPipelineBehaviorGuardTests
         ctx.Metadata["ConcurrencyKey"].ShouldBe("guard-sem");
         ctx.Metadata["ConcurrencyLimit"].ShouldBe(2);
         ctx.Metadata["ConcurrencyMode"].ShouldBe(ConcurrencyMode.Wait);
-        semaphore.Verify(x => x.TryAcquireAsync("warp:concurrency:guard-sem", 2, It.IsAny<TimeSpan>(), It.IsAny<CancellationToken>()), Times.Once);
+        semaphore.Verify(x => x.TryAcquireAsync("warp:concurrency-semaphore:guard-sem", 2, It.IsAny<TimeSpan>(), It.IsAny<CancellationToken>()), Times.Once);
     }
 
     private static ConcurrencyPipelineBehavior<TRequest, TResponse> Build<TRequest, TResponse>(JobContext ctx, IWarpSemaphoreProvider semaphore)

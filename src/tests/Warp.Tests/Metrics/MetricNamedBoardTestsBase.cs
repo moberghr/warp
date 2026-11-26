@@ -674,7 +674,7 @@ public abstract class MetricNamedBoardTestsBase : IAsyncLifetime
         await app.StartAsync(Ct);
         try
         {
-            using var client = app.GetTestClient();
+            using var client = app.GetDashboardTestClient();
 
             var boards = await client.GetFromJsonAsync<JsonElement>("/warp/api/metrics/boards", Ct);
             var checkout = boards.EnumerateArray().Single(x => string.Equals(x.GetProperty("name").GetString(), "Checkout", StringComparison.Ordinal)).GetProperty("id").GetInt32();
@@ -819,7 +819,7 @@ public abstract class MetricNamedBoardTestsBase : IAsyncLifetime
         app.MapWarpApiEndpoints(new WarpDashboardOptions(), []);
         await app.StartAsync(CancellationToken.None);
 
-        return new DashboardHost(app, app.GetTestClient());
+        return new DashboardHost(app, app.GetDashboardTestClient());
     }
 
     private sealed class StatementCounter : DbCommandInterceptor

@@ -1,8 +1,12 @@
 using System.Collections.Concurrent;
+using System.Reflection;
 using System.Runtime.CompilerServices;
+using Microsoft.AspNetCore.Antiforgery;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.DependencyInjection;
 using Warp.Core.Handlers;
 using Warp.Http.Discovery;
 
@@ -17,9 +21,21 @@ public static class EndpointRouteBuilderExtensions
     /// Throws <see cref="InvalidOperationException"/> if called twice with the same
     /// <paramref name="group"/> on the same <paramref name="endpoints"/> instance.
     /// </summary>
-    public static IEndpointRouteBuilder MapWarpHttp(this IEndpointRouteBuilder endpoints, string? group = null)
+    /// <returns>
+    /// A builder for the endpoints just mapped, so conventions chain:
+    /// <c>app.MapWarpHttp().RequireAuthorization("policy")</c>. It is also <paramref name="endpoints"/> as an
+    /// <see cref="IEndpointRouteBuilder"/>.
+    /// </returns>
+    public static WarpHttpEndpointConventionBuilder MapWarpHttp(this IEndpointRouteBuilder endpoints, string? group = null)
     {
         ArgumentNullException.ThrowIfNull(endpoints);
+
+        // A builder this method returned stands for the route builder it wraps, so mapping through it twice is
+        // still caught below.
+        if (endpoints is WarpHttpEndpointConventionBuilder returned)
+        {
+            endpoints = returned.Inner;
+        }
 
         var marker = MarkerStorage.GetMarker(endpoints);
         var key = group ?? string.Empty;
@@ -30,24 +46,27 @@ public static class EndpointRouteBuilderExtensions
                 "Each (builder, group) pair may be mapped only once.");
         }
 
-        foreach (var descriptor in WarpGeneratedHttpRegistry.Snapshot())
-        {
-            if (!string.Equals(descriptor.Group, group, StringComparison.Ordinal))
-            {
-                continue;
-            }
+        var options = endpoints.ServiceProvider.GetService<WarpHttpOptions>() ?? new WarpHttpOptions();
 
-            // The descriptor's HandlerDelegate is the source-generated Minimal API delegate —
-            // ASP.NET binds its parameters (route / query / header / body) before invoking
-            // our dispatch trampoline.
-            var builder = endpoints.MapMethods(descriptor.Route, [descriptor.Method], descriptor.HandlerDelegate);
-            ApplyMetadata(builder, descriptor);
-        }
+        // The descriptor's HandlerDelegate is the source-generated Minimal API delegate — ASP.NET binds its
+        // parameters (route / query / header / body) before invoking our dispatch trampoline.
+        var mapped = WarpGeneratedHttpRegistry.Snapshot()
+            .Where(x => string.Equals(x.Group, group, StringComparison.Ordinal))
+            .Select(x => (IEndpointConventionBuilder)MapOne(endpoints, x, options))
+            .ToList();
 
-        return endpoints;
+        return new WarpHttpEndpointConventionBuilder(endpoints, mapped);
     }
 
-    private static void ApplyMetadata(RouteHandlerBuilder builder, HttpEndpointDescriptor descriptor)
+    private static RouteHandlerBuilder MapOne(IEndpointRouteBuilder endpoints, HttpEndpointDescriptor descriptor, WarpHttpOptions options)
+    {
+        var builder = endpoints.MapMethods(descriptor.Route, [descriptor.Method], descriptor.HandlerDelegate);
+        ApplyMetadata(builder, descriptor, options);
+
+        return builder;
+    }
+
+    private static void ApplyMetadata(RouteHandlerBuilder builder, HttpEndpointDescriptor descriptor, WarpHttpOptions options)
     {
         // Stable identity for inbound observability: Warp endpoints are always observed. A host convention
         // (group.WithWarpObservability()) never overwrites it — its Finally step skips an endpoint that
@@ -72,9 +91,22 @@ public static class EndpointRouteBuilderExtensions
         {
             // Form binding reads multipart/form-data, not JSON. Antiforgery validation would
             // reject programmatic / non-browser uploads (no token) — suppress it on these
-            // endpoints, matching how a hand-written MapPost with IFormFile is configured.
+            // endpoints unless the host asked to keep it. A [RequireAntiforgeryToken] on the handler
+            // class decides for its endpoint: it is forwarded below, and nothing is added here,
+            // because DisableAntiforgery's metadata lands after the forwarded attributes and would win.
             builder.Accepts(descriptor.RequestType, "multipart/form-data");
-            builder.DisableAntiforgery();
+            var handlerDecides = descriptor.HandlerType
+                .GetCustomAttributes(inherit: false)
+                .OfType<IAntiforgeryMetadata>()
+                .Any();
+            if (!handlerDecides && options.ValidateAntiforgeryOnFormEndpoints)
+            {
+                builder.WithMetadata(new RequireAntiforgeryTokenAttribute());
+            }
+            else if (!handlerDecides)
+            {
+                builder.DisableAntiforgery();
+            }
         }
         else if (IsBodyVerb(descriptor.Method))
         {
@@ -102,7 +134,7 @@ public static class EndpointRouteBuilderExtensions
         // [Tags], [OutputCache], [ProducesResponseType], and any future metadata attribute.
         // Warp's own [WarpHttp*] routing markers carry route/verb info, not endpoint metadata,
         // and are already consumed by the source generator — skip them.
-        foreach (var attribute in descriptor.HandlerType.GetCustomAttributes(inherit: false))
+        foreach (var attribute in HandlerAttributes(descriptor.HandlerType))
         {
             if (attribute is WarpHttpAttribute)
             {
@@ -112,6 +144,47 @@ public static class EndpointRouteBuilderExtensions
             builder.WithMetadata(attribute);
         }
     }
+
+    // The handler class's own attributes, as in 8.0, plus authorization read through its base classes.
+    //
+    // Authorization is inherited so an [Authorize] on an abstract base handler protects every subclass; reading
+    // only the concrete class dropped it and left the endpoint open. Every [Authorize] in the hierarchy is kept,
+    // so a subclass adds requirements and never sheds its base's (ASP.NET requires all of them). [AllowAnonymous]
+    // is taken only from the NEAREST class that declares any authorization attribute: ASP.NET lets one
+    // IAllowAnonymous override every [Authorize], so a base class's [AllowAnonymous] must not open a subclass that
+    // declares [Authorize] itself. Each attribute's AttributeUsage.Inherited is honoured.
+    //
+    // Nothing else is inherited. Metadata ASP.NET honours by mere presence ([DisableRateLimiting] beside a
+    // subclass's [EnableRateLimiting], say) would otherwise switch a subclass's own setting off.
+    private static IEnumerable<object> HandlerAttributes(Type handlerType)
+    {
+        var nearest = NearestAuthorization(handlerType);
+
+        return handlerType.GetCustomAttributes(inherit: false)
+            .Where(x => !IsAuthorization(x))
+            .Concat(handlerType.GetCustomAttributes(inherit: true).OfType<IAuthorizeData>().Where(x => x is not IAllowAnonymous))
+            .Concat(nearest.OfType<IAllowAnonymous>());
+    }
+
+    private static object[] NearestAuthorization(Type handlerType)
+    {
+        for (var type = handlerType; type != null; type = type.BaseType)
+        {
+            var declared = type.GetCustomAttributes(inherit: false)
+                .Where(IsAuthorization)
+                .Where(x => type == handlerType || x.GetType().GetCustomAttribute<AttributeUsageAttribute>()?.Inherited != false)
+                .ToArray();
+
+            if (declared.Length > 0)
+            {
+                return declared;
+            }
+        }
+
+        return [];
+    }
+
+    private static bool IsAuthorization(object attribute) => attribute is IAuthorizeData or IAllowAnonymous;
 
     private static bool IsBodyVerb(string method)
     {

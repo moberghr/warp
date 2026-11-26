@@ -160,6 +160,7 @@ public class DashboardAuthTests : IClassFixture<SharedTestHosts>
 
         var server = app.GetTestServer();
         using var client = new HttpClient(server.CreateHandler()) { BaseAddress = server.BaseAddress };
+        client.DefaultRequestHeaders.Add("X-Warp-Request", "1");
         try
         {
             using var form = new FormUrlEncodedContent([
@@ -905,6 +906,7 @@ public class DashboardAuthTests : IClassFixture<SharedTestHosts>
         // and a challenge redirect is exactly what several of these assert on.
         var server = app.GetTestServer();
         var client = new HttpClient(server.CreateHandler()) { BaseAddress = server.BaseAddress };
+        client.DefaultRequestHeaders.Add("X-Warp-Request", "1");
 
         return (app, client);
     }

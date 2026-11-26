@@ -62,7 +62,7 @@ public class ConcurrencyPipelineBehavior<TRequest, TResponse> : IPipelineBehavio
         var adminLimit = await _limitResolver.GetLimit(meta.ConcurrencyKey, cancellationToken);
         var effectiveLimit = adminLimit ?? meta.ConcurrencyLimit ?? 1;
 
-        var lockName = $"warp:concurrency:{meta.ConcurrencyKey}";
+        var lockName = ConcurrencyLockName.For(meta.ConcurrencyKey, effectiveLimit);
         IAsyncDisposable? handle;
         using (var concurrencySpan = WarpTelemetry.StartConcurrencyActivity())
         {

@@ -87,7 +87,9 @@ public static class WarpDashboardBuilder
 
         if (app.Services.GetService<IDashboardPushMarker>() is not null)
         {
-            api.Add(app.MapHub<WarpDashboardHub>($"{options.RoutePrefix}/api/hub"));
+            var hub = app.MapHub<WarpDashboardHub>($"{options.RoutePrefix}/api/hub");
+            hub.RequireSameOrigin();
+            api.Add(hub);
         }
 
         var mapped = new WarpDashboardEndpointConventionBuilder(app.Services, shell, new CompositeEndpointConventionBuilder(api));

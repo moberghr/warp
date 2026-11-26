@@ -8,7 +8,7 @@ sidebar_position: 6
 
 *unreleased*
 
-Outbound webhook hardening and **webhook endpoint health**: endpoints that go down hold their deliveries and catch up by themselves once they are back. **One migration** (additive: five columns on the webhook delivery table, one new table and three indexes, see [Migration](#migration-81)) and no breaking API change; **four behaviour changes for webhooks** (see below), each marked *Behaviour change* with its one-line way back. Applications can also boot their own test hosts without Warp getting in the way (`RemoveWarpHostedServices()`, `RequireDatabaseAtStartup = false`).
+Outbound webhook hardening and **webhook endpoint health**: endpoints that go down hold their deliveries and catch up by themselves once they are back. **One migration** (additive: five columns on the webhook delivery table, one new table and three indexes, see [Migration](#migration-81)) and no breaking API change; **four behaviour changes for webhooks** (see below), each marked *Behaviour change* with its one-line way back. Applications can also boot their own test hosts without Warp getting in the way (`RemoveWarpHostedServices()`, `RequireDatabaseAtStartup = false`). Also **security hardening** of the dashboard, `Warp.Http`, adapters and concurrency locks, with several behaviour changes of its own; see [Security hardening](#security-hardening).
 
 ### Webhooks: bounded attempts
 
@@ -100,6 +100,90 @@ Generate it with your normal `dotnet ef migrations add <Name>` and apply it befo
 - A new table for `WebhookEndpoint` (key `Name`, string(200); `State`, `FailingSince`, `LastSuccessAt`, `LastFailureAt`, `NextProbeAt`, `StillFailingNotifiedAt`, `CreatedAt`) with an index on `(State, NextProbeAt)`.
 
 A rolling deploy from 8.0 is safe after the migration: an 8.0 server ignores the new columns and never parks, and 8.0 deliveries carry `TrackEndpointHealth = false`. While 8.0 servers still run, their retention sweep treats `Parked` as settled and may delete a parked delivery once its `ExpireAt` passes (30 days after it was sent by default). Do not roll back to 8.0 while deliveries are `Parked` or `Cancelled`: 8.0 does not know those statuses.
+
+### Security hardening
+
+Fixes for things a caller outside your application could reach. They need no migration beyond the release's own.
+Several change behaviour (marked **Behaviour change**); read those before you deploy.
+
+#### Dashboard
+
+- **Behaviour change: state-changing dashboard API calls need the `X-Warp-Request` header.** Every request to
+  `{prefix}/api/...` other than `GET`, `HEAD`, `OPTIONS` and `TRACE`, built-in login and logout included, is
+  answered `400` without it. This stops cross-site request forgery: a page on another site could make a signed-in
+  browser (or any browser, against a loopback-only dashboard) post to delete-by-type, requeue, pause, cancel or
+  redeliver endpoints. The dashboard UI and the `api` client handed to dashboard extensions send it; **scripts or
+  tools that call the dashboard API directly must add `X-Warp-Request: 1`**, and so must an extension that calls
+  the API with its own `fetch`. See [Cross-site request forgery](operations/dashboard-auth.md#cross-site-request-forgery).
+- **Behaviour change: `RequireLocalRequests()` also checks the host name.** A request must come over loopback
+  *and* address the dashboard as `localhost`, `127.0.0.1` or `[::1]` (any port), which defeats DNS rebinding.
+  Reaching a local dashboard by machine name or a LAN address now gets 403. Also documented: behind a reverse
+  proxy on the same machine that does not forward the client address, every request looks local.
+- **Login throttling.** The built-in login counts attempts per IP address and per username; after 5 it locks that
+  IP or username out for 30 seconds, doubling per further attempt up to 15 minutes, and answers `429` with
+  `Retry-After`. A successful sign-in clears the count. In memory and per process; tune or disable it with
+  `AddBuiltInLogin<T>(o => o.Throttling...)`. Like any lockout, the per-username one lets an anonymous caller
+  keep a known username locked out by failing on purpose; sign-in for other usernames is unaffected. IPv6 callers
+  are counted per /64. A successful sign-in clears the username's count but takes back only its own attempt from
+  the IP's, and an attempt refused for its username does not count against its IP. The tracking table is bounded (10,000 keys each) and never forgets a lockout to make room;
+  when it is full of lockouts, new callers go untracked in that table rather than being refused. Usernames over
+  256 characters (or passwords over 1,024) get `400`. See [Login throttling](operations/dashboard-auth.md#login-throttling).
+- **Behaviour change: the login cookie is always `Secure`,** with no opt-out. Browsers treat `http://localhost`
+  as a secure context, so local development works as before; a built-in-login dashboard reached over plain HTTP
+  at any other address can no longer sign in and must be served over HTTPS.
+- A login request whose body is not a form now gets `400` instead of `500`.
+- **Behaviour change: the realtime hub refuses other origins.** A hub request (negotiate or WebSocket connect)
+  whose `Origin` names another host, or another port of the same host (a `Host` without a port means the
+  default one), gets `403`. A browser applies no CORS to a
+  WebSocket, so any page the user had open could read the live stream of a loopback-only dashboard. Requests
+  without `Origin` (non-browser clients) are unaffected. Behind a reverse proxy, forward the original `Host`.
+
+#### Warp.Http and adapters
+
+- **`[Authorize]` / `[AllowAnonymous]` on a base handler class now apply.** Handler attributes are read with
+  inheritance; before, an `[Authorize]` on an abstract base handler was dropped and the endpoint was open.
+  Every `[Authorize]` in the hierarchy applies; `[AllowAnonymous]` counts only on the nearest class that declares
+  any authorization attribute, so a handler's own `[Authorize]` is never opened by an `[AllowAnonymous]` on its
+  base. Other attributes are still read from the handler class only. If you relied on a base class's
+  authorization attribute *not* applying, move it.
+- **`MapWarpHttp()` returns a convention builder** (`WarpHttpEndpointConventionBuilder`), so
+  `app.MapWarpHttp().RequireAuthorization()` works. It is also an `IEndpointRouteBuilder`, so source that used
+  the old return type still compiles. **Binary-breaking:** an assembly compiled against 8.0 that calls
+  `MapWarpHttp` throws `MissingMethodException` until it is rebuilt against 8.1.
+- **`WarpHttpOptions.ValidateAntiforgeryOnFormEndpoints`** keeps ASP.NET's antiforgery validation on form
+  endpoints (default unchanged: off). `[RequireAntiforgeryToken]` on a handler class now decides for its endpoint
+  either way; before, Warp's own `DisableAntiforgery()` overrode it. `AddWarpHttp(o => ...)` now applies every
+  call's options to one instance; before, a second call's options were silently dropped.
+- Client observability ingest truncated caller-supplied strings in quadratic time; it is linear now.
+- Adapter response capture reads only the capture cap (plus one byte) instead of buffering the whole response
+  first, so a huge or endless response no longer exhausts memory. With capture on, a `ResponseHeadersRead`
+  caller still waits for that much of the body (or its end). Streaming media types (`text/event-stream`,
+  newline-delimited JSON, `application/grpc*`, `multipart/x-mixed-replace`) are no longer captured at all, so
+  those feeds are not held back; leave capture off for other long-poll endpoints.
+
+#### Core
+
+- **Mutex and semaphore lock names no longer overlap.** A key at a limit above 1 now uses the semaphore name
+  `warp:concurrency-semaphore:{key}` (was `warp:concurrency:{key}`, which a limit-1 key still uses). On PostgreSQL
+  `[Mutex("tenantA:0")]` used to take slot 0 of `[Semaphore("tenantA", N)]`; on SQL Server `[Mutex("k")]` and
+  `[Semaphore("k", N)]` shared one ticket pool. Both are independent on both databases now. Slot names never
+  collided across semaphore keys (PostgreSQL slots are `{name}:{index}`; SQL Server's tickets carry a hash of the
+  full name), so `[Semaphore("t1", 2)]` never took slots of `[Semaphore("t", 12)]`; 8.1 adds tests on both
+  databases that pin this.
+
+  **Rolling upgrade:** mutex lock names are unchanged, so a `[Mutex]` key stays exclusive throughout. A semaphore
+  key does not: an 8.0 server takes slots of the old name and an 8.1 server slots of the new one, so while both
+  run, a `[Semaphore("k", N)]` key can run up to 2 × N jobs at once. **If a semaphore limit must hold exactly,
+  stop every 8.0 server, or drain jobs that carry a semaphore key, before any 8.1 server processes them.** After
+  the upgrade, changing a key's admin limit between 1 and more than 1 moves it to the other lock name, so jobs
+  already running under the old limit are not counted against the new one until they finish.
+- **Stale rate-limit buckets are deleted.** `RateLimitBucket` rows were never removed, so per-tenant or per-user
+  keys grew the table forever. `ExpirationCleanup` now deletes rows idle for 8 days with no Wait-mode cursor ahead
+  (batched, capped per tick) through the index on `RateLimitBucket.UpdatedAt` that this release's
+  [migration](#migration-81) adds. Adapter buckets are kept. A key whose window is longer than 7 days, possible only
+  through `WithRateLimit` on 8.0 or a host-registered `IRateLimitManager`, can be reset after 8 idle days.
+- **Behaviour change: `WithRateLimit(...)` rejects a window over 7 days**, as `[RateLimit]` always has. The
+  cleanup above relies on that cap.
 
 ## 8.0.0
 

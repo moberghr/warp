@@ -722,7 +722,7 @@ public abstract class SloCommandQueryTestsBase : IAsyncLifetime
         await using var app = builder.Build();
         app.MapWarpApiEndpoints(new WarpDashboardOptions(), []);
         await app.StartAsync(CancellationToken.None);
-        using var client = app.GetTestClient();
+        using var client = app.GetDashboardTestClient();
 
         var response = await client.PostAsJsonAsync("/warp/api/slo", body, Ct);
         var content = await response.Content.ReadAsStringAsync(Ct);

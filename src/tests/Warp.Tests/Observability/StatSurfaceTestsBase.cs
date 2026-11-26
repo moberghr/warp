@@ -253,7 +253,7 @@ public abstract class StatSurfaceTestsBase : IAsyncLifetime
         await SeedJobs(queue, typeof(UnitRequest), 2, ConcurrencyMetadata(key, limit: 2, ConcurrencyMode.Wait));
 
         var semaphores = new FakeSemaphoreProvider();
-        await using var held = semaphores.HoldSlot($"warp:concurrency:{key}", 2);
+        await using var held = semaphores.HoldSlot($"warp:concurrency-semaphore:{key}", 2);
 
         await Run(CreateWorker(queue, maxRetries: 1, semaphores: semaphores), 2);
     }

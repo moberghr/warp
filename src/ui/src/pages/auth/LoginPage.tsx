@@ -3,18 +3,19 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { useTheme } from '@/hooks/useTheme';
 import { Moon, Sun } from 'lucide-react';
+import { isAxiosError } from 'axios';
 import api from '@/api/client';
 
 export default function LoginPage({ onLogin }: { onLogin: () => void }) {
   const { theme, toggle } = useTheme();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [error, setError] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError(false);
+    setError(null);
     setLoading(true);
 
     try {
@@ -24,8 +25,11 @@ export default function LoginPage({ onLogin }: { onLogin: () => void }) {
 
       await api.post('/auth/login', formData);
       onLogin();
-    } catch {
-      setError(true);
+    } catch (err) {
+      // 429: the server throttles repeated attempts per IP address and per username.
+      setError(isAxiosError(err) && err.response?.status === 429
+        ? 'Too many attempts. Try again later.'
+        : 'Invalid credentials');
     } finally {
       setLoading(false);
     }
@@ -42,7 +46,7 @@ export default function LoginPage({ onLogin }: { onLogin: () => void }) {
         </CardHeader>
         <CardContent>
           {error && (
-            <div className="text-sm text-destructive mb-4">Invalid credentials</div>
+            <div className="text-sm text-destructive mb-4">{error}</div>
           )}
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>

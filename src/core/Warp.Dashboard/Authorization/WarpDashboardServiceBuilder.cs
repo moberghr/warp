@@ -34,6 +34,7 @@ public sealed class WarpDashboardServiceBuilder
 
         Services.AddScoped<IWarpCredentialValidator, TValidator>();
         Services.AddSingleton<IWarpDashboardLoginMarker, WarpDashboardLoginMarker>();
+        Services.AddSingleton(x => new WarpDashboardLoginThrottle(loginOptions.Throttling, x.GetService<TimeProvider>() ?? TimeProvider.System));
 
         Services
             .AddAuthentication()
@@ -42,7 +43,10 @@ public sealed class WarpDashboardServiceBuilder
                 x.Cookie.Name = WarpDashboardDefaults.CookieName;
                 x.Cookie.HttpOnly = true;
                 x.Cookie.SameSite = SameSiteMode.Strict;
-                x.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
+
+                // Always Secure, with no opt-out: the cookie is the dashboard session, and browsers treat
+                // http://localhost as a secure context, so local development over plain HTTP still works.
+                x.Cookie.SecurePolicy = CookieSecurePolicy.Always;
                 x.ExpireTimeSpan = loginOptions.ExpireTimeSpan;
                 x.SlidingExpiration = loginOptions.SlidingExpiration;
 

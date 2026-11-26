@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -621,4 +622,65 @@ public sealed record LogoutCommand : IRequest<string>;
 public sealed class LogoutHandler : IRequestHandler<LogoutCommand, string>
 {
     public Task<string> HandleAsync(LogoutCommand request, CancellationToken cancellationToken) => Task.FromResult("logged-out");
+}
+
+// An [Authorize] declared on an abstract base handler must protect the concrete endpoint.
+public sealed record InheritedSecureEcho : IRequest<string>;
+
+[Authorize(Policy = "WarpHttpTestPolicy")]
+public abstract class SecureHandlerBase;
+
+[WarpHttpPost("/api/secure/inherited")]
+public sealed class InheritedSecureEchoHandler : SecureHandlerBase, IRequestHandler<InheritedSecureEcho, string>
+{
+    public Task<string> HandleAsync(InheritedSecureEcho request, CancellationToken cancellationToken) => Task.FromResult("inherited");
+}
+
+// A form endpoint whose handler opts back into antiforgery validation.
+public sealed record GuardedUpload(IFormFile File) : IRequest<string>;
+
+[RequireAntiforgeryToken]
+[WarpHttpPost("/api/file-guarded")]
+public sealed class GuardedUploadHandler : IRequestHandler<GuardedUpload, string>
+{
+    public Task<string> HandleAsync(GuardedUpload request, CancellationToken cancellationToken) => Task.FromResult(request.File.FileName);
+}
+
+// A subclass's own [Authorize] must not be opened by an [AllowAnonymous] on its base class.
+public sealed record OverriddenAnonEcho : IRequest<string>;
+
+[AllowAnonymous]
+public abstract class AnonymousHandlerBase;
+
+[Authorize(Policy = "WarpHttpTestPolicy")]
+[WarpHttpPost("/api/secure/over-anonymous-base")]
+public sealed class OverriddenAnonEchoHandler : AnonymousHandlerBase, IRequestHandler<OverriddenAnonEcho, string>
+{
+    public Task<string> HandleAsync(OverriddenAnonEcho request, CancellationToken cancellationToken) => Task.FromResult("guarded");
+}
+
+// Every [Authorize] in the hierarchy applies: a subclass adds requirements and never sheds its base's.
+public sealed record LayeredAuthEcho : IRequest<string>;
+
+[Authorize(Policy = "WarpHttpTestPolicy")]
+public abstract class PolicyHandlerBase;
+
+[Authorize(Roles = "Auditor")]
+[WarpHttpPost("/api/secure/layered")]
+public sealed class LayeredAuthEchoHandler : PolicyHandlerBase, IRequestHandler<LayeredAuthEcho, string>
+{
+    public Task<string> HandleAsync(LayeredAuthEcho request, CancellationToken cancellationToken) => Task.FromResult("layered");
+}
+
+// Only authorization is inherited: a base [DisableRateLimiting] must not switch off a subclass's own limit.
+public sealed record SubclassLimitedEcho : IRequest<string>;
+
+[DisableRateLimiting]
+public abstract class UnlimitedHandlerBase;
+
+[EnableRateLimiting("WarpHttpTestRateLimit")]
+[WarpHttpPost("/api/rate-limited/subclass")]
+public sealed class SubclassLimitedEchoHandler : UnlimitedHandlerBase, IRequestHandler<SubclassLimitedEcho, string>
+{
+    public Task<string> HandleAsync(SubclassLimitedEcho request, CancellationToken cancellationToken) => Task.FromResult("limited");
 }

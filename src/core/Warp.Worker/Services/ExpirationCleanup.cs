@@ -2,12 +2,14 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Warp.Core;
+using Warp.Core.Adapters;
 using Warp.Core.BackgroundServices;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Logging;
 using Warp.Core.Notifiers;
+using Warp.Core.RateLimit;
 
 namespace Warp.Worker.Services;
 
@@ -73,6 +75,7 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
         await CleanupErrorGroupsByCountAsync(ct);
         await CleanupOrphanErrorOccurrencesAsync(ct);
         await CleanupStaleMetricInstrumentsAsync(ct);
+        await CleanupStaleRateLimitBucketsAsync(ct);
 
         var total = timeExpired + countCleaned;
         if (total == 0)
@@ -390,6 +393,8 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
     // negative retention would let the flusher's live INSERTs requalify mid-loop — the cap converts that
     // into bounded work per tick instead of an endless chase.
     private const int MaxSweepBatchesPerTick = 100;
+
+    private static TimeSpan StaleRateLimitBucketAge => TimeSpan.FromSeconds(RateLimitAttribute.MaxWindowSeconds) + TimeSpan.FromDays(1);
 
     internal async Task<int> CleanupExpiredAdapterCallLogsAsync(CancellationToken ct)
     {
@@ -779,6 +784,44 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
                 .ExecuteDeleteAsync(ct);
 
             if (names.Count < batchSize)
+            {
+                break;
+            }
+        }
+
+        return total;
+    }
+
+    // A job's rate-limit key is often per tenant or per user, so the RateLimitBucket table gained a row for every
+    // key ever used and never lost one. A bucket idle for longer than any job window can be is equivalent to no
+    // row at all: Fixed has rolled into a new window, Sliding's timestamps have all aged out, and a TokenBucket
+    // has refilled to capacity, which is exactly how each style treats a missing row. Windows are capped at
+    // RateLimitAttribute.MaxWindowSeconds (7 days) on every entry point; a day of margin covers clock skew
+    // between the writers' clocks and the database's. A row whose Wait-mode cursor (NextSlotUtc) is still ahead
+    // is kept regardless. Adapter buckets (warp:adapter:{name}) are left alone: one per adapter, named in code,
+    // so they cannot grow, and an adapter's window has no 7-day cap. The predicate and the delete are one statement,
+    // so a bucket written meanwhile cannot be caught between a read and a delete. Batched + MaxSweepBatchesPerTick-capped like
+    // the other sweeps.
+    internal async Task<int> CleanupStaleRateLimitBucketsAsync(CancellationToken ct)
+    {
+        var now = _time.GetUtcNow().UtcDateTime;
+        var cutoff = now - StaleRateLimitBucketAge;
+        var batchSize = _configuration.ExpirationBatchSize;
+        var batches = 0;
+        var total = 0;
+
+        while (!ct.IsCancellationRequested && batches < MaxSweepBatchesPerTick)
+        {
+            batches++;
+
+            // One statement per batch, served by the index on UpdatedAt: a separate SELECT of the names would
+            // read it a second time.
+            var deleted = await StaleRateLimitBuckets(cutoff, now)
+                .Take(batchSize)
+                .ExecuteDeleteAsync(ct);
+            total += deleted;
+
+            if (deleted < batchSize)
             {
                 break;
             }
@@ -1199,4 +1242,10 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
                 .Any(y => y.ServiceName == x.Name))
             .ExecuteDeleteAsync(ct);
     }
+
+    private IQueryable<RateLimitBucket> StaleRateLimitBuckets(DateTime cutoff, DateTime now)
+        => _context.Set<RateLimitBucket>()
+            .Where(x => x.UpdatedAt < cutoff)
+            .Where(x => x.NextSlotUtc == null || x.NextSlotUtc <= now)
+            .Where(x => !x.Name.StartsWith(AdapterSharedPolicy.BucketKeyPrefix));
 }

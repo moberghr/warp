@@ -5,8 +5,15 @@ import { decideReauth, reloadGuard, type ReauthSignal } from './reauth';
 
 const apiPath = config.apiPath;
 
+/**
+ * Sent on every API request. The server rejects state-changing requests without it, which a cross-site
+ * page cannot add without a CORS preflight — the dashboard's CSRF defence.
+ */
+export const WARP_REQUEST_HEADER = 'X-Warp-Request';
+
 const api = axios.create({
   baseURL: apiPath,
+  headers: { [WARP_REQUEST_HEADER]: '1' },
 });
 
 // Global 401 handler — triggers login screen

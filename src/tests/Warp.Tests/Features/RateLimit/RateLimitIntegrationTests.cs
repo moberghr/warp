@@ -26,9 +26,13 @@ public abstract class RateLimitIntegrationTestsBase : IntegrationTestBase
         // Three jobs, limit = 2. Worker pickup order is non-deterministic so we cannot say
         // *which* one gets cancelled — only that exactly one of the three does, and the log
         // message names the rate-limit key. See feedback_no_spray_n_tests.
-        var job1Id = await publisher.Enqueue(new UnitRequest(), new JobParameters().WithRateLimit(key, count: 2, window: TimeSpan.FromMinutes(5)));
-        var job2Id = await publisher.Enqueue(new UnitRequest(), new JobParameters().WithRateLimit(key, count: 2, window: TimeSpan.FromMinutes(5)));
-        var job3Id = await publisher.Enqueue(new UnitRequest(), new JobParameters().WithRateLimit(key, count: 2, window: TimeSpan.FromMinutes(5)));
+        //
+        // TokenBucket, not Fixed: a fixed window is floor-aligned to UTC, so jobs that happen to run either side of
+        // a window boundary are each admitted by their own window and the outcome depends on the wall clock. A
+        // token bucket starting full admits exactly `count` back to back, whenever the test runs.
+        var job1Id = await publisher.Enqueue(new UnitRequest(), new JobParameters().WithRateLimit(key, count: 2, window: TimeSpan.FromMinutes(5), style: RateLimitStyle.TokenBucket));
+        var job2Id = await publisher.Enqueue(new UnitRequest(), new JobParameters().WithRateLimit(key, count: 2, window: TimeSpan.FromMinutes(5), style: RateLimitStyle.TokenBucket));
+        var job3Id = await publisher.Enqueue(new UnitRequest(), new JobParameters().WithRateLimit(key, count: 2, window: TimeSpan.FromMinutes(5), style: RateLimitStyle.TokenBucket));
         await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         await server.WaitForCompletion();
@@ -59,8 +63,10 @@ public abstract class RateLimitIntegrationTestsBase : IntegrationTestBase
         // Limit one per minute, two jobs. Whichever worker wins the lock-and-bucket race
         // runs; the other gets Throttled and rescheduled. The test does not assume which
         // of the two wins — only that one completed and one was rescheduled.
-        var job1Id = await publisher.Enqueue(new UnitRequest(), new JobParameters().WithRateLimit(key, count: 1, window: TimeSpan.FromMinutes(1), mode: RateLimitMode.Wait));
-        var job2Id = await publisher.Enqueue(new UnitRequest(), new JobParameters().WithRateLimit(key, count: 1, window: TimeSpan.FromMinutes(1), mode: RateLimitMode.Wait));
+        // TokenBucket rather than Fixed for the reason given in the Skip-mode test above: a minute-aligned fixed
+        // window let both jobs complete whenever they ran either side of a minute boundary (seen on CI).
+        var job1Id = await publisher.Enqueue(new UnitRequest(), new JobParameters().WithRateLimit(key, count: 1, window: TimeSpan.FromMinutes(1), mode: RateLimitMode.Wait, style: RateLimitStyle.TokenBucket));
+        var job2Id = await publisher.Enqueue(new UnitRequest(), new JobParameters().WithRateLimit(key, count: 1, window: TimeSpan.FromMinutes(1), mode: RateLimitMode.Wait, style: RateLimitStyle.TokenBucket));
         await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         // Wait for both jobs to settle (Completed or Scheduled). WaitForCompletion treats
