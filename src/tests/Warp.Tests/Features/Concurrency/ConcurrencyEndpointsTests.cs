@@ -10,6 +10,7 @@ using Warp.Core.Concurrency;
 using Warp.Dashboard;
 using Warp.Dashboard.Endpoints;
 using Warp.Dashboard.Extensions;
+using Warp.Tests.Helpers;
 
 namespace Warp.Tests.Features.Concurrency;
 
@@ -38,7 +39,7 @@ public class ConcurrencyEndpointsTests
 
         await app.StartAsync(CancellationToken.None);
 
-        return (app, app.GetTestClient(), mgr);
+        return (app, app.GetDashboardTestClient(), mgr);
     }
 
     private static async Task<(WebApplication App, HttpClient Client)> CreateAppWithoutManager()
@@ -53,7 +54,7 @@ public class ConcurrencyEndpointsTests
 
         await app.StartAsync(CancellationToken.None);
 
-        return (app, app.GetTestClient());
+        return (app, app.GetDashboardTestClient());
     }
 
     [TimedFact]

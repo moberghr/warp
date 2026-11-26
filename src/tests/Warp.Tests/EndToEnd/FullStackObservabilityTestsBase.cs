@@ -71,7 +71,7 @@ public abstract class FullStackObservabilityTestsBase : IAsyncLifetime
     {
         var startedAt = DateTime.UtcNow.AddSeconds(-1);
         await using var app = await StartAppAsync();
-        var client = app.GetTestClient();
+        var client = app.GetDashboardTestClient();
 
         // ---- Drive: one direct inbound request, one job (→ outbound adapter call), one webhook. ----
         using (var inbound = new StringContent("{\"src\":\"inbound\"}", System.Text.Encoding.UTF8, "application/json"))

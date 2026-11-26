@@ -506,7 +506,7 @@ public abstract class MetricChartTileTestsBase : IAsyncLifetime
         app.MapWarpApiEndpoints(new WarpDashboardOptions(), []);
         await app.StartAsync(CancellationToken.None);
 
-        return new DashboardHost(app, app.GetTestClient());
+        return new DashboardHost(app, app.GetDashboardTestClient());
     }
 
     private sealed class StatementCounter : DbCommandInterceptor

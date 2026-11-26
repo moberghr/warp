@@ -15,6 +15,7 @@ using Warp.Core.Webhooks;
 using Warp.Dashboard;
 using Warp.Dashboard.Endpoints;
 using Warp.Tests.Fixtures;
+using Warp.Tests.Helpers;
 
 namespace Warp.Tests.Webhooks;
 
@@ -334,7 +335,7 @@ public abstract class WebhookEndpointTestsBase : IAsyncLifetime
 
         await app.StartAsync(CancellationToken.None);
 
-        return (app, app.GetTestClient());
+        return (app, app.GetDashboardTestClient());
     }
 
     private static async Task<(WebApplication App, HttpClient Client)> CreateAddonsHost(bool registerWebhooks)
@@ -353,7 +354,7 @@ public abstract class WebhookEndpointTestsBase : IAsyncLifetime
 
         await app.StartAsync(CancellationToken.None);
 
-        return (app, app.GetTestClient());
+        return (app, app.GetDashboardTestClient());
     }
 
     private async Task<Guid> SeedDeliveryAsync(

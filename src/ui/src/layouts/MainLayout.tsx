@@ -22,6 +22,7 @@ import { setInstanceStaleGrace } from '@/lib/liveness';
 import { config } from '@/config';
 import { Hint } from '@/components/ui/tooltip';
 import * as api from '@/api';
+import apiClient from '@/api/client';
 import { useRetryingJobsCount } from '@/api/hooks/useJobs';
 import type { DashboardStatistics, WarpAddonsInfo } from '@/types';
 import type { ExtensionManifest } from '@/extensions/types';
@@ -401,8 +402,13 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
             <Hint text="Logout">
               <button
                 onClick={async () => {
-                  await fetch(`${config.apiPath}auth/logout`, { method: 'POST' });
-                  window.location.reload();
+                  try {
+                    await apiClient.post('/auth/logout');
+                  } catch {
+                    // Reload regardless: a failed logout should still land the user on whatever the server says now.
+                  } finally {
+                    window.location.reload();
+                  }
                 }}
                 className="p-2 rounded-md hover:bg-accent text-muted-foreground ml-1"
                 aria-label="Logout"

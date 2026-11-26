@@ -62,6 +62,10 @@ public static class WarpDashboardBuilder
         var apiGroup = app.MapWarpApiEndpoints(options, extensions);
         apiGroup.MapWarpAuthEndpoints(app.Services);
 
+        // Every state-changing API call, login and logout included, must carry the SPA's request header — see
+        // WarpRequestHeaderGuard. The hub is not in the group: its negotiate POST changes no state.
+        apiGroup.RequireRequestHeader();
+
         // Every API response carries a marker header. The SPA reads it to distinguish "the Warp API
         // answered" from "something intercepted this call" — a sign-in redirect it transparently followed
         // and resolved with someone else's 200. A content-type sniff would misfire on the extension

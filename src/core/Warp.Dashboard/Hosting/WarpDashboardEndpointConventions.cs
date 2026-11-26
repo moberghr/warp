@@ -35,9 +35,15 @@ public static class WarpDashboardEndpointConventions
     }
 
     /// <summary>
-    /// Restricts the whole dashboard — shell, API and hub — to loopback callers. A remote caller gets 403;
-    /// signing in cannot change the answer, so there is nothing to challenge.
+    /// Restricts the whole dashboard — shell, API and hub — to loopback callers that address it by a loopback
+    /// host name (<c>localhost</c>, <c>127.0.0.1</c>, <c>[::1]</c>, any port). A remote caller gets 403; signing in
+    /// cannot change the answer, so there is nothing to challenge.
     /// </summary>
+    /// <remarks>
+    /// The check reads the connection's remote address. Behind a reverse proxy on the same machine that does not
+    /// forward the client address (<c>UseForwardedHeaders</c>), every request arrives from loopback and passes,
+    /// whoever sent it; gate such a deployment with a real policy instead.
+    /// </remarks>
     public static WarpDashboardEndpointConventionBuilder RequireLocalRequests(this WarpDashboardEndpointConventionBuilder builder)
     {
         ArgumentNullException.ThrowIfNull(builder);

@@ -124,6 +124,7 @@ public class DashboardPushAuthTests
 
         var server = app.GetTestServer();
         var client = new HttpClient(server.CreateHandler()) { BaseAddress = server.BaseAddress };
+        client.DefaultRequestHeaders.Add("X-Warp-Request", "1");
 
         return (app, client);
     }

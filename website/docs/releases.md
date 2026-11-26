@@ -4,6 +4,36 @@ sidebar_position: 6
 
 # Releases
 
+## 8.1.0 / *unreleased*
+
+### Security hardening
+
+Fixes for things a caller outside your application could reach. No migration. Three of them change behaviour
+(marked **Behaviour change**); read those before you deploy.
+
+#### Dashboard
+
+- **Behaviour change: state-changing dashboard API calls need the `X-Warp-Request` header.** Every request to
+  `{prefix}/api/...` other than `GET`, `HEAD`, `OPTIONS` and `TRACE`, built-in login and logout included, is
+  answered `400` without it. This stops cross-site request forgery: a page on another site could make a signed-in
+  browser (or any browser, against a loopback-only dashboard) post to delete-by-type, requeue, pause, cancel or
+  redeliver endpoints. The dashboard UI and the `api` client handed to dashboard extensions send it; **scripts or
+  tools that call the dashboard API directly must add `X-Warp-Request: 1`**, and so must an extension that calls
+  the API with its own `fetch`. See [Cross-site request forgery](operations/dashboard-auth.md#cross-site-request-forgery).
+- **Behaviour change: `RequireLocalRequests()` also checks the host name.** A request must come over loopback
+  *and* address the dashboard as `localhost`, `127.0.0.1` or `[::1]` (any port), which defeats DNS rebinding.
+  Reaching a local dashboard by machine name or a LAN address now gets 403. Also documented: behind a reverse
+  proxy on the same machine that does not forward the client address, every request looks local.
+- **Login throttling.** The built-in login counts attempts per IP address and per username; after 5 it locks that
+  IP or username out for 30 seconds, doubling per further attempt up to 15 minutes, and answers `429` with
+  `Retry-After`. A successful sign-in clears the count. In memory and per process; tune or disable it with
+  `AddBuiltInLogin<T>(o => o.Throttling...)`. Like any lockout, the per-username one lets an anonymous caller
+  keep a known username locked out by failing on purpose; sign-in for other usernames is unaffected. See [Login throttling](operations/dashboard-auth.md#login-throttling).
+- **Behaviour change: the login cookie is `Secure` by default.** Browsers treat `http://localhost` as secure, so
+  local development works as before; for plain HTTP on any other address set
+  `AddBuiltInLogin<T>(o => o.RequireSecureCookie = false)`.
+- A login request whose body is not a form now gets `400` instead of `500`.
+
 ## 8.0.0
 
 *2026-11-25*

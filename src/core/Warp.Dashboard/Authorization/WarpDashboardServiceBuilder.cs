@@ -34,6 +34,7 @@ public sealed class WarpDashboardServiceBuilder
 
         Services.AddScoped<IWarpCredentialValidator, TValidator>();
         Services.AddSingleton<IWarpDashboardLoginMarker, WarpDashboardLoginMarker>();
+        Services.AddSingleton(x => new WarpDashboardLoginThrottle(loginOptions.Throttling, x.GetService<TimeProvider>() ?? TimeProvider.System));
 
         Services
             .AddAuthentication()
@@ -42,7 +43,7 @@ public sealed class WarpDashboardServiceBuilder
                 x.Cookie.Name = WarpDashboardDefaults.CookieName;
                 x.Cookie.HttpOnly = true;
                 x.Cookie.SameSite = SameSiteMode.Strict;
-                x.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
+                x.Cookie.SecurePolicy = loginOptions.RequireSecureCookie ? CookieSecurePolicy.Always : CookieSecurePolicy.SameAsRequest;
                 x.ExpireTimeSpan = loginOptions.ExpireTimeSpan;
                 x.SlidingExpiration = loginOptions.SlidingExpiration;
 

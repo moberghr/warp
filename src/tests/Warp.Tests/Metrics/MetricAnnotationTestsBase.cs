@@ -21,6 +21,7 @@ using Warp.Core.Services;
 using Warp.Dashboard;
 using Warp.Dashboard.Endpoints;
 using Warp.Tests.Fixtures;
+using Warp.Tests.Helpers;
 using Warp.Tests.Observability;
 
 namespace Warp.Tests.Metrics;
@@ -589,7 +590,7 @@ public abstract class MetricAnnotationTestsBase : IAsyncLifetime
         try
         {
             app.Services.GetService<IMetricsMarker>().ShouldBeNull();
-            using var client = app.GetTestClient();
+            using var client = app.GetDashboardTestClient();
 
             var post = await client.PostAsJsonAsync("/warp/api/annotations", new { id = 0, note = "Backfill running", instrument = "c", startsAt = Now.AddHours(-2) }, Ct);
             var list = await client.GetFromJsonAsync<JsonElement>("/warp/api/annotations?instrument=c", Ct);
@@ -776,7 +777,7 @@ public abstract class MetricAnnotationTestsBase : IAsyncLifetime
         app.MapWarpApiEndpoints(new WarpDashboardOptions(), []);
         await app.StartAsync(CancellationToken.None);
 
-        return new DashboardHost(app, app.GetTestClient());
+        return new DashboardHost(app, app.GetDashboardTestClient());
     }
 
     private sealed record DashboardHost(WebApplication App, HttpClient Client) : IAsyncDisposable
