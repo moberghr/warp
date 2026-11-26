@@ -237,6 +237,9 @@ public abstract class WebhookStuckRecoveryTestsBase : IntegrationTestBase
             configure: cfg =>
             {
                 cfg.WorkerCount = 0;
+
+                // And no dedicated webhook group (8.1): it would poll warp:webhooks and run the seeded jobs.
+                cfg.WebhookWorkerCount = 0;
                 cfg.StaleJobRecoveryInterval = null;
                 cfg.AddWorkerGroup(g =>
                 {

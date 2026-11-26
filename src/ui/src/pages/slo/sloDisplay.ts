@@ -68,6 +68,9 @@ export function formatTarget(
   if (o.kind === SloKind.MetricLatency) {
     return `p${o.percentile ?? DEFAULT_PERCENTILE} ≤ ${plain(o.targetValue)}`;
   }
+  if (o.kind === SloKind.WebhookDeliveryLatency) {
+    return `${o.percentile ?? DEFAULT_PERCENTILE}% delivered within ${plain(o.targetValue)} min`;
+  }
   if (o.kind === SloKind.MetricRatio && o.baselineDays != null) {
     return `a drop of at most ${points(o.targetValue)} from the ${o.baselineDays}-day baseline`;
   }
@@ -89,6 +92,9 @@ export function formatObserved(o: Pick<SloObjective, 'kind' | 'targetValue' | 'a
   if (o.kind === SloKind.MetricLatency) {
     return `${percent(o.attainment)} ≤ ${plain(o.targetValue)}`;
   }
+  if (o.kind === SloKind.WebhookDeliveryLatency) {
+    return `${percent(o.attainment)} delivered within ${plain(o.targetValue)} min`;
+  }
   if (o.kind === SloKind.MetricRatio && o.baselineDays != null) {
     return `a drop of ${points(o.attainment)}`;
   }
@@ -101,7 +107,7 @@ export function formatObserved(o: Pick<SloObjective, 'kind' | 'targetValue' | 'a
 
 /** True for the kinds whose attainment is a share on the right side of a threshold (events, or observed time). */
 export function sharesWithinThreshold(kind: SloKind): boolean {
-  return kind === SloKind.MetricLatency || kind === SloKind.MetricGaugeThreshold;
+  return kind === SloKind.MetricLatency || kind === SloKind.MetricGaugeThreshold || kind === SloKind.WebhookDeliveryLatency;
 }
 
 /**
@@ -112,7 +118,7 @@ export function checkTarget(o: Pick<SloObjective, 'kind' | 'targetValue' | 'perc
   return sharesWithinThreshold(o.kind) ? (o.percentile ?? DEFAULT_PERCENTILE) / 100 : o.targetValue;
 }
 
-/** The threshold a verdict check carries beside its share: metric latency and gauge objectives only. */
+/** The threshold a verdict check carries beside its share: metric latency, gauge and webhook delivery latency objectives. */
 export function checkThreshold(o: Pick<SloObjective, 'kind' | 'targetValue'>): number | null {
   return sharesWithinThreshold(o.kind) ? o.targetValue : null;
 }

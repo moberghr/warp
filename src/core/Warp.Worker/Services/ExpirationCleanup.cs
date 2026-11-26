@@ -1087,7 +1087,8 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
     // history, not an audit trail (§8.2 stance) — the dispatcher stamps ExpireAt from WebhookDeliveryRetention
     // and this sweep drops anything expired. Pending deliveries are excluded: an in-flight delivery whose
     // ExpireAt elapses mid-schedule (a long backoff can outrun retention) must never vanish underneath its
-    // own scheduled executor job — only Delivered/Exhausted rows are eligible. The WebhookDelivery table is
+    // own scheduled executor job — and so are Parked ones (8.1), which wait for their endpoint to recover and
+    // would otherwise be lost silently; only Delivered/Exhausted/Cancelled rows are eligible. The WebhookDelivery table is
     // always in the schema (§2.11), like AdapterCallLog, so no model guard is needed. Attempt rows
     // (AdapterCallLog) expire independently on their own retention. A volume table (a row per send), so
     // the delete runs in ExpirationBatchSize id batches like the call-log sweep — same honest scope:
@@ -1104,6 +1105,7 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
             batches++;
             var ids = await _context.Set<WebhookDelivery>()
                 .Where(x => x.Status != WebhookDeliveryStatus.Pending)
+                .Where(x => x.Status != WebhookDeliveryStatus.Parked)
                 .Where(x => x.ExpireAt != null)
                 .Where(x => x.ExpireAt < now)
                 .Select(x => x.Id)
@@ -1130,7 +1132,7 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
 
     // Count cap for WebhookDelivery: keep at most N settled (non-Pending) rows globally
     // (WebhookDeliveryRetentionCount), deleting the oldest by CreatedAt beyond the cap. Complements the age
-    // sweep. Pending deliveries are never count-trimmed — they still own live scheduled work. Batched,
+    // sweep. Pending and Parked deliveries are never count-trimmed — they still own live or waiting work. Batched,
     // capped by MaxSweepBatchesPerTick.
     internal async Task<int> CleanupWebhookDeliveriesByCountAsync(CancellationToken ct)
     {
@@ -1149,6 +1151,7 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
             batches++;
             var count = await _context.Set<WebhookDelivery>()
                 .Where(x => x.Status != WebhookDeliveryStatus.Pending)
+                .Where(x => x.Status != WebhookDeliveryStatus.Parked)
                 .CountAsync(ct);
 
             if (count <= cap.Value)
@@ -1159,6 +1162,7 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
             var toDelete = Math.Min(count - cap.Value, batchSize);
             var ids = await _context.Set<WebhookDelivery>()
                 .Where(x => x.Status != WebhookDeliveryStatus.Pending)
+                .Where(x => x.Status != WebhookDeliveryStatus.Parked)
                 .OrderBy(x => x.CreatedAt)
                 .ThenBy(x => x.Id)
                 .Select(x => x.Id)

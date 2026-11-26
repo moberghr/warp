@@ -8,9 +8,10 @@ import { RelativeTime } from '@/components/RelativeTime';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import { WebhookDeliveryChart } from '@/components/WebhookDeliveryChart';
 import * as api from '@/api';
-import { WebhookDeliveryStatus } from '@/types/webhooks';
-import type { WebhookDeliveryListItem, WebhookDeliveryFilter } from '@/types/webhooks';
+import type { WebhookDeliveryListItem, WebhookDeliveryFilter, WebhookGroupModel } from '@/types/webhooks';
 import { DASHBOARD_LOCALE } from '@/utils/format';
+import { EndpointActions, EndpointHealthBadge, LastResult, WebhookStatusPill } from './WebhookBadges';
+import { formatDeliveryDuration, formatSuccessRate } from './webhookDisplay';
 
 const PAGE_SIZE = 20;
 
@@ -89,7 +90,19 @@ export default function WebhookGroupDetailPage() {
         accessorKey: 'status',
         header: 'Status',
         meta: { headerClassName: 'w-28' },
-        cell: ({ row }) => <StatusPill status={row.original.status} />,
+        cell: ({ row }) => <WebhookStatusPill status={row.original.status} />,
+      },
+      {
+        id: 'lastResult',
+        header: 'Last result',
+        meta: { headerClassName: 'w-44' },
+        cell: ({ row }) => (
+          <LastResult
+            lastStatusCode={row.original.lastStatusCode}
+            lastFailureReason={row.original.lastFailureReason}
+            lastAttemptAt={row.original.lastAttemptAt}
+          />
+        ),
       },
       {
         accessorKey: 'attemptCount',
@@ -120,7 +133,9 @@ export default function WebhookGroupDetailPage() {
         </div>
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+      {isEndpoint && group && <EndpointHealthSummary group={group} />}
+
+      <div className="grid grid-cols-2 md:grid-cols-6 gap-4 mb-4">
         <Tile label="Deliveries" value={total.toLocaleString(DASHBOARD_LOCALE)} />
         <Tile label="Delivered" value={(group?.delivered ?? 0).toLocaleString(DASHBOARD_LOCALE)} />
         <Tile label="Pending" value={(group?.pending ?? 0).toLocaleString(DASHBOARD_LOCALE)} />
@@ -129,6 +144,12 @@ export default function WebhookGroupDetailPage() {
           value={(group?.exhausted ?? 0).toLocaleString(DASHBOARD_LOCALE)}
           emphasis={group && group.exhausted > 0 ? 'text-destructive' : undefined}
         />
+        <Tile
+          label="Parked"
+          value={(group?.parked ?? 0).toLocaleString(DASHBOARD_LOCALE)}
+          emphasis={group && group.parked > 0 ? 'text-violet-700 dark:text-violet-300' : undefined}
+        />
+        <Tile label="Cancelled" value={(group?.cancelled ?? 0).toLocaleString(DASHBOARD_LOCALE)} />
       </div>
 
       <Card className="mb-4">
@@ -155,6 +176,38 @@ export default function WebhookGroupDetailPage() {
   );
 }
 
+// The endpoint's health record (8.1) and its actions. A group without a record is untracked or never failed.
+function EndpointHealthSummary({ group }: { group: WebhookGroupModel }) {
+  return (
+    <Card className="mb-4">
+      <CardHeader className="flex flex-row items-center justify-between gap-3">
+        <CardTitle className="text-base flex items-center gap-2">
+          Endpoint health <EndpointHealthBadge health={group.health} />
+        </CardTitle>
+        <EndpointActions group={group} />
+      </CardHeader>
+      <CardContent className="grid grid-cols-2 md:grid-cols-4 gap-x-6 gap-y-2 text-sm">
+        <Figure label="Failing since">{group.failingSince ? <RelativeTime date={group.failingSince} /> : '—'}</Figure>
+        <Figure label="Next probe">{group.nextProbeAt ? <RelativeTime date={group.nextProbeAt} tense="countdown" /> : '—'}</Figure>
+        <Figure label="Last success">{group.lastSuccessAt ? <RelativeTime date={group.lastSuccessAt} /> : '—'}</Figure>
+        <Figure label="Last failure">{group.lastFailureAt ? <RelativeTime date={group.lastFailureAt} /> : '—'}</Figure>
+        <Figure label="Parked">{group.parked.toLocaleString(DASHBOARD_LOCALE)}</Figure>
+        <Figure label="Success rate (24h)">{formatSuccessRate(group.successRate)}</Figure>
+        <Figure label="p95 send → delivered (24h)">{formatDeliveryDuration(group.p95DeliveryMs)}</Figure>
+      </CardContent>
+    </Card>
+  );
+}
+
+function Figure({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className="tabular-nums">{children}</div>
+    </div>
+  );
+}
+
 function Tile({ label, value, emphasis }: { label: string; value: string; emphasis?: string }) {
   return (
     <Card>
@@ -164,16 +217,4 @@ function Tile({ label, value, emphasis }: { label: string; value: string; emphas
       </CardContent>
     </Card>
   );
-}
-
-const statusStyles: Record<WebhookDeliveryStatus, { label: string; cls: string }> = {
-  [WebhookDeliveryStatus.Pending]: { label: 'Pending', cls: 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400' },
-  [WebhookDeliveryStatus.Delivered]: { label: 'Delivered', cls: 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400' },
-  [WebhookDeliveryStatus.Exhausted]: { label: 'Exhausted', cls: 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400' },
-};
-
-function StatusPill({ status }: { status: WebhookDeliveryStatus }) {
-  const style = statusStyles[status] ?? { label: 'Unknown', cls: 'bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-400' };
-
-  return <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${style.cls}`}>{style.label}</span>;
 }

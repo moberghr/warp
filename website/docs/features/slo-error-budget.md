@@ -19,8 +19,9 @@ It's an opt-in feature: call `AddSlo(...)` to turn evaluation on. The objective/
 | `MetricGap` | events of one custom metric minus events of another stay at or below N | event count | ✓ |
 | `MetricLatency` | percentile of a custom **histogram** stays at or below a threshold | threshold in the instrument's unit, plus a percentile (1–99) | ✓ |
 | `MetricGaugeThreshold` | a custom **gauge**'s per-bucket average, min or max stays at most (or at least) a value | gauge value, plus the compliant share of the window (1–99%) | ✓ |
+| `WebhookDeliveryLatency` | share of an endpoint's [webhook deliveries](./webhooks.md) delivered within N minutes of being sent (8.1) | minutes, plus the required share (1–99%) | ✓ (from the delivery rows) |
 
-The first five kinds read Warp's own aggregates. The `Metric*` kinds read your [custom application metrics](./custom-metrics.md) and are described [below](#metric-objectives).
+The first five kinds read Warp's own aggregates. `WebhookDeliveryLatency` reads the webhook delivery rows directly ([below](#webhook-delivery-latency)). The `Metric*` kinds read your [custom application metrics](./custom-metrics.md) and are described [below](#metric-objectives).
 
 Rate/attainment kinds use the standard error-budget model (`budget = 1 − burn`, where `burn = observed error rate ÷ allowed error rate`); latency/depth kinds compare the observed value to the target (lower is better). A retried-then-succeeded job counts as a success. For `DeadlineAttainment`, a job that reaches a terminal state *after* its Total-scope deadline counts as a miss — including a late `Completed`, since the deadline is a time bound, not just a failure signal.
 
@@ -177,6 +178,19 @@ o.AddMetricGaugeThreshold(
     windowSeconds: 21600);
 ```
 
+## Webhook delivery latency
+
+`WebhookDeliveryLatency` (8.1) holds a webhook endpoint to a delivery time: **at least `Percentile`% of the deliveries sent in the window must be delivered within `TargetValue` minutes of `SendAsync`**.
+
+- `Dimension` is the delivery group (`WebhookSend.Group`, the endpoint), or `*` for every delivery. `Application` narrows it to the deliveries one application sent.
+- A delivery is counted once it is `TargetValue` minutes old: a younger one may still arrive in time. **Good**: `Delivered` with its last attempt at most `TargetValue` minutes after it was sent. **Bad**: delivered later, `Exhausted`, `Parked`, or still `Pending` past the threshold. **Not counted**: `Cancelled`. Retries and redeliveries are included: it is the delay the subscriber saw.
+- Evaluated as a good-event ratio with the rate budget (allowed bad share `1 − Percentile ÷ 100`), like `MetricLatency`; fast-burn reads the short window the same way. With no counted delivery in the window it reads **No data**.
+- The window ends `TargetValue` minutes ago (the newest deliveries that could have made it) and keeps its full length, so does the fast-burn window. It counts the delivery rows in the database, so the window must stay within `WebhookDeliveryRetention` (30 days by default). A delivery's time is taken from `LastAttemptAt`; `Delivered` rows from before 8.1 have none and are left out rather than counted as late.
+
+```csharp
+opt.AddSlo(o => o.AddWebhookDeliveryLatency("acme-orders", minutes: 5, percentile: 99, windowSeconds: 86_400));
+```
+
 ## Fast-burn
 
 The **short (fast-burn) window** is the objective's window ÷ 12, floored to 5 minutes — and it's real, because it reads the **5-minute fine tier** from the metrics retention tiers (§8.30). Every objective reports two burn rates: **fast** (recent) and **slow** (full window), so a sudden burn is caught quickly while the slow window governs the sustained budget. `ExecutionLatency`/`QueueWaitLatency` read the tiered `pcth` latency histogram, so their percentiles are windowed rather than all-time.
@@ -221,4 +235,4 @@ An objective can carry known-issue notes, for example "email provider rate-limit
 
 ## Migration
 
-Additive — two new tables (`slo_definition`, `slo_evaluation`), picked up by a standard `dotnet ef migrations add` / `database update`. The metric kinds (7.5.0) add seven nullable columns to `slo_definition` (`TagFilter`, `SecondaryMetric`, `SecondaryTagFilter`, `RatioTag`, `GoodValues`, `BadValues`, `BaselineDays`), and `MetricGaugeThreshold` two more (`Comparison`, `GaugeAggregate`, nullable ints), all additive. Disable with `SloEvaluationInterval = null`, or simply never call `AddSlo()`.
+Additive — two new tables (`slo_definition`, `slo_evaluation`). `WebhookDeliveryLatency` (8.1) adds no SLO column; it needs the 8.1 webhook columns (see the [8.1 release notes](../releases.md)), picked up by a standard `dotnet ef migrations add` / `database update`. The metric kinds (7.5.0) add seven nullable columns to `slo_definition` (`TagFilter`, `SecondaryMetric`, `SecondaryTagFilter`, `RatioTag`, `GoodValues`, `BadValues`, `BaselineDays`), and `MetricGaugeThreshold` two more (`Comparison`, `GaugeAggregate`, nullable ints), all additive. Disable with `SloEvaluationInterval = null`, or simply never call `AddSlo()`.

@@ -1,9 +1,13 @@
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Warp.Core.Adapters;
 using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
@@ -60,6 +64,10 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
     private readonly IWarpAdapters _adapters;
     private readonly AdapterRegistry _adapterRegistry;
     private readonly WarpNotifierDispatcher _notifier;
+    private readonly IEnumerable<IWebhookEndpointHealthHandler> _endpointHealthHandlers;
+    private readonly IServiceScopeFactory _scopeFactory;
+    private readonly TimeSpan _attemptTimeout;
+    private readonly TimeSpan _probeInterval;
     private readonly ILogger<ExecuteWebhookDeliveryHandler<TContext>> _logger;
 
     public ExecuteWebhookDeliveryHandler(
@@ -73,6 +81,9 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
         IWarpAdapters adapters,
         AdapterRegistry adapterRegistry,
         WarpNotifierDispatcher notifier,
+        IEnumerable<IWebhookEndpointHealthHandler> endpointHealthHandlers,
+        IServiceScopeFactory scopeFactory,
+        IOptions<WarpConfiguration> configuration,
         ILogger<ExecuteWebhookDeliveryHandler<TContext>> logger)
     {
         _context = context;
@@ -85,6 +96,10 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
         _adapters = adapters;
         _adapterRegistry = adapterRegistry;
         _notifier = notifier;
+        _endpointHealthHandlers = endpointHealthHandlers;
+        _scopeFactory = scopeFactory;
+        _attemptTimeout = configuration.Value.WebhookAttemptTimeout;
+        _probeInterval = configuration.Value.WebhookEndpointProbeInterval;
         _logger = logger;
     }
 
@@ -175,24 +190,63 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
             return;
         }
 
-        var succeeded = await TryDeliverAsync(delivery, cancellationToken);
+        var attempt = await TryDeliverAsync(delivery, cancellationToken);
 
-        WarpTelemetry.WebhookAttempts.Add(1, new KeyValuePair<string, object?>("outcome", succeeded ? "success" : "failed"));
+        WarpTelemetry.WebhookAttempts.Add(1, new KeyValuePair<string, object?>("outcome", attempt.Succeeded ? "success" : "failed"));
+
+        // Endpoint health (8.1) follows the flag stamped at SendAsync, never this server's own config. The row an
+        // exhausting delivery flips to Failing must exist before the outcome transaction: inserting it there and
+        // losing a race to another executor would abort that transaction on PostgreSQL.
+        var groupName = delivery.TrackEndpointHealth ? delivery.GroupName : null;
+        if (groupName is not null && !attempt.Succeeded && !hasRetry)
+        {
+            await EnsureEndpointAsync(groupName, cancellationToken);
+        }
 
         var exhausted = false;
+        PendingEndpointHealthSignal? healthSignal = null;
 
         try
         {
+            await using var transaction = await _context.Database.BeginTransactionAsync(cancellationToken);
+            var attemptedAt = _timeProvider.GetUtcNow().UtcDateTime;
+
+            // Stamps the last-attempt fields (#357) and, through the Pending guard, locks the row against a
+            // concurrent Cancel: a delivery cancelled while this attempt was in flight stays Cancelled — no retry
+            // is scheduled and no outcome is written over it.
+            var stillPending = await _context.Set<WebhookDelivery>()
+                .Where(x => x.Id == delivery.Id)
+                .Where(x => x.Status == WebhookDeliveryStatus.Pending)
+                .ExecuteUpdateAsync(
+                    s => s
+                        .SetProperty(x => x.LastAttemptAt, attemptedAt)
+                        .SetProperty(x => x.LastStatusCode, attempt.StatusCode)
+                        .SetProperty(x => x.LastFailureReason, attempt.FailureReason),
+                    cancellationToken);
+
+            if (stillPending == 0)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                _logger.LogInformation("Webhook delivery {DeliveryId} was cancelled during attempt {Attempt}; its outcome is not recorded.", delivery.Id, attemptNumber);
+
+                return;
+            }
+
             // Sync the tracked entity with the values already claimed atomically above (the DB row already
             // carries them) so the transition below writes a consistent row; no second increment.
             delivery.AttemptCount = attemptNumber;
             delivery.NextAttemptAt = nextAttemptAt;
 
-            if (succeeded)
+            if (attempt.Succeeded)
             {
                 delivery.Status = WebhookDeliveryStatus.Delivered;
                 delivery.NextAttemptAt = null;
                 WarpTelemetry.WebhookDeliveries.Add(1, new KeyValuePair<string, object?>("outcome", "delivered"));
+
+                if (groupName is not null)
+                {
+                    healthSignal = await RecordEndpointSuccessAsync(groupName, attemptedAt, cancellationToken);
+                }
             }
             else if (hasRetry)
             {
@@ -200,21 +254,49 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
                 // determines the remaining plan. Attempt N's failure schedules delay schedule[N-1]. NextAttemptAt
                 // is already stamped by the claim; the scheduled job reuses the exact same value.
                 await _publisher.Schedule(new ExecuteWebhookDelivery { DeliveryId = delivery.Id }, nextAttemptAt!.Value, WebhookDefaults.Queue);
+
+                if (groupName is not null)
+                {
+                    await RecordEndpointFailureAsync(groupName, attemptedAt, cancellationToken);
+                }
             }
             else
             {
-                // Exhausted (covers the empty-schedule single-attempt case: attemptNumber 1 > count 0). The
-                // callback-pending flag commits WITH the transition so a crash before the callback is recovered.
-                delivery.Status = WebhookDeliveryStatus.Exhausted;
+                // Out of retries. With endpoint health tracking the delivery parks, to be probed or released when
+                // the endpoint recovers — including the one that turns a healthy endpoint Failing (the Failing signal
+                // is the alert, not the exhausted callback). Without tracking, or with no endpoint row to release
+                // it, the delivery is Exhausted as before.
+                var outcome = groupName is null
+                    ? EndpointOutcome.NotTracked
+                    : await MarkEndpointFailedAsync(groupName, attemptedAt, cancellationToken);
+
                 delivery.NextAttemptAt = null;
-                delivery.ExhaustedCallbackPending = true;
-                WarpTelemetry.WebhookDeliveries.Add(1, new KeyValuePair<string, object?>("outcome", "exhausted"));
-                exhausted = true;
+
+                if (outcome is EndpointOutcome.StartedFailing or EndpointOutcome.AlreadyFailing)
+                {
+                    delivery.Status = WebhookDeliveryStatus.Parked;
+                    WarpTelemetry.WebhookDeliveries.Add(1, new KeyValuePair<string, object?>("outcome", "parked"));
+
+                    if (outcome == EndpointOutcome.StartedFailing)
+                    {
+                        healthSignal = new PendingEndpointHealthSignal(WarpEventType.WebhookEndpointFailing, groupName!, attemptedAt, attemptedAt);
+                    }
+                }
+                else
+                {
+                    // Exhausted (covers the empty-schedule single-attempt case: attemptNumber 1 > count 0). The
+                    // callback-pending flag commits WITH the transition so a crash before the callback is recovered.
+                    delivery.Status = WebhookDeliveryStatus.Exhausted;
+                    delivery.ExhaustedCallbackPending = true;
+                    WarpTelemetry.WebhookDeliveries.Add(1, new KeyValuePair<string, object?>("outcome", "exhausted"));
+                    exhausted = true;
+                }
             }
 
             // Commit the state transition (and any scheduled retry job) FIRST so the exhausted callback below
             // never fires ahead of a persisted Exhausted row that a rollback could undo.
             await _publisher.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
         }
 #pragma warning disable CA1031 // executor jobs must ALWAYS complete: a persistence fault is logged, never a failed job.
         catch (Exception ex)
@@ -223,6 +305,13 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
             _logger.LogError(ex, "Webhook delivery {DeliveryId} could not persist its attempt {Attempt} outcome; completing the executor job.", delivery.Id, attemptNumber);
 
             return;
+        }
+
+        // The endpoint health signal first: it is best effort and raised once, so a fault in the exhausted-callback
+        // step below (which has its own crash recovery) must not lose it.
+        if (healthSignal is not null)
+        {
+            await WebhookEndpointHealthSignals.RaiseAsync(healthSignal, _endpointHealthHandlers, _notifier, _logger);
         }
 
         // Post-commit: the Exhausted row is durable, so invoke the host callback now (guarded), then clear the
@@ -234,6 +323,129 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
             delivery.ExhaustedCallbackPending = false;
             await _publisher.SaveChangesAsync(cancellationToken);
         }
+    }
+
+    private enum EndpointOutcome
+    {
+        NotTracked = 1,
+        StartedFailing = 2,
+        AlreadyFailing = 3,
+    }
+
+    // Creates the endpoint row (Healthy) if it does not exist yet, in its own scope and transaction, so a
+    // duplicate-key race with another executor is a caught failure here instead of an aborted outcome transaction.
+    private async Task EnsureEndpointAsync(string groupName, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var scope = _scopeFactory.CreateAsyncScope();
+            var context = scope.ServiceProvider.GetRequiredService<TContext>();
+
+            var exists = await context.Set<WebhookEndpoint>()
+                .AsNoTracking()
+                .Where(x => x.Name == groupName)
+                .AnyAsync(cancellationToken);
+
+            if (exists)
+            {
+                return;
+            }
+
+            context.Set<WebhookEndpoint>().Add(new WebhookEndpoint
+            {
+                Name = groupName,
+                State = WebhookEndpointState.Healthy,
+                CreatedAt = _timeProvider.GetUtcNow().UtcDateTime,
+            });
+
+            await context.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException)
+        {
+            // Another executor created it first — exactly what was needed.
+        }
+    }
+
+    // A tracked success recovers a Failing endpoint, and the endpoint monitor then releases its parked deliveries.
+    // Otherwise only the last-success time moves, and an endpoint that never failed has no row to update.
+    private async Task<PendingEndpointHealthSignal?> RecordEndpointSuccessAsync(string groupName, DateTime at, CancellationToken cancellationToken)
+    {
+        // The common case first, in one statement: a Healthy endpoint only moves its last-success time.
+        var healthy = await _context.Set<WebhookEndpoint>()
+            .Where(x => x.Name == groupName)
+            .Where(x => x.State == WebhookEndpointState.Healthy)
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.LastSuccessAt, at), cancellationToken);
+
+        if (healthy == 1)
+        {
+            return null;
+        }
+
+        var failing = await _context.Set<WebhookEndpoint>()
+            .AsNoTracking()
+            .Where(x => x.Name == groupName)
+            .Where(x => x.State == WebhookEndpointState.Failing)
+            .Select(x =>
+                new
+                {
+                    x.FailingSince,
+                })
+            .FirstOrDefaultAsync(cancellationToken);
+
+        // No row: the endpoint never failed, there is nothing to record.
+        if (failing is null)
+        {
+            return null;
+        }
+
+        var recovered = await _context.Set<WebhookEndpoint>()
+            .Where(x => x.Name == groupName)
+            .Where(x => x.State == WebhookEndpointState.Failing)
+            .ExecuteUpdateAsync(
+                s => s
+                    .SetProperty(x => x.State, WebhookEndpointState.Healthy)
+                    .SetProperty(x => x.FailingSince, (DateTime?)null)
+                    .SetProperty(x => x.NextProbeAt, (DateTime?)null)
+                    .SetProperty(x => x.StillFailingNotifiedAt, (DateTime?)null)
+                    .SetProperty(x => x.LastSuccessAt, at),
+                cancellationToken);
+
+        return recovered == 1
+            ? new PendingEndpointHealthSignal(WarpEventType.WebhookEndpointRecovered, groupName, failing.FailingSince, at)
+            : null;
+    }
+
+    private Task<int> RecordEndpointFailureAsync(string groupName, DateTime at, CancellationToken cancellationToken)
+        => _context.Set<WebhookEndpoint>()
+            .Where(x => x.Name == groupName)
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.LastFailureAt, at), cancellationToken);
+
+    // A tracked delivery ran out of retries: a Healthy endpoint turns Failing (StartedFailing), an endpoint already
+    // Failing stays so; either way the delivery parks. With no endpoint row at all (its creation failed for another
+    // reason) the delivery is exhausted rather than parked where nothing would ever release it.
+    private async Task<EndpointOutcome> MarkEndpointFailedAsync(string groupName, DateTime at, CancellationToken cancellationToken)
+    {
+        var nextProbeAt = at + _probeInterval;
+        var startedFailing = await _context.Set<WebhookEndpoint>()
+            .Where(x => x.Name == groupName)
+            .Where(x => x.State == WebhookEndpointState.Healthy)
+            .ExecuteUpdateAsync(
+                s => s
+                    .SetProperty(x => x.State, WebhookEndpointState.Failing)
+                    .SetProperty(x => x.FailingSince, at)
+                    .SetProperty(x => x.NextProbeAt, nextProbeAt)
+                    .SetProperty(x => x.StillFailingNotifiedAt, (DateTime?)null)
+                    .SetProperty(x => x.LastFailureAt, at),
+                cancellationToken);
+
+        if (startedFailing == 1)
+        {
+            return EndpointOutcome.StartedFailing;
+        }
+
+        var existing = await RecordEndpointFailureAsync(groupName, at, cancellationToken);
+
+        return existing == 1 ? EndpointOutcome.AlreadyFailing : EndpointOutcome.NotTracked;
     }
 
     // Atomically claims one delivery attempt: increments AttemptCount (and stamps NextAttemptAt for the retry
@@ -256,7 +468,7 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
         return claimed == 1;
     }
 
-    private async Task<bool> TryDeliverAsync(WebhookDelivery delivery, CancellationToken cancellationToken)
+    private async Task<AttemptResult> TryDeliverAsync(WebhookDelivery delivery, CancellationToken cancellationToken)
     {
         // Each attempt is one warp-webhooks adapter call (group = endpoint, operation = event type,
         // correlation = delivery id) — the attempt timeline is AdapterCallLog WHERE CorrelationId =
@@ -281,23 +493,34 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
             scope.Fail(ex);
             _logger.LogWarning(ex, "Webhook delivery {DeliveryId} attempt {Attempt} failed before the HTTP request was sent.", delivery.Id, delivery.AttemptCount + 1);
 
-            return false;
+            return AttemptResult.Failed(null, WebhookFailureReason.Other);
         }
+
+        // The per-attempt budget covers the send and the bounded body read. It is a linked token rather than
+        // the client's own Timeout property, because a host may configure its own warp-webhooks client and
+        // Warp must not overwrite that client's settings. A timeout is an ordinary failed attempt (retried
+        // per schedule); host shutdown stays distinguishable through the job's own token.
+        using var timeoutCts = new CancellationTokenSource(_attemptTimeout, _timeProvider);
+        using var attemptCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
+        var attemptToken = attemptCts.Token;
 
         try
         {
             var client = _httpClientFactory.CreateClient(WebhookConstants.AdapterName);
 
-            using var response = await client.SendAsync(request, cancellationToken);
+            // ResponseHeadersRead: the status decides the outcome, so the body is never buffered. Only the
+            // capture prefix is read (when capture is on) and the rest is never drained; disposing the
+            // response releases the connection.
+            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, attemptToken);
 
             var success = IsSuccess(response, delivery);
-            await CaptureResponseAsync(scope, request, response, isFailure: !success, cancellationToken);
+            await CaptureResponseAsync(scope, request, response, isFailure: !success, attemptToken, cancellationToken);
 
             if (success)
             {
                 scope.Succeed();
 
-                return true;
+                return new AttemptResult(true, (int)response.StatusCode, null);
             }
 
             scope.Fail(new HttpRequestException(
@@ -305,7 +528,30 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
                 inner: null,
                 statusCode: response.StatusCode));
 
-            return false;
+            return AttemptResult.Failed((int)response.StatusCode, WebhookFailureReason.UnsuccessfulStatus);
+        }
+        catch (HttpRequestException ex) when (ex.InnerException is WebhookAddressNotPublicException notPublic)
+        {
+            // PublicAddressesOnly refused the connection. The reason names the host, never its addresses.
+            scope.Fail(notPublic);
+            _logger.LogWarning("Webhook delivery {DeliveryId} attempt {Attempt} failed: {Reason}", delivery.Id, delivery.AttemptCount + 1, notPublic.Message);
+
+            return AttemptResult.Failed(null, WebhookFailureReason.AddressNotPublic);
+        }
+        catch (OperationCanceledException ex) when (cancellationToken.IsCancellationRequested)
+        {
+            scope.Fail(ex);
+            _logger.LogWarning("Webhook delivery {DeliveryId} attempt {Attempt} was cancelled by the executor job's token (host shutdown or job cancellation), not by the attempt timeout.", delivery.Id, delivery.AttemptCount + 1);
+
+            return AttemptResult.Failed(null, WebhookFailureReason.Other);
+        }
+        catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
+        {
+            var timeout = new TimeoutException($"The webhook attempt did not complete within {_attemptTimeout} (WebhookAttemptTimeout).");
+            scope.Fail(timeout);
+            _logger.LogWarning("Webhook delivery {DeliveryId} attempt {Attempt} timed out after {Timeout}.", delivery.Id, delivery.AttemptCount + 1, _attemptTimeout);
+
+            return AttemptResult.Failed(null, WebhookFailureReason.Timeout);
         }
 #pragma warning disable CA1031 // executor jobs must ALWAYS complete: every attempt exception is a failed attempt, never a failed job.
         catch (Exception ex)
@@ -314,7 +560,7 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
             scope.Fail(ex);
             _logger.LogWarning(ex, "Webhook delivery {DeliveryId} attempt {Attempt} failed.", delivery.Id, delivery.AttemptCount + 1);
 
-            return false;
+            return AttemptResult.Failed(null, ClassifyFailure(ex));
         }
         finally
         {
@@ -322,12 +568,63 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
         }
     }
 
+    // Maps a transport exception to the #357 failure reason. The HttpClient's own timeout surfaces as a
+    // TaskCanceledException wrapping a TimeoutException; everything else not recognised is ConnectionFailed for an
+    // HttpRequestException and Other for anything else.
+    internal static WebhookFailureReason ClassifyFailure(Exception exception)
+    {
+        if (exception is TaskCanceledException { InnerException: TimeoutException })
+        {
+            return WebhookFailureReason.Timeout;
+        }
+
+        if (exception is not HttpRequestException http)
+        {
+            return WebhookFailureReason.Other;
+        }
+
+        if (FindInner<WebhookAddressNotPublicException>(http) is not null)
+        {
+            return WebhookFailureReason.AddressNotPublic;
+        }
+
+        if (FindInner<SocketException>(http) is { SocketErrorCode: SocketError.ConnectionRefused })
+        {
+            return WebhookFailureReason.ConnectionRefused;
+        }
+
+        return http.HttpRequestError switch
+        {
+            HttpRequestError.NameResolutionError => WebhookFailureReason.DnsFailure,
+            HttpRequestError.SecureConnectionError => WebhookFailureReason.TlsError,
+            _ => WebhookFailureReason.ConnectionFailed,
+        };
+    }
+
+    private static T? FindInner<T>(Exception exception)
+        where T : Exception
+    {
+        for (var current = exception.InnerException; current is not null; current = current.InnerException)
+        {
+            if (current is T match)
+            {
+                return match;
+            }
+        }
+
+        return null;
+    }
+
     // Applies the warp-webhooks adapter's capture tiers to the completed attempt. Status is always-recorded
     // metadata (§8.19); response headers/body follow the resolved CaptureMode (webhooks defaults to
     // response-body Always, request-body never — the payload already lives on the delivery row). Values are
     // redacted (§1.2) and byte-truncated before they reach the scope's capture columns. The executor owns
-    // the response, so the body is read destructively (no downstream consumer to preserve it for).
-    private async Task CaptureResponseAsync(AdapterCallScope scope, HttpRequestMessage request, HttpResponseMessage response, bool isFailure, CancellationToken cancellationToken)
+    // the response, so the body is read destructively (no downstream consumer to preserve it for). The
+    // response was sent with ResponseHeadersRead, so only the capped prefix ever crosses the wire into
+    // memory; with body capture off for this outcome the body is not read at all. The read is bounded by
+    // the attempt timeout, but running out of time there only abandons the capture: the outcome was already
+    // decided by the status code, and turning a 2xx into a retry would send the event again.
+    private async Task CaptureResponseAsync(AdapterCallScope scope, HttpRequestMessage request, HttpResponseMessage response, bool isFailure, CancellationToken attemptToken, CancellationToken jobToken)
     {
         scope.SetStatusCode((int)response.StatusCode);
 
@@ -341,7 +638,7 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
 
         if (response.Content is not null && HttpCaptureHelpers.ShouldCapture(recording.CaptureResponseBodies, isFailure))
         {
-            var body = await ReadResponseBodyAsync(response.Content, recording.MaxCapturedBodySize, cancellationToken);
+            var body = await ReadResponseBodyAsync(response.Content, recording.MaxCapturedBodySize, attemptToken, jobToken);
             if (body is not null)
             {
                 scope.SetResponseBody(HttpCaptureHelpers.TruncateToBytes(body, recording.MaxCapturedBodySize));
@@ -349,7 +646,7 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
         }
     }
 
-    private static async Task<string?> ReadResponseBodyAsync(HttpContent content, int maxBytes, CancellationToken cancellationToken)
+    private static async Task<string?> ReadResponseBodyAsync(HttpContent content, int maxBytes, CancellationToken attemptToken, CancellationToken jobToken)
     {
         if (maxBytes <= 0)
         {
@@ -358,14 +655,14 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
 
         try
         {
-            await using var stream = await content.ReadAsStreamAsync(cancellationToken);
+            await using var stream = await content.ReadAsStreamAsync(attemptToken);
 
             // Read only a bounded prefix (+1 byte so an over-cap body still trips TruncateToBytes' marker).
             var buffer = new byte[maxBytes + 1];
             var read = 0;
             while (read < buffer.Length)
             {
-                var n = await stream.ReadAsync(buffer.AsMemory(read, buffer.Length - read), cancellationToken);
+                var n = await stream.ReadAsync(buffer.AsMemory(read, buffer.Length - read), attemptToken);
                 if (n == 0)
                 {
                     break;
@@ -375,6 +672,11 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
             }
 
             return read == 0 ? string.Empty : Encoding.UTF8.GetString(buffer, 0, read);
+        }
+        catch (OperationCanceledException) when (!jobToken.IsCancellationRequested)
+        {
+            // The attempt timeout fired mid-read: abandon the capture, keep the status-decided outcome.
+            return null;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -571,4 +873,10 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
 
         return codes is not null && codes.Contains((int)response.StatusCode);
     }
+}
+
+// The result of one attempt: success, the response status (null without a response) and, on failure, why (#357).
+internal sealed record AttemptResult(bool Succeeded, int? StatusCode, WebhookFailureReason? FailureReason)
+{
+    public static AttemptResult Failed(int? statusCode, WebhookFailureReason reason) => new(false, statusCode, reason);
 }

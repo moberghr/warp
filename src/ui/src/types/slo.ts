@@ -13,6 +13,7 @@ export const SloKind = {
   MetricGap: 9,
   MetricLatency: 10,
   MetricGaugeThreshold: 11,
+  WebhookDeliveryLatency: 12,
 } as const;
 export type SloKind = (typeof SloKind)[keyof typeof SloKind];
 
@@ -28,6 +29,7 @@ export const SloKindLabel: Record<SloKind, string> = {
   [SloKind.MetricGap]: 'Metric gap',
   [SloKind.MetricLatency]: 'Metric latency',
   [SloKind.MetricGaugeThreshold]: 'Metric gauge threshold',
+  [SloKind.WebhookDeliveryLatency]: 'Webhook delivery latency',
 };
 
 /** MetricGaugeThreshold: which side of the target the gauge must stay on (SloComparison, from 1). */
