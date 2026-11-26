@@ -85,7 +85,7 @@ public abstract class MutexTestsBase : IAsyncLifetime
 
         // Pre-hold the lock (simulating job1 is being processed by another worker)
         var lockProvider = new FakeSemaphoreProvider();
-        var heldHandle = lockProvider.HoldSlot("warp:concurrency-mutex:payment:123");
+        var heldHandle = lockProvider.HoldSlot("warp:concurrency:payment:123");
 
         // Act: worker processes job2 — should fail to acquire lock
         var worker = CreateWorker(lockProvider);
@@ -251,7 +251,7 @@ public abstract class MutexTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         var lockProvider = new FakeSemaphoreProvider();
-        var heldHandle = lockProvider.HoldSlot("warp:concurrency-mutex:payment:789");
+        var heldHandle = lockProvider.HoldSlot("warp:concurrency:payment:789");
 
         // Act
         var worker = CreateWorker(lockProvider);
@@ -307,7 +307,7 @@ public abstract class MutexTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         var lockProvider = new FakeSemaphoreProvider();
-        var heldHandle = lockProvider.HoldSlot("warp:concurrency-mutex:payment:wait");
+        var heldHandle = lockProvider.HoldSlot("warp:concurrency:payment:wait");
 
         // Act
         var worker = CreateWorker(lockProvider);

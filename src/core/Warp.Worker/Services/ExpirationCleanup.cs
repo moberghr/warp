@@ -814,8 +814,8 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
         {
             batches++;
 
-            // One statement per batch: there is no index on UpdatedAt (no migration in 8.1), so a separate
-            // SELECT of the names would scan the table a second time.
+            // One statement per batch: a separate SELECT of the names would read the table a second time
+            // (the UpdatedAt index arrives with 8.1's migration, which this change does not own).
             var deleted = await StaleRateLimitBuckets(cutoff, now)
                 .Take(batchSize)
                 .ExecuteDeleteAsync(ct);

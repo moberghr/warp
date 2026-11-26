@@ -110,7 +110,7 @@ public abstract class RateLimitCompositionTestsBase : IAsyncLifetime
         // Pre-hold the mutex slot so ConcurrencyPipelineBehavior short-circuits to Deleted
         // before the rate-limit behaviour gets a chance to acquire its own lock.
         var semaphoreProvider = new FakeSemaphoreProvider();
-        var heldMutex = semaphoreProvider.HoldSlot("warp:concurrency-mutex:combo-mutex");
+        var heldMutex = semaphoreProvider.HoldSlot("warp:concurrency:combo-mutex");
 
         var worker = CreateWorker(semaphoreProvider);
         await worker.GetAndProcessJob(CancellationToken.None);

@@ -1,6 +1,8 @@
 using System.Collections.Concurrent;
+using System.Reflection;
 using System.Runtime.CompilerServices;
 using Microsoft.AspNetCore.Antiforgery;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -45,24 +47,23 @@ public static class EndpointRouteBuilderExtensions
         }
 
         var options = endpoints.ServiceProvider.GetService<WarpHttpOptions>() ?? new WarpHttpOptions();
-        var mapped = new List<IEndpointConventionBuilder>();
 
-        foreach (var descriptor in WarpGeneratedHttpRegistry.Snapshot())
-        {
-            if (!string.Equals(descriptor.Group, group, StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            // The descriptor's HandlerDelegate is the source-generated Minimal API delegate —
-            // ASP.NET binds its parameters (route / query / header / body) before invoking
-            // our dispatch trampoline.
-            var builder = endpoints.MapMethods(descriptor.Route, [descriptor.Method], descriptor.HandlerDelegate);
-            ApplyMetadata(builder, descriptor, options);
-            mapped.Add(builder);
-        }
+        // The descriptor's HandlerDelegate is the source-generated Minimal API delegate — ASP.NET binds its
+        // parameters (route / query / header / body) before invoking our dispatch trampoline.
+        var mapped = WarpGeneratedHttpRegistry.Snapshot()
+            .Where(x => string.Equals(x.Group, group, StringComparison.Ordinal))
+            .Select(x => (IEndpointConventionBuilder)MapOne(endpoints, x, options))
+            .ToList();
 
         return new WarpHttpEndpointConventionBuilder(endpoints, mapped);
+    }
+
+    private static RouteHandlerBuilder MapOne(IEndpointRouteBuilder endpoints, HttpEndpointDescriptor descriptor, WarpHttpOptions options)
+    {
+        var builder = endpoints.MapMethods(descriptor.Route, [descriptor.Method], descriptor.HandlerDelegate);
+        ApplyMetadata(builder, descriptor, options);
+
+        return builder;
     }
 
     private static void ApplyMetadata(RouteHandlerBuilder builder, HttpEndpointDescriptor descriptor, WarpHttpOptions options)
@@ -94,7 +95,10 @@ public static class EndpointRouteBuilderExtensions
             // class decides for its endpoint: it is forwarded below, and nothing is added here,
             // because DisableAntiforgery's metadata lands after the forwarded attributes and would win.
             builder.Accepts(descriptor.RequestType, "multipart/form-data");
-            var handlerDecides = descriptor.HandlerType.GetCustomAttributes(inherit: true).OfType<IAntiforgeryMetadata>().Any();
+            var handlerDecides = descriptor.HandlerType
+                .GetCustomAttributes(inherit: false)
+                .OfType<IAntiforgeryMetadata>()
+                .Any();
             if (!handlerDecides && options.ValidateAntiforgeryOnFormEndpoints)
             {
                 builder.WithMetadata(new RequireAntiforgeryTokenAttribute());
@@ -130,12 +134,7 @@ public static class EndpointRouteBuilderExtensions
         // [Tags], [OutputCache], [ProducesResponseType], and any future metadata attribute.
         // Warp's own [WarpHttp*] routing markers carry route/verb info, not endpoint metadata,
         // and are already consumed by the source generator — skip them.
-        //
-        // inherit: true, so an [Authorize] on an abstract base handler protects every subclass, as it does
-        // on an MVC controller. Reading only the concrete class dropped it and left the endpoint open. Each
-        // attribute's own AttributeUsage.Inherited is honoured. Reflection lists the most-derived class's
-        // attributes first; reversed so they come last and win wherever ASP.NET reads the last entry.
-        foreach (var attribute in descriptor.HandlerType.GetCustomAttributes(inherit: true).Reverse())
+        foreach (var attribute in HandlerAttributes(descriptor.HandlerType))
         {
             if (attribute is WarpHttpAttribute)
             {
@@ -145,6 +144,47 @@ public static class EndpointRouteBuilderExtensions
             builder.WithMetadata(attribute);
         }
     }
+
+    // The handler class's own attributes, as in 8.0, plus authorization read through its base classes.
+    //
+    // Authorization is inherited so an [Authorize] on an abstract base handler protects every subclass; reading
+    // only the concrete class dropped it and left the endpoint open. Every [Authorize] in the hierarchy is kept,
+    // so a subclass adds requirements and never sheds its base's (ASP.NET requires all of them). [AllowAnonymous]
+    // is taken only from the NEAREST class that declares any authorization attribute: ASP.NET lets one
+    // IAllowAnonymous override every [Authorize], so a base class's [AllowAnonymous] must not open a subclass that
+    // declares [Authorize] itself. Each attribute's AttributeUsage.Inherited is honoured.
+    //
+    // Nothing else is inherited. Metadata ASP.NET honours by mere presence ([DisableRateLimiting] beside a
+    // subclass's [EnableRateLimiting], say) would otherwise switch a subclass's own setting off.
+    private static IEnumerable<object> HandlerAttributes(Type handlerType)
+    {
+        var nearest = NearestAuthorization(handlerType);
+
+        return handlerType.GetCustomAttributes(inherit: false)
+            .Where(x => !IsAuthorization(x))
+            .Concat(handlerType.GetCustomAttributes(inherit: true).OfType<IAuthorizeData>().Where(x => x is not IAllowAnonymous))
+            .Concat(nearest.OfType<IAllowAnonymous>());
+    }
+
+    private static object[] NearestAuthorization(Type handlerType)
+    {
+        for (var type = handlerType; type != null; type = type.BaseType)
+        {
+            var declared = type.GetCustomAttributes(inherit: false)
+                .Where(IsAuthorization)
+                .Where(x => type == handlerType || x.GetType().GetCustomAttribute<AttributeUsageAttribute>()?.Inherited != false)
+                .ToArray();
+
+            if (declared.Length > 0)
+            {
+                return declared;
+            }
+        }
+
+        return [];
+    }
+
+    private static bool IsAuthorization(object attribute) => attribute is IAuthorizeData or IAllowAnonymous;
 
     private static bool IsBodyVerb(string method)
     {

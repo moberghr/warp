@@ -21,13 +21,6 @@ public class WarpDashboardLoginOptions
     /// </summary>
     public string? CookiePath { get; set; }
 
-    /// <summary>
-    /// Whether the login cookie is marked <c>Secure</c>, so the browser only ever sends it over HTTPS. Default true.
-    /// Set it to false only for a dashboard served over plain HTTP on a development machine; browsers already
-    /// treat <c>http://localhost</c> as secure, so most local setups need no change.
-    /// </summary>
-    public bool RequireSecureCookie { get; set; } = true;
-
     /// <summary>Brute-force throttling of the login endpoint. On by default.</summary>
     public WarpDashboardLoginThrottleOptions Throttling { get; } = new();
 }

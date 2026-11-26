@@ -15,6 +15,9 @@ namespace Warp.Dashboard.Endpoints;
 /// </summary>
 internal static class WarpAuthEndpoints
 {
+    private const int MaxUsernameLength = 256;
+    private const int MaxPasswordLength = 1024;
+
     internal static void MapWarpAuthEndpoints(this RouteGroupBuilder apiGroup, IServiceProvider services)
     {
         // All three endpoints belong to the built-in login and are mapped only with it. In particular the
@@ -48,7 +51,15 @@ internal static class WarpAuthEndpoints
 
                 var username = form["username"].FirstOrDefault() ?? string.Empty;
                 var password = form["password"].FirstOrDefault() ?? string.Empty;
-                var ip = context.Connection.RemoteIpAddress?.ToString() ?? string.Empty;
+
+                // The username becomes a key in the throttle's table, which bounds the number of keys but not their
+                // size; without this one caller could park megabytes per entry.
+                if (username.Length > MaxUsernameLength || password.Length > MaxPasswordLength)
+                {
+                    return Results.BadRequest();
+                }
+
+                var ip = WarpDashboardLoginThrottle.IpKey(context.Connection.RemoteIpAddress);
 
                 var wait = throttle.TryBegin(ip, username);
                 if (wait != null)

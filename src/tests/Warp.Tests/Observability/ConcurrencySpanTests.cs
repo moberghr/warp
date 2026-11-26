@@ -63,7 +63,7 @@ public class ConcurrencySpanTests
         var semaphoreProvider = new FakeSemaphoreProvider();
 
         // Pre-saturate the slot so the behavior sees it as held.
-        var heldHandle = semaphoreProvider.HoldSlot("warp:concurrency-mutex:user-99");
+        var heldHandle = semaphoreProvider.HoldSlot("warp:concurrency:user-99");
 
         var behavior = new ConcurrencyPipelineBehavior<TestJob, Unit>(jobContext, semaphoreProvider, NoAdminResolver(), TimeProvider.System);
         var nextCalled = false;

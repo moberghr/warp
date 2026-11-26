@@ -145,7 +145,7 @@ public class DashboardSecurityTests
     }
 
     [TimedFact]
-    public async Task Login_SetsASecureCookieByDefault()
+    public async Task Login_AlwaysSetsASecureCookie()
     {
         await using var host = await StartAsync(AddBuiltInLogin);
 
@@ -153,17 +153,6 @@ public class DashboardSecurityTests
 
         response.StatusCode.ShouldBe(HttpStatusCode.OK);
         response.Headers.GetValues("Set-Cookie").First().ShouldContain("secure", Case.Insensitive);
-    }
-
-    [TimedFact]
-    public async Task Login_SecureCookieOptOut_SetsAPlainCookieOverHttp()
-    {
-        await using var host = await StartAsync(x => x.AddWarpDashboard().AddBuiltInLogin<TestCredentialValidator>(y => y.RequireSecureCookie = false));
-
-        using var response = await LoginAsync(host.Client, "admin", "admin");
-
-        response.StatusCode.ShouldBe(HttpStatusCode.OK);
-        response.Headers.GetValues("Set-Cookie").First().ShouldNotContain("secure", Case.Insensitive);
     }
 
     [TimedFact]
@@ -208,6 +197,39 @@ public class DashboardSecurityTests
     }
 
     [TimedFact]
+    public async Task Login_Success_DoesNotResetTheAddressBudget()
+    {
+        // One valid account must not let an address clear its count between guesses at other usernames.
+        await using var host = await StartAsync(AddThrottledLogin, pipeline: StampIpFromHeader);
+
+        (await LoginAsync(host.Client, "alice", "wrong", ip: "10.0.0.1")).StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+        (await LoginAsync(host.Client, "admin", "admin", ip: "10.0.0.1")).StatusCode.ShouldBe(HttpStatusCode.OK);
+        (await LoginAsync(host.Client, "bob", "wrong", ip: "10.0.0.1")).StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+
+        using var response = await LoginAsync(host.Client, "carol", "wrong", ip: "10.0.0.1");
+
+        response.StatusCode.ShouldBe(HttpStatusCode.TooManyRequests);
+    }
+
+    [TimedFact]
+    public async Task Login_AttemptsRefusedForTheirUsername_DoNotChargeTheAddress()
+    {
+        // Behind a NAT one address is everyone's: retrying a locked-out username must not lock them all out.
+        await using var host = await StartAsync(AddThrottledLogin, pipeline: StampIpFromHeader);
+
+        (await LoginAsync(host.Client, "admin", "wrong", ip: "10.0.0.1")).StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+        (await LoginAsync(host.Client, "admin", "wrong", ip: "10.0.0.2")).StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+        for (var i = 0; i < 3; i++)
+        {
+            (await LoginAsync(host.Client, "admin", "admin", ip: "10.0.0.3")).StatusCode.ShouldBe(HttpStatusCode.TooManyRequests);
+        }
+
+        using var response = await LoginAsync(host.Client, "carol", "wrong", ip: "10.0.0.3");
+
+        response.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+    }
+
+    [TimedFact]
     public async Task Login_LockoutEscalatesAndExpires()
     {
         await using var host = await StartAsync(AddThrottledLogin, pipeline: StampIpFromHeader);
@@ -231,24 +253,44 @@ public class DashboardSecurityTests
     }
 
     [TimedFact]
-    public async Task Login_TrackingTableFullOfLockouts_RefusesNewKeysRatherThanForgettingALockout()
+    public async Task Login_TrackingTableFullOfLockouts_KeepsTheLockoutsAndLetsNewCallersThrough()
     {
-        // Two keys fit. Both lock out on their first failure, so a third caller cannot be tracked without
-        // evicting a lockout, which would let an attacker clear one by spraying new usernames.
+        // Two keys fit and both lock out on their first failure. A third caller cannot be tracked without
+        // evicting a lockout (which would let an attacker clear one by spraying keys) or refusing everyone new
+        // (which would let an attacker shut the login by filling the table). It goes untracked instead.
         await using var host = await StartAsync(AddTinyThrottleTable, pipeline: StampIpFromHeader);
 
         (await LoginAsync(host.Client, "alice", "wrong", ip: "10.0.0.1")).StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
         (await LoginAsync(host.Client, "bob", "wrong", ip: "10.0.0.2")).StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
-        (await LoginAsync(host.Client, "admin", "admin", ip: "10.0.0.3")).StatusCode.ShouldBe(HttpStatusCode.TooManyRequests);
 
-        // The lockouts are still there.
-        (await LoginAsync(host.Client, "alice", "wrong", ip: "10.0.0.4")).StatusCode.ShouldBe(HttpStatusCode.TooManyRequests);
+        (await LoginAsync(host.Client, "admin", "admin", ip: "10.0.0.3")).StatusCode.ShouldBe(HttpStatusCode.OK);
 
-        // Once they expire, the old keys make room again.
-        host.App.Services.GetRequiredService<FakeTimeProvider>().Advance(TimeSpan.FromSeconds(30));
-        using var response = await LoginAsync(host.Client, "admin", "admin", ip: "10.0.0.3");
+        using var response = await LoginAsync(host.Client, "alice", "admin", ip: "10.0.0.4");
 
-        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+        response.StatusCode.ShouldBe(HttpStatusCode.TooManyRequests);
+    }
+
+    [TimedFact]
+    public async Task Login_IPv6AddressesInOneSlash64_ShareOneBudget()
+    {
+        await using var host = await StartAsync(AddThrottledLogin, pipeline: StampIpFromHeader);
+
+        (await LoginAsync(host.Client, "alice", "wrong", ip: "2001:db8:1:2::1")).StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+        (await LoginAsync(host.Client, "bob", "wrong", ip: "2001:db8:1:2::ffff")).StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+
+        using var response = await LoginAsync(host.Client, "carol", "wrong", ip: "2001:db8:1:2:abcd::9");
+
+        response.StatusCode.ShouldBe(HttpStatusCode.TooManyRequests);
+    }
+
+    [TimedFact]
+    public async Task Login_OverlongUsername_Returns400()
+    {
+        await using var host = await StartAsync(AddBuiltInLogin);
+
+        using var response = await LoginAsync(host.Client, new string('a', 257), "admin");
+
+        response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
     }
 
     private static CancellationToken Ct => XunitTestContext.Current.CancellationToken;

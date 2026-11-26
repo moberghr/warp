@@ -454,8 +454,11 @@ public class CaptureRedactionTests
         }
     }
 
-    [TimedFact]
-    public async Task ResponseCapture_EventStream_IsNotPeeked()
+    [TimedTheory]
+    [InlineData("text/event-stream")]
+    [InlineData("application/x-ndjson")]
+    [InlineData("application/grpc+proto")]
+    public async Task ResponseCapture_StreamingMediaType_IsNotPeeked(string mediaType)
     {
         // A server-sent-events body can trickle a few bytes a minute: waiting for the capture cap would hold
         // the caller's response back indefinitely, so the body is not captured at all.
@@ -465,7 +468,7 @@ public class CaptureRedactionTests
 
         var body = new EndlessStream();
         var content = new StreamContent(body);
-        content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("text/event-stream");
+        content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(mediaType);
         var handler = new WarpAdapterHandler("vendor", options, adapters, Resolver())
         {
             InnerHandler = new StubHandler(new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = content }),

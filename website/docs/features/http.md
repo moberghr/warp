@@ -346,8 +346,11 @@ app.MapGroup("/api").RequireAuthorization().MapWarpHttp();
 public sealed class HealthCheckHandler : IRequestHandler<HealthCheck, HealthStatus> { ... }
 ```
 
-`[Authorize]` and `[AllowAnonymous]` are read with inheritance, as on an MVC controller: an `[Authorize]` on an
-abstract base handler class protects every handler that derives from it.
+`[Authorize]` is read with inheritance: an `[Authorize]` on an abstract base handler class protects every handler
+that derives from it, and a handler's own `[Authorize]` adds to its base's (all of them must pass).
+`[AllowAnonymous]` counts only on the **nearest** class that declares any authorization attribute, so a handler's
+own `[Authorize]` is never opened by an `[AllowAnonymous]` on its base (ASP.NET lets any `[AllowAnonymous]`
+override every `[Authorize]`). Other attributes are read from the handler class itself only.
 
 :::tip Gate by default
 A handler without `[Authorize]` is anonymous unless something above it says otherwise. Mapping through a gate,

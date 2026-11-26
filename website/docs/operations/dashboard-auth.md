@@ -155,16 +155,18 @@ builder.Services.AddWarpDashboard().AddBuiltInLogin<MyCredentialValidator>(optio
 });
 ```
 
-The cookie is marked `Secure` by default, so the browser only sends it over HTTPS. Browsers treat
-`http://localhost` as secure already; for a dashboard served over plain HTTP on any other address during
-development, set `options.RequireSecureCookie = false`.
+The cookie is always marked `Secure`, so the browser only sends it over HTTPS; there is no setting to turn
+that off. Browsers treat `http://localhost` as a secure context, so local development over plain HTTP still
+works. A dashboard reached over plain HTTP at any other address cannot keep a session: serve it over HTTPS.
 
 ### Login throttling
 
 The login endpoint throttles repeated attempts, by caller IP address and by username separately. Each one gets
 five attempts; after that it is locked out for 30 seconds, doubling with every further attempt up to 15 minutes.
 A locked-out attempt is answered `429 Too Many Requests` with a `Retry-After` header, and your validator is not
-called. A successful sign-in clears both counts. Tune it, or turn it off, through the options:
+called. A successful sign-in clears the username's count and takes back its own attempt from the IP's (clearing
+the IP's count would let one valid account reset an address's budget between guesses at other usernames). An
+attempt refused for its username is not counted against its IP. Tune it, or turn it off, through the options:
 
 ```csharp
 builder.Services.AddWarpDashboard().AddBuiltInLogin<MyCredentialValidator>(options =>
@@ -182,8 +184,11 @@ Like any lockout, the per-username lockout can be used against you: an anonymous
 can keep a known username (`admin`) locked out, for up to `MaxLockoutDuration` at a time. Other usernames are
 unaffected, and the per-IP budget limits how fast one address can do it. If that matters more than guessing
 resistance, give the account a less guessable name, raise `FreeAttempts`, or turn the throttle off and attach
-your own rate-limiting policy. The tracking table never forgets a lockout to make room: when it is full of
-locked-out keys, a new caller is refused with `429` until some expire.
+your own rate-limiting policy. IPv6 callers are counted per /64, so one subscriber's address block is one
+budget. The tracking table never forgets a lockout to make room; when it is full of locked-out keys, a new caller
+goes untracked in that table (the other one, IP or username, still counts it) rather than being refused, so
+filling the table cannot shut the login for everyone. Usernames over 256 characters and passwords over 1,024 are
+rejected with `400` before they reach the throttle or your validator.
 
 The throttle is **in memory and per process**: with several instances behind a load balancer each counts on its
 own, and a restart forgets. Behind a reverse proxy, call `UseForwardedHeaders()` so the client's address is
@@ -260,8 +265,13 @@ hands to dashboard extensions. A script or tool of your own that calls the dashb
 curl -X POST -H "X-Warp-Request: 1" https://example.com/warp/api/jobs/failed/delete-by-type?type=...
 ```
 
-The check covers endpoints that dashboard extensions map under the API group too. The SignalR hub is not
-covered: its negotiate request changes no state.
+The check covers endpoints that dashboard extensions map under the API group too.
+
+The SignalR hub (realtime push) cannot take a custom header on its WebSocket, and a browser applies no CORS to
+WebSockets, so the hub checks `Origin` instead: a negotiate or connect request whose `Origin` names another host,
+or another port of the same host, gets `403`. Browsers always send `Origin` on these requests, so one without it
+comes from a non-browser client and passes to authorization as before. Behind a reverse proxy, forward the original `Host`
+(for example `UseForwardedHeaders` with `XForwardedHost`) so the dashboard sees its public host name.
 
 ## What is gated
 

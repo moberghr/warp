@@ -1,6 +1,7 @@
 using System.Linq;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Shouldly;
@@ -37,6 +38,29 @@ public sealed class AuthMetadataTests
 
         endpoint.ShouldNotBeNull();
         endpoint.Metadata.GetMetadata<AllowAnonymousAttribute>().ShouldNotBeNull();
+    }
+
+    [TimedFact]
+    public async Task AuthorizeOnHandlerAndOnItsBase_BothSurface()
+    {
+        await using var app = await WarpHttpTestApp.StartAsync(configureApp: a => a.MapWarpHttp());
+
+        var endpoint = Endpoint(app, "/api/secure/layered");
+
+        var authorize = endpoint.Metadata.GetOrderedMetadata<AuthorizeAttribute>();
+        authorize.ShouldContain(x => string.Equals(x.Policy, "WarpHttpTestPolicy", StringComparison.Ordinal));
+        authorize.ShouldContain(x => string.Equals(x.Roles, "Auditor", StringComparison.Ordinal));
+    }
+
+    [TimedFact]
+    public async Task DisableRateLimitingOnBase_IsNotInherited()
+    {
+        await using var app = await WarpHttpTestApp.StartAsync(configureApp: a => a.MapWarpHttp());
+
+        var endpoint = Endpoint(app, "/api/rate-limited/subclass");
+
+        endpoint.Metadata.GetMetadata<Microsoft.AspNetCore.RateLimiting.DisableRateLimitingAttribute>().ShouldBeNull();
+        endpoint.Metadata.GetMetadata<Microsoft.AspNetCore.RateLimiting.EnableRateLimitingAttribute>().ShouldNotBeNull();
     }
 
     [TimedFact]
@@ -126,4 +150,9 @@ public sealed class AuthMetadataTests
         discoveryTags!.Tags.ShouldContain("discovery");
         echoTags.Tags.ShouldNotBe(discoveryTags.Tags);
     }
+
+    private static RouteEndpoint Endpoint(WarpHttpTestApp app, string route)
+        => app.Services.GetRequiredService<EndpointDataSource>().Endpoints
+            .OfType<RouteEndpoint>()
+            .Single(x => string.Equals(x.RoutePattern.RawText, route, StringComparison.Ordinal));
 }

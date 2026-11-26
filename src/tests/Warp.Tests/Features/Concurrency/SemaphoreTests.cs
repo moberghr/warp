@@ -116,7 +116,7 @@ public abstract class SemaphoreTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         var lockProvider = new FakeSemaphoreProvider();
-        var heldHandle = lockProvider.HoldSlot("warp:concurrency:limit-5-wait", 5);
+        var heldHandle = lockProvider.HoldSlot("warp:concurrency-semaphore:limit-5-wait", 5);
 
         // Act
         var worker = CreateWorker(lockProvider);
@@ -162,7 +162,7 @@ public abstract class SemaphoreTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         var lockProvider = new FakeSemaphoreProvider();
-        var heldHandle = lockProvider.HoldSlot("warp:concurrency:limit-5-skip", 5);
+        var heldHandle = lockProvider.HoldSlot("warp:concurrency-semaphore:limit-5-skip", 5);
 
         // Act
         var worker = CreateWorker(lockProvider);
@@ -206,7 +206,7 @@ public abstract class SemaphoreTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         var lockProvider = new FakeSemaphoreProvider();
-        var heldHandle = lockProvider.HoldSlot("warp:concurrency:limit-5-partial", 1);
+        var heldHandle = lockProvider.HoldSlot("warp:concurrency-semaphore:limit-5-partial", 1);
 
         // Act
         var worker = CreateWorker(lockProvider);
@@ -251,7 +251,7 @@ public abstract class SemaphoreTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         var lockProvider = new FakeSemaphoreProvider();
-        var heldHandle = lockProvider.HoldSlot("warp:concurrency:admin-override-key", 5);
+        var heldHandle = lockProvider.HoldSlot("warp:concurrency-semaphore:admin-override-key", 5);
 
         // Act
         var worker = CreateWorker(lockProvider);
@@ -296,7 +296,7 @@ public abstract class SemaphoreTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         var lockProvider = new FakeSemaphoreProvider();
-        var heldHandle = lockProvider.HoldSlot("warp:concurrency:admin-restricts-key", 2);
+        var heldHandle = lockProvider.HoldSlot("warp:concurrency-semaphore:admin-restricts-key", 2);
 
         // Act
         var worker = CreateWorker(lockProvider);
@@ -349,7 +349,7 @@ public abstract class SemaphoreTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         var lockProvider = new FakeSemaphoreProvider();
-        var heldHandle = lockProvider.HoldSlot("warp:concurrency-mutex:admin-change-key");
+        var heldHandle = lockProvider.HoldSlot("warp:concurrency:admin-change-key");
 
         var worker = CreateWorker(lockProvider);
 
@@ -431,7 +431,7 @@ public abstract class SemaphoreTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         var lockProvider = new FakeSemaphoreProvider();
-        var heldHandle = lockProvider.HoldSlot("warp:concurrency-mutex:admin-mutex-key");
+        var heldHandle = lockProvider.HoldSlot("warp:concurrency:admin-mutex-key");
 
         // Act
         var worker = CreateWorker(lockProvider);
@@ -468,7 +468,7 @@ public abstract class SemaphoreTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         var lockProvider = new FakeSemaphoreProvider();
-        var heldHandle = lockProvider.HoldSlot("warp:concurrency-mutex:default-one-key");
+        var heldHandle = lockProvider.HoldSlot("warp:concurrency:default-one-key");
 
         // Act
         var worker = CreateWorker(lockProvider);
@@ -518,7 +518,7 @@ public abstract class SemaphoreTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         var lockProvider = new FakeSemaphoreProvider();
-        var heldHandle = lockProvider.HoldSlot("warp:concurrency-mutex:no-limit-field-key");
+        var heldHandle = lockProvider.HoldSlot("warp:concurrency:no-limit-field-key");
 
         // Act
         var worker = CreateWorker(lockProvider);

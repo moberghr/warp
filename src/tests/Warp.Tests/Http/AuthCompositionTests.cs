@@ -107,6 +107,26 @@ public sealed class AuthCompositionTests
     }
 
     [TimedFact]
+    public async Task AuthorizeOnHandler_AllowAnonymousOnItsBase_StillRejectsUnauthenticatedRequest()
+    {
+        // ASP.NET lets any IAllowAnonymous override every [Authorize], so the base class's attribute must not be
+        // forwarded once the handler declares its own.
+        await using var app = await WarpHttpTestApp.StartAsync(
+            configureServices: ConfigureTestAuth,
+            configureApp: a =>
+            {
+                a.UseAuthentication();
+                a.UseAuthorization();
+                a.MapWarpHttp();
+            });
+
+        using var content = new StringContent("{}", System.Text.Encoding.UTF8, "application/json");
+        var resp = await app.Client.PostAsync(new Uri("/api/secure/over-anonymous-base", UriKind.Relative), content);
+
+        resp.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+    }
+
+    [TimedFact]
     public async Task RequireAuthorization_ChainedOnMapWarpHttp_GatesTheMappedEndpoints()
     {
         await using var app = await WarpHttpTestApp.StartAsync(

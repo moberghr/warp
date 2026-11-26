@@ -153,7 +153,7 @@ public class PostgresSemaphoreProviderTests
     [TimedFact]
     public async Task MutexKeyShapedLikeASlot_DoesNotTakeTheSemaphoresSlot()
     {
-        // [Mutex("tenantA:0")] used to lock "warp:concurrency:tenantA:0", which is slot 0 of
+        // [Mutex("tenantA:0")] locks "warp:concurrency:tenantA:0", which used to be slot 0 of
         // [Semaphore("tenantA", N)]: a caller choosing the mutex key could hold a semaphore slot.
         var spy = new SpyLockProvider();
         var provider = new PostgresSemaphoreProvider(spy);
@@ -175,9 +175,9 @@ public class PostgresSemaphoreProviderTests
     }
 
     [TimedTheory]
-    [InlineData("k", 1, "warp:concurrency-mutex:k")]
-    [InlineData("k", 2, "warp:concurrency:k")]
-    [InlineData("k:0", 1, "warp:concurrency-mutex:k:0")]
+    [InlineData("k", 1, "warp:concurrency:k")]
+    [InlineData("k", 2, "warp:concurrency-semaphore:k")]
+    [InlineData("k:0", 1, "warp:concurrency:k:0")]
     public void ConcurrencyLockName_SeparatesTheSingleLockShape(string key, int limit, string expected)
     {
         Warp.Core.Concurrency.ConcurrencyLockName.For(key, limit).ShouldBe(expected);

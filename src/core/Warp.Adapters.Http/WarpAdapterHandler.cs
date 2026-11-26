@@ -280,6 +280,17 @@ internal sealed class WarpAdapterHandler : DelegatingHandler
         }
     }
 
+    private static readonly HashSet<string> StreamingMediaTypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "text/event-stream",
+        "application/x-ndjson",
+        "application/ndjson",
+        "application/jsonl",
+        "application/x-jsonlines",
+        "application/stream+json",
+        "multipart/x-mixed-replace",
+    };
+
     private bool AnyCaptureEnabled
         => _recording.CaptureHeaders != CaptureMode.None
         || _recording.CaptureRequestBodies != CaptureMode.None
@@ -333,8 +344,9 @@ internal sealed class WarpAdapterHandler : DelegatingHandler
     // replaced by a content that replays the bytes read and then streams the rest, with the original headers, so
     // the caller still receives the whole body and nothing beyond the prefix is ever buffered here. The swap
     // happens even when the read fails part-way, so the caller sees the transport's own error on its next read
-    // rather than "stream already consumed". An event stream is not captured at all: the peek waits for
-    // maxBytes + 1 bytes or the end, and a server-sent-events body may send a few bytes a minute for ever.
+    // rather than "stream already consumed". A streaming media type is not captured at all: the peek waits
+    // for maxBytes + 1 bytes or the end, and a server-sent-events or line-delimited feed may send a few bytes a
+    // minute for ever. Other long-poll endpoints need capture off (documented).
     private static async Task<string?> PeekResponseBodyAsync(HttpResponseMessage response, int maxBytes, CancellationToken cancellationToken)
     {
         if (maxBytes <= 0)
@@ -343,7 +355,7 @@ internal sealed class WarpAdapterHandler : DelegatingHandler
         }
 
         var original = response.Content;
-        if (string.Equals(original.Headers.ContentType?.MediaType, "text/event-stream", StringComparison.OrdinalIgnoreCase))
+        if (IsStreamingMediaType(original.Headers.ContentType?.MediaType))
         {
             return null;
         }
@@ -389,6 +401,18 @@ internal sealed class WarpAdapterHandler : DelegatingHandler
                 response.Content = replay;
             }
         }
+    }
+
+    // Media types that are, by their nature, open-ended feeds rather than one document.
+    private static bool IsStreamingMediaType(string? mediaType)
+    {
+        if (mediaType == null)
+        {
+            return false;
+        }
+
+        return StreamingMediaTypes.Contains(mediaType)
+            || mediaType.StartsWith("application/grpc", StringComparison.OrdinalIgnoreCase);
     }
 
     // progress reports the count after every read, so a caller whose read throws part-way still knows how many

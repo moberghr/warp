@@ -336,7 +336,7 @@ public abstract class CircuitBreakerTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         var lockProvider = new FakeSemaphoreProvider();
-        var heldHandle = lockProvider.HoldSlot("warp:concurrency-mutex:static-key");
+        var heldHandle = lockProvider.HoldSlot("warp:concurrency:static-key");
 
         var worker = CreateWorker(lockProvider: lockProvider);
         await worker.GetAndProcessJob(CancellationToken.None);

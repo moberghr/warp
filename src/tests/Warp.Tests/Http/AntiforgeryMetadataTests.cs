@@ -26,8 +26,9 @@ public sealed class AntiforgeryMetadataTests
     [TimedFact]
     public async Task FormEndpoint_WithOptionOn_RequiresAntiforgery()
     {
+        // The test app already called AddWarpHttp() without options: a later call must still take effect.
         await using var app = await WarpHttpTestApp.StartAsync(
-            configureServices: x => x.AddSingleton(new WarpHttpOptions { ValidateAntiforgeryOnFormEndpoints = true }),
+            configureServices: x => x.AddWarpHttp(y => y.ValidateAntiforgeryOnFormEndpoints = true),
             configureApp: a => a.MapWarpHttp());
 
         RequiresValidation(app, "/api/file-echo").ShouldBeTrue();

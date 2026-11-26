@@ -76,8 +76,8 @@ A stranded lock degrades whichever site owned it, and most of the failure modes 
 | `warp:message-routing` (`MessageRouter`) | 0 | The task silently skips every tick — **messages stop fanning out to child jobs, cluster-wide, with no error** |
 | `warp:saga:{type}:{key}` | 0 | That correlation key's messages requeue forever with jitter |
 | `warp:ratelimit:{key}` | 5s | Jobs on that key reschedule repeatedly instead of running |
-| `warp:concurrency:{key}` slot | 0 | The slot is consumed permanently, so the effective limit drops by one |
-| `warp:concurrency-mutex:{key}` | 0 | The mutex is held permanently: that key's jobs are skipped or requeued forever |
+| `warp:concurrency-semaphore:{key}` slot | 0 | The slot is consumed permanently, so the effective limit drops by one |
+| `warp:concurrency:{key}` (limit 1) | 0 | The mutex is held permanently: that key's jobs are skipped or requeued forever |
 
 There is no way for Warp to reclaim a stranded lock — you cannot unlock a session you cannot address, and terminating an anonymous pooled backend is not something a job library should do. The remedy is the connection string.
 

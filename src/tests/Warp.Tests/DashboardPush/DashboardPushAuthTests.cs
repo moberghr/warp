@@ -38,6 +38,33 @@ public class DashboardPushAuthTests
         }
     }
 
+    [TimedTheory]
+    [InlineData("http://attacker.example", "localhost:5000", HttpStatusCode.Forbidden)]
+    [InlineData("http://localhost:3000", "localhost:5000", HttpStatusCode.Forbidden)]
+    [InlineData("http://localhost:5000", "localhost:5000", HttpStatusCode.OK)]
+    [InlineData("https://dash.example.com", "dash.example.com", HttpStatusCode.OK)]
+    [InlineData("http://localhost:3000", "localhost", HttpStatusCode.Forbidden)]
+    public async Task Negotiate_FromAnotherOrigin_IsForbidden(string origin, string host, HttpStatusCode expected)
+    {
+        // A browser applies no CORS to the hub's WebSocket, so a page on another site (or another port of
+        // localhost) could otherwise read the live stream of a loopback-only dashboard.
+        var (app, client) = await StartAsync();
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, NegotiatePath) { Content = new ByteArrayContent([]) };
+            request.Headers.Add("Origin", origin);
+            request.Headers.Host = host;
+
+            var response = await client.SendAsync(request, XunitTestContext.Current.CancellationToken);
+
+            response.StatusCode.ShouldBe(expected);
+        }
+        finally
+        {
+            await StopAsync(app, client);
+        }
+    }
+
     [TimedFact]
     public async Task BuiltInLogin_NegotiateReturns401WithoutCookie()
     {

@@ -173,7 +173,7 @@ public class DropWhenFull : IJob { }
 
 1. **Enqueue** always succeeds — the slot is not checked at publish time.
 2. **Worker picks up** the job and marks it as `Processing`.
-3. **Pipeline runs**: the behavior resolves the effective limit (admin row > attribute/extension limit > 1) and asks `IWarpSemaphoreProvider.TryAcquireAsync(name, limit, TimeSpan.Zero, ct)` for a slot, where `name` is `warp:concurrency-mutex:{key}` at limit 1 and `warp:concurrency:{key}` above it. If **this process** already holds `limit` slots of the key, it skips that call and treats the key as full. Every slot a process holds is a real database hold, so the acquire could not succeed. This saves a database round trip and a lock-pool connection. The span carries `warp.concurrency.local = true`. Slots held by other servers are not visible to this check, so those refusals still go to the database.
+3. **Pipeline runs**: the behavior resolves the effective limit (admin row > attribute/extension limit > 1) and asks `IWarpSemaphoreProvider.TryAcquireAsync(name, limit, TimeSpan.Zero, ct)` for a slot, where `name` is `warp:concurrency:{key}` at limit 1 and `warp:concurrency-semaphore:{key}` above it. If **this process** already holds `limit` slots of the key, it skips that call and treats the key as full. Every slot a process holds is a real database hold, so the acquire could not succeed. This saves a database round trip and a lock-pool connection. The span carries `warp.concurrency.local = true`. Slots held by other servers are not visible to this check, so those refusals still go to the database.
 4. **If full**: the behavior sets `IJobContext.Outcome` according to the configured `ConcurrencyMode`. `Skip` → `Deleted` with a log entry `Cancelled — '{key}' full ({N} slots)`. `Wait` → `Enqueued` with `ScheduleTime = now` and a log entry `Requeued — '{key}' full ({N} slots)`.
 5. **If a slot is free**: the slot is acquired, the handler executes, and the slot is released when the handler completes (or fails).
 
@@ -193,20 +193,23 @@ Jobs without a concurrency key skip the slot check entirely. The behavior reads 
 
 A key at limit 1 and a key at a limit above 1 take **different lock names**, on both databases:
 
-- `[Mutex("k")]` (or any key whose effective limit is 1) acquires the lock `warp:concurrency-mutex:k`.
-- `[Semaphore("k", 5)]` acquires one of the slots of `warp:concurrency:k` (on PostgreSQL the advisory locks
-  `warp:concurrency:k:0`..`warp:concurrency:k:4`; on SQL Server the slots of Medallion's `SqlSemaphore` of that name).
+- `[Mutex("k")]` (or any key whose effective limit is 1) acquires the lock `warp:concurrency:k`.
+- `[Semaphore("k", 5)]` acquires one of the slots of `warp:concurrency-semaphore:k` (on PostgreSQL the advisory
+  locks `warp:concurrency-semaphore:k:0`..`warp:concurrency-semaphore:k:4`; on SQL Server a ticket of Medallion's
+  `SqlSemaphore` of that name).
 
 So the two caps are **independent**: combined concurrency for the same key is `mutex_limit + semaphore_limit`
 (1 + 5 = up to **6** concurrent jobs). The separate prefix also means a mutex key can never name a semaphore's
-slot: `[Mutex("tenantA:0")]` locks `warp:concurrency-mutex:tenantA:0`, not slot 0 of `[Semaphore("tenantA", N)]`.
+slot: `[Mutex("tenantA:0")]` locks `warp:concurrency:tenantA:0`, and slot 0 of `[Semaphore("tenantA", N)]` is
+`warp:concurrency-semaphore:tenantA:0`.
 
 :::note Changed in 8.1
-Before 8.1 a limit-1 key locked `warp:concurrency:k`. On PostgreSQL that let a mutex key shaped like a slot
-(`tenantA:0`) take a semaphore's slot, and on SQL Server `[Mutex("k")]` and `[Semaphore("k", N)]` shared one
-slot pool. During a rolling upgrade from 8.0, an 8.0 server and an 8.1 server take different locks for the same
-mutex key, so the key can run once on each until the last 8.0 server is gone. See the
-[8.1 release notes](../releases.md).
+Before 8.1 a semaphore used the same prefix as a mutex (`warp:concurrency:k`, slots `warp:concurrency:k:0`...).
+On PostgreSQL that let a mutex key shaped like a slot (`tenantA:0`) take a semaphore's slot, and on SQL Server
+`[Mutex("k")]` and `[Semaphore("k", N)]` shared one ticket pool. 8.1 moves the **semaphore** to the new prefix;
+mutex lock names are unchanged, so a mutex stays exclusive through a rolling upgrade. While 8.0 and 8.1 servers
+run side by side, a semaphore key can admit up to its limit on each version's name, so up to twice its limit,
+until the last 8.0 server is gone. See the [8.1 release notes](../releases.md).
 :::
 
 ### Practical guidance
