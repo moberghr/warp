@@ -1,6 +1,8 @@
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Warp.Core;
 using Warp.Core.Data;
 
@@ -36,23 +38,57 @@ internal static class SqlServerCompatibilityCheck
 }
 
 // Runs the check when a Warp server starts. A process that only publishes (AddWarp) runs none of the
-// statements that need the level, so it is left alone.
+// statements that need the level, so it is left alone. A context on another provider (EF in-memory in an
+// application's own tests) has no database to ask, so the check stands down. With RequireDatabaseAtStartup off,
+// an unreachable server defers the check through the startup gate, and the server registration waits for it.
 internal sealed class SqlServerCompatibilityCheckService<TContext> : IHostedService
     where TContext : DbContext
 {
     private readonly WarpDatabaseConnection<TContext> _connection;
     private readonly IEnumerable<IWarpServerPresence> _servers;
+    private readonly IServiceScopeFactory _scopes;
+    private readonly ILogger<SqlServerCompatibilityCheckService<TContext>> _logger;
+    private readonly WarpStartupGate _gate;
 
-    public SqlServerCompatibilityCheckService(WarpDatabaseConnection<TContext> connection, IEnumerable<IWarpServerPresence> servers)
+    public SqlServerCompatibilityCheckService(
+        WarpDatabaseConnection<TContext> connection,
+        IEnumerable<IWarpServerPresence> servers,
+        IServiceScopeFactory scopes,
+        ILogger<SqlServerCompatibilityCheckService<TContext>> logger,
+        WarpStartupGate gate)
     {
         _connection = connection;
         _servers = servers;
+        _scopes = scopes;
+        _logger = logger;
+        _gate = gate;
     }
 
-    public Task StartAsync(CancellationToken cancellationToken) =>
-        _servers.Any()
-            ? SqlServerCompatibilityCheck.EnsureAsync(_connection.ConnectionString, cancellationToken)
-            : Task.CompletedTask;
+    public async Task StartAsync(CancellationToken cancellationToken)
+    {
+        if (!_servers.Any())
+        {
+            return;
+        }
 
-    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        await using var scope = _scopes.CreateAsyncScope();
+        var database = scope.ServiceProvider.GetRequiredService<TContext>().Database;
+        if (!database.IsSqlServer())
+        {
+            _logger.LogDebug(
+                "Skipping Warp's SQL Server compatibility check for {Context}: its provider is {Provider}, not SQL Server.",
+                typeof(TContext).Name,
+                database.ProviderName);
+
+            return;
+        }
+
+        await _gate.RunCheckAsync(
+            "SQL Server compatibility-level check",
+            x => SqlServerCompatibilityCheck.EnsureAsync(_connection.ConnectionString, x),
+            _logger,
+            cancellationToken);
+    }
+
+    public Task StopAsync(CancellationToken cancellationToken) => _gate.StopAsync();
 }

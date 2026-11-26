@@ -39,6 +39,15 @@ internal sealed class ApplicationHeartbeatHost<TContext> : BackgroundService
     private readonly ProcessCpuTracker _cpuTracker;
     private readonly ILogger<ApplicationHeartbeatHost<TContext>> _logger;
     private readonly bool _isServerProcess;
+    private readonly WarpStartupGate _gate;
+
+    // Completed once the instance row is registered: the heartbeat loop waits for it, and StopAsync deregisters
+    // only a row that was written. With RequireDatabaseAtStartup off and the database unreachable at startup,
+    // registration completes it later, from the background retry.
+    private readonly TaskCompletionSource _registered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    // The instance row is committed: a retry after a later registration step failed does not insert it again.
+    private bool _rowWritten;
 
     // Generated once and held for the process lifetime — this instance owns exactly this row.
     private readonly Guid _instanceId = Guid.NewGuid();
@@ -58,7 +67,8 @@ internal sealed class ApplicationHeartbeatHost<TContext> : BackgroundService
         TimeProvider timeProvider,
         ProcessCpuTracker cpuTracker,
         ILogger<ApplicationHeartbeatHost<TContext>> logger,
-        IEnumerable<IWarpServerPresence> serverPresences)
+        IEnumerable<IWarpServerPresence> serverPresences,
+        WarpStartupGate? startupGate = null)
     {
         _scopeFactory = scopeFactory;
         _configuration = configuration.Value;
@@ -68,6 +78,7 @@ internal sealed class ApplicationHeartbeatHost<TContext> : BackgroundService
 
         // Any registered IWarpServerPresence ⇒ this is a server process (it writes its own Server row).
         _isServerProcess = serverPresences.Any();
+        _gate = startupGate ?? new WarpStartupGate(configuration, timeProvider, []);
     }
 
     public override async Task StartAsync(CancellationToken cancellationToken)
@@ -82,8 +93,9 @@ internal sealed class ApplicationHeartbeatHost<TContext> : BackgroundService
         _active = true;
 
         // Register the instance row before returning (mirrors WarpServerRegistration.StartAsync — a
-        // failure here surfaces at startup rather than being silently swallowed).
-        await RegisterAsync(cancellationToken);
+        // failure here surfaces at startup rather than being silently swallowed), unless RequireDatabaseAtStartup
+        // is off and the database is unreachable: then it is retried in the background.
+        await _gate.RunAfterChecksAsync("application instance registration", RegisterAsync, _logger, cancellationToken, ProbeAsync);
 
         await base.StartAsync(cancellationToken);
     }
@@ -91,8 +103,10 @@ internal sealed class ApplicationHeartbeatHost<TContext> : BackgroundService
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
         await base.StopAsync(cancellationToken);
+        await _gate.StopAsync();
 
-        if (!_active)
+        // The row, not the whole registration: a row committed before a later step failed is still removed.
+        if (!_active || !_rowWritten)
         {
             return;
         }
@@ -111,6 +125,15 @@ internal sealed class ApplicationHeartbeatHost<TContext> : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        try
+        {
+            await _registered.Task.WaitAsync(stoppingToken);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            return;
+        }
+
         using var timer = new PeriodicTimer(_configuration.ApplicationHeartbeatInterval);
 
         try
@@ -134,6 +157,12 @@ internal sealed class ApplicationHeartbeatHost<TContext> : BackgroundService
         }
     }
 
+    private async Task ProbeAsync(CancellationToken ct)
+    {
+        using var scope = _scopeFactory.CreateScope();
+        await WarpStartupGate.ProbeConnectionAsync(scope.ServiceProvider.GetRequiredService<TContext>(), ct);
+    }
+
     private async Task RegisterAsync(CancellationToken ct)
     {
         using var scope = _scopeFactory.CreateScope();
@@ -141,6 +170,29 @@ internal sealed class ApplicationHeartbeatHost<TContext> : BackgroundService
         var now = _timeProvider.GetUtcNow().UtcDateTime;
         var snapshot = _cpuTracker.Sample(now);
 
+        if (!_rowWritten)
+        {
+            await WriteRowAsync(context, now, snapshot, ct);
+            _rowWritten = true;
+        }
+
+        // At once, not one interval later: until then the row carries this process's own time, and a sweep in
+        // between would remove an instance that lags the database by more than the grace.
+        // A relational provider only: the beat is an ExecuteUpdate that reads the database's clock, which a
+        // non-relational provider (EF's in-memory one, as tests use) cannot run.
+        _databaseTime = context.Database.IsRelational()
+            && scope.ServiceProvider.GetService<IWarpSqlQueries<TContext>>() is not null;
+        if (_databaseTime)
+        {
+            await BeatAtDatabaseTimeAsync(context, now, snapshot, ct);
+        }
+
+        await RecordDeployAsync(context, now, ct);
+        _registered.TrySetResult();
+    }
+
+    private async Task WriteRowAsync(DbContext context, DateTime now, ProcessCpuTracker.Snapshot? snapshot, CancellationToken ct)
+    {
         context.Set<ApplicationInstance>().Add(new ApplicationInstance
         {
             Id = _instanceId,
@@ -157,19 +209,6 @@ internal sealed class ApplicationHeartbeatHost<TContext> : BackgroundService
         AddLifecycleLog(context, ApplicationInstanceEventType.Registered, now);
 
         await context.SaveChangesAsync(ct);
-
-        // At once, not one interval later: until then the row carries this process's own time, and a sweep in
-        // between would remove an instance that lags the database by more than the grace.
-        // A relational provider only: the beat is an ExecuteUpdate that reads the database's clock, which a
-        // non-relational provider (EF's in-memory one, as tests use) cannot run.
-        _databaseTime = context.Database.IsRelational()
-            && scope.ServiceProvider.GetService<IWarpSqlQueries<TContext>>() is not null;
-        if (_databaseTime)
-        {
-            await BeatAtDatabaseTimeAsync(context, now, snapshot, ct);
-        }
-
-        await RecordDeployAsync(context, now, ct);
     }
 
     // Internal (not private) so tests can drive one tick of the periodic-refresh body deterministically —

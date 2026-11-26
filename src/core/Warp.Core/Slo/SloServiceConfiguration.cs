@@ -333,9 +333,11 @@ internal sealed class SloSeeder<TContext> : IHostedService
     private readonly TimeProvider _timeProvider;
     private readonly WarpConfiguration _configuration;
     private readonly ILogger<SloSeeder<TContext>> _logger;
+    private readonly GatedStart _gatedStart;
 
-    public SloSeeder(IServiceScopeFactory scopeFactory, SloOptions options, TimeProvider timeProvider, IOptions<WarpConfiguration> configuration, ILogger<SloSeeder<TContext>> logger)
+    public SloSeeder(IServiceScopeFactory scopeFactory, SloOptions options, TimeProvider timeProvider, IOptions<WarpConfiguration> configuration, ILogger<SloSeeder<TContext>> logger, WarpStartupGate? startupGate = null)
     {
+        _gatedStart = new GatedStart(startupGate, logger);
         _scopeFactory = scopeFactory;
         _options = options;
         _timeProvider = timeProvider;
@@ -347,7 +349,13 @@ internal sealed class SloSeeder<TContext> : IHostedService
     // one seeder there (N=2 BarrierSignal) and prove the other cannot check until it commits.
     internal Func<CancellationToken, Task>? BeforeSave { get; init; }
 
-    public async Task StartAsync(CancellationToken cancellationToken)
+    // On a server whose registration is still retrying (RequireDatabaseAtStartup off, database unreachable) the pass
+    // runs once it registers, rather than failing now and leaving the objectives missing until a restart.
+    public Task StartAsync(CancellationToken cancellationToken) => _gatedStart.StartAsync(SeedOnceAsync, cancellationToken);
+
+    public Task StopAsync(CancellationToken cancellationToken) => _gatedStart.StopAsync();
+
+    private async Task SeedOnceAsync(CancellationToken cancellationToken)
     {
         try
         {
@@ -387,8 +395,6 @@ internal sealed class SloSeeder<TContext> : IHostedService
             _logger.LogError(ex, "SLO objective seeding failed — {Count} config-declared objective(s) were NOT seeded and will be missing until created in the dashboard. The schema is expected present (migrator gating), so this is a real error, not a startup race.", _options.Seeded.Count);
         }
     }
-
-    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
     // The names of the matched fields a stored objective and a seed disagree on, for the skip log: field names only,
     // never a value (§1.2: a filter holds tag values).

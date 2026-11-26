@@ -8,7 +8,7 @@ sidebar_position: 6
 
 *unreleased*
 
-Outbound webhook hardening and **webhook endpoint health**: endpoints that go down hold their deliveries and catch up by themselves once they are back. **One migration** (additive: five columns on the webhook delivery table, one new table and three indexes, see [Migration](#migration-81)) and no breaking API change; **four behaviour changes for webhooks** (see below), each marked *Behaviour change* with its one-line way back.
+Outbound webhook hardening and **webhook endpoint health**: endpoints that go down hold their deliveries and catch up by themselves once they are back. **One migration** (additive: five columns on the webhook delivery table, one new table and three indexes, see [Migration](#migration-81)) and no breaking API change; **four behaviour changes for webhooks** (see below), each marked *Behaviour change* with its one-line way back. Applications can also boot their own test hosts without Warp getting in the way (`RemoveWarpHostedServices()`, `RequireDatabaseAtStartup = false`).
 
 ### Webhooks: bounded attempts
 
@@ -72,6 +72,24 @@ The endpoint table on the Webhooks page is now **Endpoint health**: state, faili
 ### SLO: webhook delivery latency
 
 New objective kind `WebhookDeliveryLatency` (value 12): at least `Percentile`% of an endpoint's deliveries delivered within `TargetValue` minutes of being sent, `Dimension` = the group or `*`. Builder: `o.AddWebhookDeliveryLatency(group, minutes, percentile: 99)`. Read from the delivery rows, so keep the window within `WebhookDeliveryRetention`. See [Webhook delivery latency](features/slo-error-budget.md#webhook-delivery-latency).
+
+### `RemoveWarpHostedServices()` for an application's own tests
+
+Controller and API tests that boot the app through `WebApplicationFactory` but do not exercise Warp can now start it with no database, or on EF Core in-memory: call `services.RemoveWarpHostedServices()` (`Warp.Core.Testing`) in `ConfigureTestServices`. It removes every hosted service that belongs to a Warp package (workers, server tasks, server registration, heartbeat, background-service host, flushers, seeders, dashboard push, startup checks) and keeps the app's own. Warp's hosted services are recognised by an assembly marker every Warp package carries, not by a list, so new ones are covered. Everything else stays registered: `IMediator` works, and publishing still stages `Job` rows on the app's context; nothing runs them.
+
+If you wrote your own helper that removes hosted services whose assembly name starts with `Warp.`, replace it: a same-named extension method in scope makes the call ambiguous once you import `Warp.Core.Testing`.
+
+See [Testing apps that use Warp](operations/testing-apps.md), which also covers tests that need jobs to run (a real database in a container).
+
+### Starting without the database: `RequireDatabaseAtStartup`
+
+New Core setting, default `true` (unchanged: the host refuses to start while Warp cannot reach the database). Set it to `false` and a startup step that fails because the database is unreachable (server registration, the PostgreSQL version check, the SQL Server compatibility-level check, a non-server process's instance registration) logs one Warning and the host starts. The steps retry in the background with backoff, checks first, logging at Debug; until the server is registered no worker, server task, background service, counter flush, notification listener or SLO / metric-board seeding runs, and after it registers everything starts as usual. Any other startup failure (an unsupported server version, an authentication error) still fails startup. Shutdown while waiting is clean. See [Starting without the database](operations/configuration.md#starting-without-the-database).
+
+The provider packages coordinate this through a new public type, `WarpStartupGate` (Core); applications do not use it. `IDatabaseExceptionClassifier` gains `IsConnectionFailure` with a default implementation, so a custom provider keeps compiling. The hosts whose constructors take the gate keep their 8.0 constructors.
+
+### Startup checks stand down on a non-relational context
+
+The PostgreSQL time-column and server-version checks, the SQL Server compatibility-level check and the storage-type check on Warp's columns now skip, with a `Debug` log, when the application's context runs on another provider (EF in-memory in a test, for example). Before, the PostgreSQL time-column check failed the host with `Relational-specific methods can only be used when the context is using a relational database provider.`
 
 ### Migration (8.1)
 

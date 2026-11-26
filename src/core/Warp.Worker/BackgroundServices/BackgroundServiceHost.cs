@@ -28,12 +28,15 @@ public sealed class BackgroundServiceHost<TContext> : BackgroundService
     private readonly List<BackgroundServiceSupervisor<TContext>> _supervisors = [];
     private readonly IServiceScopeFactory _scopes;
     private readonly ILogger<BackgroundServiceHost<TContext>> _logger;
+    private readonly WarpStartupGate? _startupGate;
 
     // Guards against duplicate provider registration when the host is recreated in tests.
     // ILoggerFactory.AddProvider is cumulative — calling it twice for the same category
     // results in duplicate log rows in the BackgroundServiceLog table.
     private readonly HashSet<string> _registeredLogCategories = [];
 
+    // The 8.0 constructor, kept so code built against it still binds. Without a startup gate the host behaves as
+    // if registration had completed in StartAsync (RequireDatabaseAtStartup on).
     public BackgroundServiceHost(
         IServiceScopeFactory scopes,
         [FromKeyedServices(DatabaseClock.Key)] TimeProvider time,
@@ -43,9 +46,24 @@ public sealed class BackgroundServiceHost<TContext> : BackgroundService
         ServerTaskSignals<TContext> signals,
         IBackgroundServiceStatusObserver statusObserver,
         ILogger<BackgroundServiceHost<TContext>> logger)
+        : this(scopes, time, loggerFactory, warpConfig, workerConfig, signals, statusObserver, logger, startupGate: null)
+    {
+    }
+
+    public BackgroundServiceHost(
+        IServiceScopeFactory scopes,
+        [FromKeyedServices(DatabaseClock.Key)] TimeProvider time,
+        ILoggerFactory loggerFactory,
+        IOptions<WarpConfiguration> warpConfig,
+        IOptions<WarpServerConfiguration> workerConfig,
+        ServerTaskSignals<TContext> signals,
+        IBackgroundServiceStatusObserver statusObserver,
+        ILogger<BackgroundServiceHost<TContext>> logger,
+        WarpStartupGate? startupGate)
     {
         _scopes = scopes;
         _logger = logger;
+        _startupGate = startupGate;
 
         var leaseTtl = workerConfig.Value.BackgroundServiceLeaseTtl ?? WarpServerConfiguration.DefaultBackgroundServiceLeaseTtl;
         var acquirePollInterval = workerConfig.Value.BackgroundServiceAcquirePollInterval ?? TimeSpan.FromSeconds(15);
@@ -119,6 +137,13 @@ public sealed class BackgroundServiceHost<TContext> : BackgroundService
             return;
         }
 
+        // Not before the server is registered: with RequireDatabaseAtStartup off and the database unreachable at
+        // startup, registration retries in the background and this loop starts when it succeeds.
+        if (!await WarpStartupGate.WaitForServerAsync(_startupGate, stoppingToken))
+        {
+            return;
+        }
+
         var tasks = _supervisors
             .Select(s => s.RunAsync(stoppingToken));
 
@@ -134,7 +159,8 @@ public sealed class BackgroundServiceHost<TContext> : BackgroundService
 
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
-        if (_supervisors.Count > 0)
+        // A server that never registered (RequireDatabaseAtStartup off, database still unreachable) took no lease.
+        if (_supervisors.Count > 0 && (_startupGate is null || _startupGate.IsOpen))
         {
             // Fire-and-forget: DELETE BackgroundServiceLease and BackgroundServiceInstance rows
             // for @me immediately, before waiting on user code. This is the graceful-shutdown
