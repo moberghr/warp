@@ -34,6 +34,24 @@ Fixes for things a caller outside your application could reach. No migration. Th
   `AddBuiltInLogin<T>(o => o.RequireSecureCookie = false)`.
 - A login request whose body is not a form now gets `400` instead of `500`.
 
+#### Warp.Http and adapters
+
+- **`[Authorize]` / `[AllowAnonymous]` on a base handler class now apply.** Handler attributes are read with
+  inheritance; before, an `[Authorize]` on an abstract base handler was dropped and the endpoint was open. If you
+  relied on a base class's attribute *not* applying, move it.
+- **`MapWarpHttp()` returns a convention builder** (`WarpHttpEndpointConventionBuilder`), so
+  `app.MapWarpHttp().RequireAuthorization()` works. It is also an `IEndpointRouteBuilder`, so source that used
+  the old return type still compiles. **Binary-breaking:** an assembly compiled against 8.0 that calls
+  `MapWarpHttp` throws `MissingMethodException` until it is rebuilt against 8.1.
+- **`WarpHttpOptions.ValidateAntiforgeryOnFormEndpoints`** keeps ASP.NET's antiforgery validation on form
+  endpoints (default unchanged: off). `[RequireAntiforgeryToken]` on a handler class now decides for its endpoint
+  either way; before, Warp's own `DisableAntiforgery()` overrode it.
+- Client observability ingest truncated caller-supplied strings in quadratic time; it is linear now.
+- Adapter response capture reads only the capture cap (plus one byte) instead of buffering the whole response
+  first, so a huge or endless response no longer exhausts memory. With capture on, a `ResponseHeadersRead`
+  caller still waits for that much of the body (or its end); `text/event-stream` responses are no longer
+  captured at all, so server-sent events are not held back.
+
 ## 8.0.0
 
 *2026-11-25*

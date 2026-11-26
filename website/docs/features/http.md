@@ -117,13 +117,34 @@ ASP.NET deserializes the entire JSON body into `CreateOrder`. The natural shape 
 public sealed record ListOrders(
     [FromQuery] int Page,
     [FromQuery] int PageSize,
-    [FromHeader(Name = "X-Tenant-Id")] Guid TenantId) : IRequest<ListOrdersResponse>;
+    [FromHeader(Name = "X-Correlation-Id")] string? CorrelationId) : IRequest<ListOrdersResponse>;
 
 [WarpHttpGet("/orders")]
 public sealed class ListOrdersHandler : IRequestHandler<ListOrders, ListOrdersResponse> { ... }
 ```
 
 ASP.NET binds each property from its declared source via `[AsParameters]`. Records with primary constructors and classes with property setters both work.
+
+> ⚠️ **Never bind who the caller is.** A route, query, header or body value is whatever the caller chose to
+> send, so a tenant or user id taken from one lets any authenticated caller act as any tenant. Read identity
+> from the authenticated principal in the handler instead:
+>
+> ```csharp
+> [Authorize]
+> [WarpHttpGet("/orders")]
+> public sealed class ListOrdersHandler(IHttpContextAccessor http, OrdersDb db)
+>     : IRequestHandler<ListOrders, ListOrdersResponse>
+> {
+>     public async Task<ListOrdersResponse> HandleAsync(ListOrders request, CancellationToken ct)
+>     {
+>         var tenantId = Guid.Parse(http.HttpContext!.User.FindFirstValue("tenant_id")!);
+>         // ... query orders WHERE TenantId == tenantId
+>     }
+> }
+> ```
+>
+> (`builder.Services.AddHttpContextAccessor()` registers the accessor.) The examples further down that carry
+> a `TenantId` in the request show binding mechanics only; apply the same rule there.
 
 > ⚠️ **A non-nullable scalar query param is REQUIRED — your C# default is ignored.** Under `[AsParameters]`, ASP.NET treats every non-nullable value-typed property as a required argument. A property initializer or parameter default (`int Take { get; set; } = 20;`) is **not** consulted by the binder, so a request that omits the parameter returns **400** rather than falling back to the default. This is the single most common Warp.Http surprise.
 >
@@ -291,6 +312,17 @@ app.MapGroup("/api/public").RequireAuthorization("publicPolicy").MapWarpHttp("pu
 app.MapGroup("/internal/admin").RequireAuthorization("adminPolicy").MapWarpHttp("admin");
 ```
 
+`MapWarpHttp()` returns a convention builder for the endpoints it just mapped, so a convention can also chain
+straight off it:
+
+```csharp
+app.MapWarpHttp().RequireAuthorization();                // every null-group handler requires a signed-in user
+app.MapWarpHttp("admin").RequireAuthorization("adminPolicy");
+```
+
+The returned builder is also the route builder you called it on, so existing code that used the return value
+as an `IEndpointRouteBuilder` still compiles.
+
 `MapWarpHttp(group)` matches strictly — null matches null, "public" matches "public". No overlap. Calling `MapWarpHttp(group)` twice on the same `IEndpointRouteBuilder` instance with the same group throws `InvalidOperationException` at startup.
 
 ## Endpoint metadata attributes
@@ -313,6 +345,38 @@ app.MapGroup("/api").RequireAuthorization().MapWarpHttp();
 [WarpHttpGet("/api/health")]
 public sealed class HealthCheckHandler : IRequestHandler<HealthCheck, HealthStatus> { ... }
 ```
+
+`[Authorize]` and `[AllowAnonymous]` are read with inheritance, as on an MVC controller: an `[Authorize]` on an
+abstract base handler class protects every handler that derives from it.
+
+:::tip Gate by default
+A handler without `[Authorize]` is anonymous unless something above it says otherwise. Mapping through a gate,
+`app.MapWarpHttp().RequireAuthorization()` or `app.MapGroup("/api").RequireAuthorization().MapWarpHttp()`, and
+opening individual endpoints with `[AllowAnonymous]`, means a handler someone forgets to annotate is closed, not
+open.
+:::
+
+### Antiforgery on form endpoints
+
+Endpoints that bind a form (`IFormFile`, `IFormFileCollection`, `IFormCollection`, `[FromForm]`) have ASP.NET's
+antiforgery validation **turned off** by default, so programmatic clients can upload without a token. If
+browsers post to them with cookie authentication, they are a cross-site request forgery target; keep the
+validation on, for all of them or per handler:
+
+```csharp
+builder.Services.AddAntiforgery();
+builder.Services.AddWarpHttp(o => o.ValidateAntiforgeryOnFormEndpoints = true);   // every form endpoint
+
+app.UseAntiforgery();
+```
+
+```csharp
+[RequireAntiforgeryToken]                       // just this one; [RequireAntiforgeryToken(false)] opts one out
+[WarpHttpPost("/profile/avatar")]
+public sealed class UploadAvatarHandler : IRequestHandler<UploadAvatar, Unit> { ... }
+```
+
+A handler's own `[RequireAntiforgeryToken]` wins over the option either way.
 
 ### Rate limiting
 

@@ -87,6 +87,44 @@ public sealed class AuthCompositionTests
         resp.StatusCode.ShouldBe(HttpStatusCode.OK);
     }
 
+    [TimedFact]
+    public async Task AuthorizeOnAbstractBaseHandler_RejectsUnauthenticatedRequest()
+    {
+        // No group-level gate: the only thing protecting the endpoint is the base class's [Authorize].
+        await using var app = await WarpHttpTestApp.StartAsync(
+            configureServices: ConfigureTestAuth,
+            configureApp: a =>
+            {
+                a.UseAuthentication();
+                a.UseAuthorization();
+                a.MapWarpHttp();
+            });
+
+        using var content = new StringContent("{}", System.Text.Encoding.UTF8, "application/json");
+        var resp = await app.Client.PostAsync(new Uri("/api/secure/inherited", UriKind.Relative), content);
+
+        resp.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+    }
+
+    [TimedFact]
+    public async Task RequireAuthorization_ChainedOnMapWarpHttp_GatesTheMappedEndpoints()
+    {
+        await using var app = await WarpHttpTestApp.StartAsync(
+            configureServices: ConfigureTestAuth,
+            configureApp: a =>
+            {
+                a.UseAuthentication();
+                a.UseAuthorization();
+                a.MapWarpHttp().RequireAuthorization();
+            });
+
+        // /api/echo has no attribute of its own: only the chained convention protects it.
+        using var content = new StringContent("{\"message\":\"hi\"}", System.Text.Encoding.UTF8, "application/json");
+        var resp = await app.Client.PostAsync(new Uri("/api/echo", UriKind.Relative), content);
+
+        resp.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+    }
+
     private static void ConfigureTestAuth(IServiceCollection services)
     {
         services

@@ -254,17 +254,18 @@ internal sealed class WarpAdapterHandler : DelegatingHandler
 
         if (response?.Content is not null && ShouldCapture(_recording.CaptureResponseBodies, isFailure, forceCapture))
         {
-            // Capture must be NON-DESTRUCTIVE: a live response body is a forward-only, single-pass stream, so
-            // raw-reading it here would consume it and the caller (and HttpClient's default content buffering)
-            // would then fail with "stream already consumed" — turning a successful call into a failure. So we
-            // buffer the content first (LoadIntoBufferAsync, via ReadBufferedAsync) — leaving it fully readable
-            // by the caller — and store only a truncated prefix. Buffering matches HttpClient's default
-            // ResponseContentRead completion, so it adds no cost on the common path. Read with the CALLER's
-            // token; capture is best-effort and must never rewrite the outcome, so on cancellation we complete
-            // the scope with the call's TRUE outcome before the OCE propagates.
+            // Capture must be NON-DESTRUCTIVE and BOUNDED. A live response body is a forward-only, single-pass
+            // stream, so raw-reading it here would consume it and the caller would then fail with "stream
+            // already consumed". Buffering the whole content (LoadIntoBufferAsync) kept it readable but had no
+            // limit: a huge or endless response (a vendor, or anyone the adapter can be pointed at) was read
+            // into memory in full, and a streaming caller (ResponseHeadersRead) never got its response at all.
+            // So read only cap + 1 bytes and hand the caller a content that replays them before the rest of
+            // the stream (PeekResponseBodyAsync). Read with the CALLER's token; capture is best-effort and must
+            // never rewrite the outcome, so on cancellation we complete the scope with the call's TRUE outcome
+            // before the OCE propagates.
             try
             {
-                var responseBody = await ReadBufferedAsync(response.Content, _recording.MaxCapturedBodySize, cancellationToken);
+                var responseBody = await PeekResponseBodyAsync(response, _recording.MaxCapturedBodySize, cancellationToken);
                 if (responseBody is not null)
                 {
                     scope.SetResponseBody(TruncateToBytes(responseBody, _recording.MaxCapturedBodySize));
@@ -298,7 +299,8 @@ internal sealed class WarpAdapterHandler : DelegatingHandler
     {
         try
         {
-            // Buffer so the content stays readable for the transport (request) or the caller (response).
+            // Buffer so the request content stays readable for the transport. (Responses are peeked instead; see
+            // PeekResponseBodyAsync.)
             await content.LoadIntoBufferAsync(cancellationToken);
 
             if (maxBytes <= 0)
@@ -313,22 +315,10 @@ internal sealed class WarpAdapterHandler : DelegatingHandler
             }
 
             // Read only a bounded prefix rather than materialising the whole body into a string just to
-            // truncate it to maxBytes elsewhere — a hot adapter returning a large payload would otherwise
-            // allocate the full body (on top of the already-buffered bytes) on EVERY captured call. Read one
-            // extra byte so an over-cap body still trips the caller's TruncateToBytes marker; TruncateToBytes
-            // does the boundary-safe cut, so a raw decode here is fine (it re-encodes and trims).
+            // truncate it to maxBytes elsewhere. One extra byte so an over-cap body still trips the caller's
+            // TruncateToBytes marker; TruncateToBytes does the boundary-safe cut.
             var buffer = new byte[maxBytes + 1];
-            var read = 0;
-            while (read < buffer.Length)
-            {
-                var n = await stream.ReadAsync(buffer.AsMemory(read, buffer.Length - read), cancellationToken);
-                if (n == 0)
-                {
-                    break;
-                }
-
-                read += n;
-            }
+            var read = await ReadPrefixAsync(stream, buffer, null, cancellationToken);
 
             return read == 0 ? string.Empty : Encoding.UTF8.GetString(buffer, 0, read);
         }
@@ -337,6 +327,88 @@ internal sealed class WarpAdapterHandler : DelegatingHandler
             // Capture is best-effort and must never break the call (e.g. a non-buffering stream content).
             return null;
         }
+    }
+
+    // Reads at most maxBytes + 1 bytes of the response body. A seekable body is rewound; a forward-only one is
+    // replaced by a content that replays the bytes read and then streams the rest, with the original headers, so
+    // the caller still receives the whole body and nothing beyond the prefix is ever buffered here. The swap
+    // happens even when the read fails part-way, so the caller sees the transport's own error on its next read
+    // rather than "stream already consumed". An event stream is not captured at all: the peek waits for
+    // maxBytes + 1 bytes or the end, and a server-sent-events body may send a few bytes a minute for ever.
+    private static async Task<string?> PeekResponseBodyAsync(HttpResponseMessage response, int maxBytes, CancellationToken cancellationToken)
+    {
+        if (maxBytes <= 0)
+        {
+            return string.Empty;
+        }
+
+        var original = response.Content;
+        if (string.Equals(original.Headers.ContentType?.MediaType, "text/event-stream", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        Stream stream;
+        try
+        {
+            stream = await original.ReadAsStreamAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+
+        var start = stream.CanSeek ? stream.Position : 0;
+        var buffer = new byte[maxBytes + 1];
+        var read = 0;
+        try
+        {
+            read = await ReadPrefixAsync(stream, buffer, x => read = x, cancellationToken);
+
+            return read == 0 ? string.Empty : Encoding.UTF8.GetString(buffer, 0, read);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Capture is best-effort and must never break the call.
+            return null;
+        }
+        finally
+        {
+            if (stream.CanSeek)
+            {
+                stream.Position = start;
+            }
+            else
+            {
+                var replay = new StreamContent(new PrefixedReadStream(buffer, read, stream, original));
+                foreach (var header in original.Headers)
+                {
+                    replay.Headers.TryAddWithoutValidation(header.Key, header.Value);
+                }
+
+                response.Content = replay;
+            }
+        }
+    }
+
+    // progress reports the count after every read, so a caller whose read throws part-way still knows how many
+    // bytes of the buffer are real.
+    private static async Task<int> ReadPrefixAsync(Stream stream, byte[] buffer, Action<int>? progress, CancellationToken cancellationToken)
+    {
+        var read = 0;
+        while (read < buffer.Length)
+        {
+            var n = await stream.ReadAsync(buffer.AsMemory(read, buffer.Length - read), cancellationToken);
+            if (n == 0)
+            {
+                break;
+            }
+
+            read += n;
+            progress?.Invoke(read);
+        }
+
+        return read;
     }
 
     private static IEnumerable<KeyValuePair<string, IEnumerable<string>>> AllHeaders(HttpHeaders primary, HttpHeaders? content)

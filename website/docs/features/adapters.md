@@ -214,7 +214,7 @@ Adapter call logs can persist request/response bodies and headers, which may con
   | `OnFailure` | only on a non-success outcome |
   | `Always` | on success too |
 
-- **Truncation caps** apply before storage: `MaxCapturedBodySize` (8 KB), `MaxCapturedHeaderSize` (4 KB).
+- **Truncation caps** apply before storage: `MaxCapturedBodySize` (8 KB), `MaxCapturedHeaderSize` (4 KB). Response capture reads only the first `MaxCapturedBodySize` bytes of the body (plus one, to know it was cut) and hands your code a body that replays them before streaming the rest, so a large or endless response is never buffered whole by the adapter. With response capture on, a `ResponseHeadersRead` caller gets its response once that much of the body (or all of it) has arrived; a `text/event-stream` response is never captured, so a server-sent-events caller is not held back. Leave capture off for other long-poll or slowly trickling endpoints.
 - **Header redaction** runs through the user-owned `RedactedHeaders` denylist — case-insensitive, prepopulated with `Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key`. Redacted values store as `***`. The denylist is a **default, not a lock**: `Add`, `Remove`, and `Clear` are all yours. (Mandatory `Authorization` redaction was deliberately rejected — the responsibility model puts you in control.)
 
 ```csharp
