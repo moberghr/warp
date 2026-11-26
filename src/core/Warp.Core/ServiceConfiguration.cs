@@ -924,6 +924,9 @@ public static class ServiceConfiguration
         bucket.Property(p => p.UpdatedAt);
         bucket.Property(p => p.NextSlotUtc);
 
+        // The stale-bucket sweep (8.1) deletes buckets by last update; without an index it scans the table.
+        bucket.HasIndex(p => p.UpdatedAt);
+
         bucket.Metadata.SetSchema(schema);
     }
 

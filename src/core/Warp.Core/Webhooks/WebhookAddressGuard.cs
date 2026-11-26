@@ -21,7 +21,7 @@ namespace Warp.Core.Webhooks;
 /// connections through the same callback.
 /// </para>
 /// </summary>
-public static class WebhookAddressGuard
+internal static class WebhookAddressGuard
 {
     /// <summary>
     /// Returns <see langword="true"/> when <paramref name="address"/> is a publicly routable unicast address.

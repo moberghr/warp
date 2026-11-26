@@ -356,6 +356,10 @@ public class StorageTypeConventionTests
         };
 
         times.ShouldAllBe(x => UnwrapType(x.GetValueConverter()!.ProviderClrType) == typeof(DateTime));
+
+        // The stale-bucket sweep's index, in the same 8.1 migration.
+        context.Model.FindEntityType(typeof(RateLimitBucket))!.GetIndexes()
+            .ShouldContain(x => x.Properties.Count == 1 && x.Properties[0].Name == nameof(RateLimitBucket.UpdatedAt));
     }
 
     private static DbContextOptionsBuilder Provider(DbContextOptionsBuilder builder, bool sqlServer)

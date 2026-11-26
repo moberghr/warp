@@ -87,8 +87,8 @@ public sealed class WarpWebhookOptions
 
     /// <summary>
     /// When <see langword="true"/>, deliveries this process sends with a <c>Group</c> track their endpoint's health
-    /// (8.1): a delivery that runs out of retries marks its group <c>Failing</c>; while it is failing, deliveries that
-    /// run out of retries are <c>Parked</c> instead of <c>Exhausted</c>; the endpoint monitor probes the group and,
+    /// (8.1): a delivery that runs out of retries is <c>Parked</c> instead of <c>Exhausted</c> (no exhausted callback)
+    /// and marks its group <c>Failing</c>; the endpoint monitor probes the group and,
     /// once a delivery succeeds, releases the parked ones oldest first. The choice is stamped on each delivery at
     /// <c>SendAsync</c>, so it holds whichever server runs the attempt. Deliveries without a group are not tracked.
     /// Default <see langword="false"/>.
@@ -118,12 +118,12 @@ public sealed class WarpWebhookOptions
     /// delivery URL usually comes from a customer, and without the guard it could point at <c>localhost</c>, a private
     /// network or a cloud metadata endpoint. The <c>warp-webhooks</c> client resolves the destination host itself,
     /// drops every loopback, private, link-local (including 169.254.169.254), shared, documentation, multicast and
-    /// reserved address (see <see cref="WebhookAddressGuard.IsPublic"/>), and connects to exactly the addresses that
+    /// reserved address (the IANA special-purpose registries, RFC 6890), and connects to exactly the addresses that
     /// passed — redirects included. A host that resolves to no public address fails the attempt with a
     /// <see cref="WebhookAddressNotPublicException"/> (retried per the schedule). In the sending process,
     /// <c>SendAsync</c> also rejects a URL whose host is a non-public IP literal or <c>localhost</c> with an
     /// <see cref="ArgumentException"/>. Set it to <see langword="false"/> for local development and for tests that
-    /// stub the client: with the guard on, a stub primary handler is replaced (see below).
+    /// stub the client: with the guard on, a stub primary handler fails every attempt closed (see below).
     /// <para>
     /// It applies per process: the attempt is guarded by the process that runs it, so leave it on in every server that
     /// runs a worker. <b>With an HTTP proxy</b> (an explicit <c>Proxy</c>, or <c>HTTP_PROXY</c> / <c>HTTPS_PROXY</c>)
@@ -133,7 +133,8 @@ public sealed class WarpWebhookOptions
     /// The guard needs a <see cref="SocketsHttpHandler"/> primary handler. Configure that client with
     /// <c>UseSocketsHttpHandler(...)</c>: its settings are kept, except a host <c>ConnectCallback</c>, which the
     /// guard replaces. A primary handler of another type (an <c>HttpClientHandler</c> carrying a proxy or client
-    /// certificates, a test stub) is replaced by Warp's default handler, and a Warning is logged once.
+    /// certificates, a test stub) is kept, never replaced, and every attempt through it fails closed with an error
+    /// naming the fix (<c>UseSocketsHttpHandler</c>, or <c>PublicAddressesOnly = false</c>); a Warning is logged once.
     /// </para>
     /// </summary>
     public bool PublicAddressesOnly

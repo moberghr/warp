@@ -25,12 +25,12 @@ internal static class WebhookHttpClientSetup
         // The guard, once per service collection (AddWarp can run twice). PostConfigure runs after every Configure, so
         // it sees the final primary handler whatever order the host registered things in; it reads the policy when the
         // handler is built, so an AddWebhooks opt-out registered later still applies.
-        if (services.Any(x => x.ServiceType == typeof(WebhookHandlerReplacementWarning)))
+        if (services.Any(x => x.ServiceType == typeof(WebhookGuardUnavailableWarning)))
         {
             return;
         }
 
-        services.TryAddSingleton<WebhookHandlerReplacementWarning>();
+        services.TryAddSingleton<WebhookGuardUnavailableWarning>();
         services.PostConfigure<HttpClientFactoryOptions>(
             WebhookConstants.AdapterName,
             x => x.HttpMessageHandlerBuilderActions.Add(ApplyPublicAddressGuard));
@@ -42,8 +42,8 @@ internal static class WebhookHttpClientSetup
 
     // A SocketsHttpHandler (Warp's default or one the host configured) gets the guard and keeps every other
     // setting, the host's AllowAutoRedirect choice included. Any other primary handler cannot carry a
-    // ConnectCallback, so it is replaced by Warp's default handler and that is logged once: a guard the host
-    // asked for must never be silently dropped, and lost proxy or certificate settings must not be silent.
+    // ConnectCallback: it is KEPT (its proxy or certificates are never dropped) behind a handler that fails every
+    // attempt closed with the fix in the message, and that is logged once at Warning. Never send unguarded.
     private static void ApplyPublicAddressGuard(HttpMessageHandlerBuilder builder)
     {
         if (!builder.Services.GetRequiredService<IOptions<WebhookAddressPolicy>>().Value.PublicAddressesOnly)
@@ -51,15 +51,16 @@ internal static class WebhookHttpClientSetup
             return;
         }
 
-        if (builder.PrimaryHandler is not SocketsHttpHandler sockets)
+        if (builder.PrimaryHandler is SocketsHttpHandler sockets)
         {
-            builder.Services.GetRequiredService<WebhookHandlerReplacementWarning>()
-                .Report(builder.PrimaryHandler?.GetType().FullName ?? "null");
+            sockets.ConnectCallback = WebhookAddressGuard.ConnectAsync;
 
-            sockets = CreateDefaultHandler();
-            builder.PrimaryHandler = sockets;
+            return;
         }
 
-        sockets.ConnectCallback = WebhookAddressGuard.ConnectAsync;
+        builder.Services.GetRequiredService<WebhookGuardUnavailableWarning>()
+            .Report(builder.PrimaryHandler?.GetType().FullName ?? "null");
+
+        builder.PrimaryHandler = new WebhookGuardUnavailableHandler(builder.PrimaryHandler ?? CreateDefaultHandler());
     }
 }

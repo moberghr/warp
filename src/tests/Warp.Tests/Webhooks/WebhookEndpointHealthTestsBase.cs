@@ -39,16 +39,20 @@ public abstract class WebhookEndpointHealthTestsBase : IntegrationTestBase
     private static CancellationToken Ct => Xunit.TestContext.Current.CancellationToken;
 
     [TimedFact]
-    public async Task Send_TrackedDeliveryRunsOutOfRetries_MarksGroupFailingAndSignalsIt()
+    public async Task Send_TrackedDeliveryRunsOutOfRetries_ParksItMarksGroupFailingAndSignalsIt()
     {
         var receiver = new SwitchableReceiver(HttpStatusCode.InternalServerError);
         var spy = new SpyNotifier();
         var health = new EndpointHealthRecorder();
         await using var server = await StartServerAsync(receiver, spy, health);
 
+        // The delivery that turns the group Failing parks too: the Failing signal is the alert, not the exhausted
+        // callback (which never fires for a parked delivery).
         var id = await SendAsync(server, "first");
-        await WaitForStatusAsync(server, id, WebhookDeliveryStatus.Exhausted);
+        await WaitForStatusAsync(server, id, WebhookDeliveryStatus.Parked);
         await WaitUntilAsync(() => health.Count > 0);
+        (await GetDeliveryAsync(id)).ExhaustedCallbackPending.ShouldBeFalse();
+        spy.Received.OfType<WebhookDeliveryExhaustedEvent>().ShouldBeEmpty();
 
         var endpoint = await GetEndpointAsync(Group);
         endpoint.State.ShouldBe(WebhookEndpointState.Failing);
@@ -69,7 +73,7 @@ public abstract class WebhookEndpointHealthTestsBase : IntegrationTestBase
         await using var server = await StartServerAsync(receiver);
 
         var first = await SendAsync(server, "first");
-        await WaitForStatusAsync(server, first, WebhookDeliveryStatus.Exhausted);
+        await WaitForStatusAsync(server, first, WebhookDeliveryStatus.Parked);
 
         var second = await SendAsync(server, "second");
         await WaitForStatusAsync(server, second, WebhookDeliveryStatus.Parked);
@@ -90,7 +94,7 @@ public abstract class WebhookEndpointHealthTestsBase : IntegrationTestBase
         await using var server = await StartServerAsync(receiver, health: health);
 
         var first = await SendAsync(server, "first");
-        await WaitForStatusAsync(server, first, WebhookDeliveryStatus.Exhausted);
+        await WaitForStatusAsync(server, first, WebhookDeliveryStatus.Parked);
         var parked = await SendAsync(server, "parked");
         await WaitForStatusAsync(server, parked, WebhookDeliveryStatus.Parked);
 
@@ -108,8 +112,9 @@ public abstract class WebhookEndpointHealthTestsBase : IntegrationTestBase
         // Recovery itself releases nothing; the monitor drains what parked.
         (await GetDeliveryAsync(parked)).Status.ShouldBe(WebhookDeliveryStatus.Parked);
 
-        (await CreateMonitor().ExecuteAsync(Ct)).ShouldNotBeNull().ShouldStartWith("Released 1 ");
+        (await CreateMonitor().ExecuteAsync(Ct)).ShouldNotBeNull().ShouldStartWith("Released 2 ");
 
+        await WaitForStatusAsync(server, first, WebhookDeliveryStatus.Delivered);
         await WaitForStatusAsync(server, parked, WebhookDeliveryStatus.Delivered);
         (await GetDeliveryAsync(parked)).AttemptCount.ShouldBe(1);
     }
@@ -120,8 +125,6 @@ public abstract class WebhookEndpointHealthTestsBase : IntegrationTestBase
         var receiver = new SwitchableReceiver(HttpStatusCode.InternalServerError);
         await using var server = await StartServerAsync(receiver);
 
-        var first = await SendAsync(server, "first");
-        await WaitForStatusAsync(server, first, WebhookDeliveryStatus.Exhausted);
         var parked = await SendAsync(server, "parked");
         await WaitForStatusAsync(server, parked, WebhookDeliveryStatus.Parked);
         await MakeProbeDueAsync();
@@ -144,8 +147,6 @@ public abstract class WebhookEndpointHealthTestsBase : IntegrationTestBase
         var receiver = new SwitchableReceiver(HttpStatusCode.InternalServerError);
         await using var server = await StartServerAsync(receiver);
 
-        var first = await SendAsync(server, "first");
-        await WaitForStatusAsync(server, first, WebhookDeliveryStatus.Exhausted);
         var oldest = await SendAsync(server, "oldest");
         await WaitForStatusAsync(server, oldest, WebhookDeliveryStatus.Parked);
         var newer = await SendAsync(server, "newer");
@@ -172,7 +173,7 @@ public abstract class WebhookEndpointHealthTestsBase : IntegrationTestBase
         await using var server = await StartServerAsync(receiver);
 
         var first = await SendAsync(server, "first");
-        await WaitForStatusAsync(server, first, WebhookDeliveryStatus.Exhausted);
+        await WaitForStatusAsync(server, first, WebhookDeliveryStatus.Parked);
 
         receiver.Status = HttpStatusCode.OK;
         var other = await SendAsync(server, "other", group: "globex");

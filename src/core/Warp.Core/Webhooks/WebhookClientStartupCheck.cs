@@ -6,7 +6,7 @@ using Microsoft.Extensions.Options;
 namespace Warp.Core.Webhooks;
 
 // Builds the warp-webhooks handler once the host has STARTED, while the public-address guard is on, so the guard is
-// applied (and a replaced host handler reported) before the first delivery attempt rather than during it. Registered
+// applied (and a host handler the guard cannot use reported) before the first delivery attempt rather than during it. Registered
 // only on servers that run a worker (they run the attempts). It runs in StartedAsync, after every hosted service has
 // started, because a host's own handler factory may depend on something that only exists then (an in-process test
 // server, say) and the client factory caches a failed build: building earlier would break every later attempt.

@@ -139,10 +139,10 @@ public class WebhookAddressGuardTests
     }
 
     [TimedFact]
-    public async Task PublicAddressesOnly_PrimaryHandlerConfiguredBeforeAddWebhooks_GuardStillApplies()
+    public async Task PublicAddressesOnly_PrimaryHandlerConfiguredBeforeAddWebhooks_FailsClosed()
     {
-        // A host that set its primary handler BEFORE AddWebhooks gets it replaced by the guarded
-        // SocketsHttpHandler: the request is refused, never sent through the unguarded handler.
+        // A host handler set BEFORE AddWebhooks is kept, and the guard fails the request closed rather than sending it
+        // through an unguarded handler.
         var services = new ServiceCollection();
         services.AddLogging();
         services.AddDbContext<TestContext>(o => o.UseInMemoryDatabase($"wh-{Guid.NewGuid():N}"));
@@ -153,8 +153,8 @@ public class WebhookAddressGuardTests
 
         var client = sp.GetRequiredService<IHttpClientFactory>().CreateClient(WebhookConstants.AdapterName);
 
-        var ex = await Should.ThrowAsync<HttpRequestException>(() => client.GetAsync(new Uri("http://127.0.0.1:9/hook"), Ct));
-        ex.InnerException.ShouldBeOfType<WebhookAddressNotPublicException>();
+        var ex = await Should.ThrowAsync<InvalidOperationException>(() => client.GetAsync(new Uri("http://127.0.0.1:9/hook"), Ct));
+        ex.Message.ShouldContain("UseSocketsHttpHandler");
     }
 
     [TimedFact]

@@ -262,20 +262,25 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
             }
             else
             {
-                // Out of retries. With endpoint health tracking, the delivery that turns a healthy endpoint Failing
-                // is Exhausted (the signal), and while the endpoint is already failing the delivery parks instead,
-                // to be released when the endpoint recovers. Without tracking (or with no endpoint row) it is
-                // Exhausted as before.
+                // Out of retries. With endpoint health tracking the delivery parks, to be probed or released when
+                // the endpoint recovers — including the one that turns a healthy endpoint Failing (the Failing signal
+                // is the alert, not the exhausted callback). Without tracking, or with no endpoint row to release
+                // it, the delivery is Exhausted as before.
                 var outcome = groupName is null
                     ? EndpointOutcome.NotTracked
                     : await MarkEndpointFailedAsync(groupName, attemptedAt, cancellationToken);
 
                 delivery.NextAttemptAt = null;
 
-                if (outcome == EndpointOutcome.AlreadyFailing)
+                if (outcome is EndpointOutcome.StartedFailing or EndpointOutcome.AlreadyFailing)
                 {
                     delivery.Status = WebhookDeliveryStatus.Parked;
                     WarpTelemetry.WebhookDeliveries.Add(1, new KeyValuePair<string, object?>("outcome", "parked"));
+
+                    if (outcome == EndpointOutcome.StartedFailing)
+                    {
+                        healthSignal = new PendingEndpointHealthSignal(WarpEventType.WebhookEndpointFailing, groupName!, attemptedAt, attemptedAt);
+                    }
                 }
                 else
                 {
@@ -285,11 +290,6 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
                     delivery.ExhaustedCallbackPending = true;
                     WarpTelemetry.WebhookDeliveries.Add(1, new KeyValuePair<string, object?>("outcome", "exhausted"));
                     exhausted = true;
-
-                    if (outcome == EndpointOutcome.StartedFailing)
-                    {
-                        healthSignal = new PendingEndpointHealthSignal(WarpEventType.WebhookEndpointFailing, groupName!, attemptedAt, attemptedAt);
-                    }
                 }
             }
 
@@ -420,9 +420,9 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
             .Where(x => x.Name == groupName)
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.LastFailureAt, at), cancellationToken);
 
-    // A tracked delivery ran out of retries. A Healthy endpoint turns Failing (this delivery is the one that
-    // exhausts); an endpoint already Failing parks the delivery. With no endpoint row at all (its creation failed
-    // for another reason) the delivery is exhausted rather than parked where nothing would ever release it.
+    // A tracked delivery ran out of retries: a Healthy endpoint turns Failing (StartedFailing), an endpoint already
+    // Failing stays so; either way the delivery parks. With no endpoint row at all (its creation failed for another
+    // reason) the delivery is exhausted rather than parked where nothing would ever release it.
     private async Task<EndpointOutcome> MarkEndpointFailedAsync(string groupName, DateTime at, CancellationToken cancellationToken)
     {
         var nextProbeAt = at + _probeInterval;

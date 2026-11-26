@@ -119,31 +119,36 @@ public class WebhookHttpClientHandlerTests
     [TimedTheory]
     [InlineData(true)]
     [InlineData(false)]
-    public void PublicAddressesOnly_HostNonSocketsHandler_ReplacedWithGuardedDefaultAndWarnedOnce(bool registeredBeforeAddWarp)
+    public async Task PublicAddressesOnly_HostNonSocketsHandler_IsKeptAndEveryAttemptFailsClosed(bool registeredBeforeAddWarp)
     {
+        // The host's handler (proxy, client certificates) is never replaced: it stays behind a handler that fails every
+        // attempt with the fix in the message, so nothing leaves unguarded and nothing is dropped silently.
         var logs = new CapturingLoggerProvider();
         void HostHandler(IServiceCollection services) => services.AddHttpClient(WebhookConstants.AdapterName)
             .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = true });
 
-        using var sp = BuildProvider(
+        await using var sp = BuildProvider(
             w => w.PublicAddressesOnly = true,
             before: registeredBeforeAddWarp ? HostHandler : null,
             after: registeredBeforeAddWarp ? null : HostHandler,
             logs: logs);
 
-        var primary = PrimaryHandler(sp).ShouldBeOfType<SocketsHttpHandler>();
+        // The host's own handler is still the innermost one.
+        PrimaryHandler(sp).ShouldBeOfType<HttpClientHandler>().AllowAutoRedirect.ShouldBeTrue();
 
-        primary.ConnectCallback.ShouldNotBeNull();
-        primary.AllowAutoRedirect.ShouldBeFalse();
+        var client = sp.GetRequiredService<IHttpClientFactory>().CreateClient(WebhookConstants.AdapterName);
+        var ex = await Should.ThrowAsync<InvalidOperationException>(() => client.GetAsync(new Uri("https://example.test/hook"), Xunit.TestContext.Current.CancellationToken));
+        ex.Message.ShouldContain("UseSocketsHttpHandler");
+        ex.Message.ShouldContain("PublicAddressesOnly = false");
 
         var warning = logs.Logs.Where(x => x.Level == LogLevel.Warning).ShouldHaveSingleItem();
         warning.Message.ShouldContain("\"warp-webhooks\"");
         warning.Message.ShouldContain(typeof(HttpClientHandler).FullName!);
-        warning.Message.ShouldContain("proxy, client certificates");
+        warning.Message.ShouldContain("proxy or client certificates");
     }
 
     [TimedFact]
-    public async Task PublicAddressesOnly_ReplacedHostHandler_IsReportedOnceTheHostHasStarted()
+    public async Task PublicAddressesOnly_UnguardableHostHandler_IsReportedOnceTheHostHasStarted()
     {
         var logs = new CapturingLoggerProvider();
         await using var sp = BuildProvider(
@@ -156,7 +161,7 @@ public class WebhookHttpClientHandlerTests
 
         await startupCheck.StartedAsync(Xunit.TestContext.Current.CancellationToken);
 
-        logs.Logs.Where(x => x.Level == LogLevel.Warning).ShouldHaveSingleItem().Message.ShouldContain("PublicAddressesOnly replaced");
+        logs.Logs.Where(x => x.Level == LogLevel.Warning).ShouldHaveSingleItem().Message.ShouldContain("every webhook attempt fails");
 
         // Later clients reuse the handler; the warning is not repeated.
         sp.GetRequiredService<IHttpClientFactory>().CreateClient(WebhookConstants.AdapterName).Dispose();
@@ -208,7 +213,7 @@ public class WebhookHttpClientHandlerTests
         // The handler is rebuilt on every factory rotation (2 min by default); the warning must not repeat.
         var logs = new CapturingLoggerProvider();
         using var factory = LoggerFactory.Create(x => x.AddProvider(logs));
-        var warning = new WebhookHandlerReplacementWarning(factory.CreateLogger<WebhookHandlerReplacementWarning>());
+        var warning = new WebhookGuardUnavailableWarning(factory.CreateLogger<WebhookGuardUnavailableWarning>());
 
         warning.Report("Some.Handler");
         warning.Report("Some.Handler");
@@ -224,7 +229,7 @@ public class WebhookHttpClientHandlerTests
         services.AddWarp<TestContext>();
         services.AddWarp<TestContext>();
 
-        services.Count(x => x.ServiceType == typeof(WebhookHandlerReplacementWarning)).ShouldBe(1);
+        services.Count(x => x.ServiceType == typeof(WebhookGuardUnavailableWarning)).ShouldBe(1);
     }
 
     private static HttpMessageHandler PrimaryHandler(IServiceProvider sp)
