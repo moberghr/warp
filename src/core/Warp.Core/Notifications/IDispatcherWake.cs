@@ -1,7 +1,7 @@
 namespace Warp.Core.Notifications;
 
 /// <summary>
-/// Core seam for "wake local dispatcher(s) on a <see cref="NotificationKind.JobEnqueued"/> push".
+/// Core seam for "wake the local dispatcher(s) that drain the queue of a <see cref="NotificationKind.JobEnqueued"/> push".
 /// <see cref="NotificationListenerTask{TContext}"/> (Warp.Core) injects
 /// <c>IEnumerable&lt;IDispatcherWake&gt;</c> — <b>empty</b> in a non-server (<c>AddWarp</c>-only)
 /// process, where there are no dispatchers to wake; <b>one</b> entry in a server process, where
@@ -17,4 +17,11 @@ public interface IDispatcherWake
     /// shortcuts the current exponential-backoff sleep.
     /// </summary>
     void SignalAll();
+
+    /// <summary>
+    /// Wakes the locally-registered dispatchers that drain <paramref name="queue"/> (exact, ordinal match).
+    /// A null <paramref name="queue"/> wakes every dispatcher. The default implementation wakes every
+    /// dispatcher, so an implementation that does not know its dispatchers' queues stays correct.
+    /// </summary>
+    void Signal(string? queue) => SignalAll();
 }

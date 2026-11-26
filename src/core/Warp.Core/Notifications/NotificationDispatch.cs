@@ -134,7 +134,7 @@ internal static class NotificationDispatch
             switch (notifications[i].Kind)
             {
                 case NotificationKind.JobEnqueued:
-                    signals.SignalJobEnqueued();
+                    signals.SignalJobEnqueued(notifications[i].Queue);
                     break;
                 case NotificationKind.MessageEnqueued:
                     signals.SignalMessageEnqueued();

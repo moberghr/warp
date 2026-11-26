@@ -69,7 +69,9 @@ public class WarpDispatcher<TContext> : BackgroundService
             SingleWriter = true,
         });
 
-        _registration = registry.Register(_signal);
+        // Registered with the group's queues: a push for a queue this group does not claim must not send
+        // it to claim (8.1's dedicated webhook group made every enqueue cost an empty warp:webhooks claim).
+        _registration = registry.Register(_signal, groupConfiguration.Queues);
         _signals = signals;
     }
 
@@ -101,9 +103,10 @@ public class WarpDispatcher<TContext> : BackgroundService
         // a dispatcher without UseDatabasePush() sat out its backoff — up to MaxPollingInterval —
         // before seeing work enqueued in its own process. The dispatcher benchmarks measured it:
         // ~21 s to drain 1,000 jobs against ~2.3 s single-worker. Same lock-guarded release as
-        // WarpWorker, so a burst of signals leaves at most one pending wake.
+        // WarpWorker, so a burst of signals leaves at most one pending wake. Scoped to this group's
+        // queues, like the registry: an enqueue elsewhere would only buy an empty claim.
         var signalLock = new Lock();
-        using var subscription = _signals.Subscribe(ServerTaskSignal.JobEnqueued, () =>
+        using var subscription = _signals.SubscribeJobEnqueued(_groupConfiguration.Queues, () =>
         {
             lock (signalLock)
             {

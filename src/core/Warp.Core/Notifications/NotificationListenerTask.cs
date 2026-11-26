@@ -124,8 +124,9 @@ public class NotificationListenerTask<TContext> : BackgroundService
 
     private void DrainSignals()
     {
-        WakeDispatchers();
-        _signals.SignalJobEnqueued();
+        // A drain cannot say which queues it missed, so it wakes every group.
+        WakeDispatchers(null);
+        _signals.SignalJobEnqueued(null);
         _signals.SignalMessageEnqueued();
         _signals.SignalJobFinalized();
     }
@@ -137,10 +138,12 @@ public class NotificationListenerTask<TContext> : BackgroundService
             case NotificationKind.JobEnqueued:
                 // Two consumers: dispatcher-mode WarpDispatcher (via IDispatcherWake) and
                 // bare-worker WarpWorker instances (via ServerTaskSignals.JobEnqueued). Firing
-                // both is harmless — each consumer's semaphore caps at 1. In an AddWarp-only
-                // process both sets are empty/inert (no workers), so this is a no-op there.
-                WakeDispatchers();
-                _signals.SignalJobEnqueued();
+                // both is harmless — each consumer's semaphore caps at 1. Only the groups that
+                // drain the notification's queue wake (a wake for another queue is a wasted claim).
+                // In an AddWarp-only process both sets are empty/inert (no workers), so this is a
+                // no-op there.
+                WakeDispatchers(notification.Queue);
+                _signals.SignalJobEnqueued(notification.Queue);
                 break;
             case NotificationKind.MessageEnqueued:
                 _signals.SignalMessageEnqueued();
@@ -153,11 +156,11 @@ public class NotificationListenerTask<TContext> : BackgroundService
         }
     }
 
-    private void WakeDispatchers()
+    private void WakeDispatchers(string? queue)
     {
         for (var i = 0; i < _dispatcherWakes.Count; i++)
         {
-            _dispatcherWakes[i].SignalAll();
+            _dispatcherWakes[i].Signal(queue);
         }
     }
 }
