@@ -53,6 +53,16 @@ public class RateLimitAttributeValidationTests
     }
 
     [TimedFact]
+    public Task WithRateLimit_WindowExceedsMaxWindow_Throws()
+    {
+        // Same cap as the attribute: the stale-bucket sweep relies on no window being longer.
+        Should.Throw<ArgumentOutOfRangeException>(() => new JobParameters().WithRateLimit("k", 1, TimeSpan.FromSeconds(RateLimitAttribute.MaxWindowSeconds + 1)));
+        Should.NotThrow(() => new JobParameters().WithRateLimit("k", 1, TimeSpan.FromSeconds(RateLimitAttribute.MaxWindowSeconds)));
+
+        return Task.CompletedTask;
+    }
+
+    [TimedFact]
     public Task RateLimitAttribute_PerSecondsExceedsMaxWindow_Throws()
     {
         Should.Throw<ArgumentOutOfRangeException>(() => new RateLimitAttribute("k", 1, RateLimitAttribute.MaxWindowSeconds + 1));

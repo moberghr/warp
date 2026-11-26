@@ -241,7 +241,7 @@ public abstract class StatSurfaceTestsBase : IAsyncLifetime
         // Pre-holding the only slot is what makes this exact: the jobs are rejected on their single
         // iteration instead of racing a barrier-pinned sibling.
         var semaphores = new FakeSemaphoreProvider();
-        await using var held = semaphores.HoldSlot($"warp:concurrency:{key}");
+        await using var held = semaphores.HoldSlot($"warp:concurrency-mutex:{key}");
 
         await Run(CreateWorker(queue, maxRetries: 1, semaphores: semaphores), 2);
     }

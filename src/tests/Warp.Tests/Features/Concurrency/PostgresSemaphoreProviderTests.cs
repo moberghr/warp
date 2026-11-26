@@ -59,14 +59,10 @@ public class PostgresSemaphoreProviderTests
         // So a [Mutex("k")] acquire and a concurrent [Semaphore("k", N)] acquire don't share
         // underlying lock names — combined concurrency on PG is mutex_limit + semaphore_limit.
         //
-        // SQL Server differs: SqlServerSemaphoreProvider always delegates to Medallion's
-        // SqlSemaphore which uses lock names "k0".."k{N-1}" regardless of maxCount, so on SQL
-        // Server [Mutex("k")] and [Semaphore("k", N)] DO share the slot pool. The spec/docs
-        // call out the backend-specific behavior; this test locks in the PG side.
-        //
-        // A future refactor that unified the PG namespace (e.g. used "k:0" at maxCount=1 too)
-        // would fail this test — it would also align PG with SQL Server's behavior, but is a
-        // breaking change for existing Mutex deployments and should go through review.
+        // ConcurrencyPipelineBehavior goes further and gives the two shapes different lock names
+        // altogether (ConcurrencyLockName), which is what keeps them apart on SQL Server, where
+        // Medallion's SqlSemaphore would otherwise share one slot pool across counts, and what
+        // stops a mutex key from naming a semaphore slot (see the test below).
         var spy = new SpyLockProvider();
         var provider = new PostgresSemaphoreProvider(spy);
 
@@ -152,6 +148,39 @@ public class PostgresSemaphoreProviderTests
 
         var probesInSecondCall = spy.NamesRequested.Length - 1;
         probesInSecondCall.ShouldBe(2, "cache was cleared so both slots must be probed; if it leaked, only one would be");
+    }
+
+    [TimedFact]
+    public async Task MutexKeyShapedLikeASlot_DoesNotTakeTheSemaphoresSlot()
+    {
+        // [Mutex("tenantA:0")] used to lock "warp:concurrency:tenantA:0", which is slot 0 of
+        // [Semaphore("tenantA", N)]: a caller choosing the mutex key could hold a semaphore slot.
+        var spy = new SpyLockProvider();
+        var provider = new PostgresSemaphoreProvider(spy);
+
+        var mutex = await provider.TryAcquireAsync(Warp.Core.Concurrency.ConcurrencyLockName.For("tenantA:0", 1), maxCount: 1, TimeSpan.Zero, CancellationToken.None);
+        mutex.ShouldNotBeNull();
+
+        // With the mutex held, every one of the semaphore's slots is still free.
+        var semaphoreName = Warp.Core.Concurrency.ConcurrencyLockName.For("tenantA", 2);
+        var first = await provider.TryAcquireAsync(semaphoreName, maxCount: 2, TimeSpan.Zero, CancellationToken.None);
+        var second = await provider.TryAcquireAsync(semaphoreName, maxCount: 2, TimeSpan.Zero, CancellationToken.None);
+
+        first.ShouldNotBeNull();
+        second.ShouldNotBeNull();
+
+        await second.DisposeAsync();
+        await first.DisposeAsync();
+        await mutex.DisposeAsync();
+    }
+
+    [TimedTheory]
+    [InlineData("k", 1, "warp:concurrency-mutex:k")]
+    [InlineData("k", 2, "warp:concurrency:k")]
+    [InlineData("k:0", 1, "warp:concurrency-mutex:k:0")]
+    public void ConcurrencyLockName_SeparatesTheSingleLockShape(string key, int limit, string expected)
+    {
+        Warp.Core.Concurrency.ConcurrencyLockName.For(key, limit).ShouldBe(expected);
     }
 
     private sealed class SpyLockProvider : IDistributedLockProvider

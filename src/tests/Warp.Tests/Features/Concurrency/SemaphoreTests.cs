@@ -349,7 +349,7 @@ public abstract class SemaphoreTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         var lockProvider = new FakeSemaphoreProvider();
-        var heldHandle = lockProvider.HoldSlot("warp:concurrency:admin-change-key", 1);
+        var heldHandle = lockProvider.HoldSlot("warp:concurrency-mutex:admin-change-key");
 
         var worker = CreateWorker(lockProvider);
 
@@ -431,7 +431,7 @@ public abstract class SemaphoreTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         var lockProvider = new FakeSemaphoreProvider();
-        var heldHandle = lockProvider.HoldSlot("warp:concurrency:admin-mutex-key", 1);
+        var heldHandle = lockProvider.HoldSlot("warp:concurrency-mutex:admin-mutex-key");
 
         // Act
         var worker = CreateWorker(lockProvider);
@@ -468,7 +468,7 @@ public abstract class SemaphoreTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         var lockProvider = new FakeSemaphoreProvider();
-        var heldHandle = lockProvider.HoldSlot("warp:concurrency:default-one-key", 1);
+        var heldHandle = lockProvider.HoldSlot("warp:concurrency-mutex:default-one-key");
 
         // Act
         var worker = CreateWorker(lockProvider);
@@ -518,7 +518,7 @@ public abstract class SemaphoreTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         var lockProvider = new FakeSemaphoreProvider();
-        var heldHandle = lockProvider.HoldSlot("warp:concurrency:no-limit-field-key", 1);
+        var heldHandle = lockProvider.HoldSlot("warp:concurrency-mutex:no-limit-field-key");
 
         // Act
         var worker = CreateWorker(lockProvider);

@@ -52,6 +52,24 @@ Fixes for things a caller outside your application could reach. No migration. Th
   caller still waits for that much of the body (or its end); `text/event-stream` responses are no longer
   captured at all, so server-sent events are not held back.
 
+#### Core
+
+- **Mutex and semaphore lock names no longer overlap.** A key at limit 1 now locks `warp:concurrency-mutex:{key}`
+  (was `warp:concurrency:{key}`). On PostgreSQL, `[Mutex("tenantA:0")]` used to take slot 0 of
+  `[Semaphore("tenantA", N)]`; on SQL Server `[Mutex("k")]` and `[Semaphore("k", N)]` shared one slot pool. Both
+  are now independent on both databases. **Rolling upgrade:** while 8.0 and 8.1 servers run side by side they take
+  different locks for the same mutex key, so a mutex-guarded key can run once on an 8.0 server and once on an 8.1
+  server at the same time. If that matters, drain jobs with `[Mutex]` keys (or stop the 8.0 servers) before the
+  8.1 servers start. Semaphore keys are unaffected. Changing a key's
+  admin limit between 1 and more than 1 now moves it to the other lock name on SQL Server too (PostgreSQL always
+  did), so jobs already running under the old limit are not counted against the new one until they finish.
+- **Stale rate-limit buckets are deleted.** `RateLimitBucket` rows were never removed, so per-tenant or per-user
+  keys grew the table forever. `ExpirationCleanup` now deletes rows idle for 8 days with no Wait-mode cursor ahead
+  (batched, capped per tick). Adapter buckets are kept. A key whose window is longer than 7 days, possible only
+  through `WithRateLimit` on 8.0 or a host-registered `IRateLimitManager`, can be reset after 8 idle days.
+- **Behaviour change: `WithRateLimit(...)` rejects a window over 7 days**, as `[RateLimit]` always has. The
+  cleanup above relies on that cap.
+
 ## 8.0.0
 
 *2026-11-25*

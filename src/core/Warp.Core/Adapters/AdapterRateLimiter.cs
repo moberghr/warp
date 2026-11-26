@@ -405,7 +405,9 @@ internal sealed class AdapterRateLimiter<TContext> : IAdapterRateLimiter
 /// </summary>
 internal static class AdapterSharedPolicy
 {
-    public static string BucketKey(string adapter) => $"warp:adapter:{adapter}";
+    public const string BucketKeyPrefix = "warp:adapter:";
+
+    public static string BucketKey(string adapter) => BucketKeyPrefix + adapter;
 
     public static string ToJson(int limit, int perSeconds) => JsonSerializer.Serialize(new SharedPolicyDoc(limit, perSeconds));
 

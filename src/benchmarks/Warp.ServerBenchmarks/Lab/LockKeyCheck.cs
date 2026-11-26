@@ -36,6 +36,7 @@ public static class LockKeyCheck
         string[] names =
         [
             "warp:concurrency:tenant-42",
+            "warp:concurrency-mutex:tenant-42",
             "warp:recurring:nightly-report",
             "warp:saga:Acme.Orders.OrderSaga:order-1",
             "warp:ratelimit:outbound-email",
