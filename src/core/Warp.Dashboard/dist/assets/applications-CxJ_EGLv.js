@@ -1,0 +1,1 @@
+import{mn as e}from"./types-F6gZQJ45.js";var t={Registered:1,HeartbeatLost:2,Recovered:3,Stopped:4,StaleSwept:5};function n(t){return e(t)}export{n,t};

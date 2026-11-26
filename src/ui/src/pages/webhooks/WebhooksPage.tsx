@@ -15,6 +15,8 @@ import type { WebhookDeliveryListItem, WebhookDeliveryFilter, WebhookGroupModel 
 import { PageHeading } from '@/components/PageHeading';
 import { Hint } from '@/components/ui/tooltip';
 import { DASHBOARD_LOCALE } from '@/utils/format';
+import { EndpointActions, EndpointHealthBadge, LastResult, WebhookStatusPill } from './WebhookBadges';
+import { formatDeliveryDuration, formatSuccessRate } from './webhookDisplay';
 
 const PAGE_SIZE = 20;
 
@@ -105,7 +107,19 @@ export default function WebhooksPage() {
         accessorKey: 'status',
         header: 'Status',
         meta: { headerClassName: 'w-28' },
-        cell: ({ row }) => <StatusPill status={row.original.status} />,
+        cell: ({ row }) => <WebhookStatusPill status={row.original.status} />,
+      },
+      {
+        id: 'lastResult',
+        header: 'Last result',
+        meta: { headerClassName: 'w-44' },
+        cell: ({ row }) => (
+          <LastResult
+            lastStatusCode={row.original.lastStatusCode}
+            lastFailureReason={row.original.lastFailureReason}
+            lastAttemptAt={row.original.lastAttemptAt}
+          />
+        ),
       },
       {
         accessorKey: 'attemptCount',
@@ -146,7 +160,7 @@ export default function WebhooksPage() {
         Durable outbound delivery — the delivery is the state machine; attempts are recorded as adapter calls.
       </p>
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-4">
         <Tile label="Deliveries" value={summaryError ? '—' : (summary?.total ?? 0).toLocaleString(DASHBOARD_LOCALE)} />
         <Tile label="Delivered" value={summaryError ? '—' : `${deliveredPercent}%`} />
         <Tile label="Pending" value={summaryError ? '—' : (summary?.pending ?? 0).toLocaleString(DASHBOARD_LOCALE)} />
@@ -154,6 +168,11 @@ export default function WebhooksPage() {
           label="Exhausted"
           value={summaryError ? '—' : (summary?.exhausted ?? 0).toLocaleString(DASHBOARD_LOCALE)}
           emphasis={!summaryError && summary && summary.exhausted > 0 ? 'text-destructive' : undefined}
+        />
+        <Tile
+          label="Parked"
+          value={summaryError ? '—' : (summary?.parked ?? 0).toLocaleString(DASHBOARD_LOCALE)}
+          emphasis={!summaryError && summary && summary.parked > 0 ? 'text-violet-700 dark:text-violet-300' : undefined}
         />
       </div>
 
@@ -169,19 +188,19 @@ export default function WebhooksPage() {
         </CardContent>
       </Card>
 
-      {/* Group webhooks by type + by endpoint — click a row to open that group's page. */}
-      <div className="grid gap-4 md:grid-cols-2 mb-4">
+      {/* Endpoint health (8.1) — one row per delivery group; click a row to open that endpoint's page. */}
+      <EndpointHealthCard
+        groups={endpointGroupsQuery.data}
+        onOpen={(key) => navigate(`/webhooks/group/endpoint/${encodeURIComponent(key)}`)}
+      />
+
+      {/* Group webhooks by event type — click a row to open that group's page. */}
+      <div className="mb-4">
         <GroupCard
           title="By event type"
           groups={typeGroupsQuery.data}
           keyHeader="Event type"
           onOpen={(key) => navigate(`/webhooks/group/type/${encodeURIComponent(key)}`)}
-        />
-        <GroupCard
-          title="By endpoint"
-          groups={endpointGroupsQuery.data}
-          keyHeader="Endpoint"
-          onOpen={(key) => navigate(`/webhooks/group/endpoint/${encodeURIComponent(key)}`)}
         />
       </div>
 
@@ -195,6 +214,8 @@ export default function WebhooksPage() {
           <option value={WebhookDeliveryStatus.Pending}>Pending</option>
           <option value={WebhookDeliveryStatus.Delivered}>Delivered</option>
           <option value={WebhookDeliveryStatus.Exhausted}>Exhausted</option>
+          <option value={WebhookDeliveryStatus.Parked}>Parked</option>
+          <option value={WebhookDeliveryStatus.Cancelled}>Cancelled</option>
         </select>
         <input
           type="text"
@@ -246,12 +267,13 @@ function GroupCard({
               <TableHead className="text-right w-24">Delivered</TableHead>
               <TableHead className="text-right w-20">Pending</TableHead>
               <TableHead className="text-right w-24">Exhausted</TableHead>
+              <TableHead className="text-right w-20">Parked</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {!groups || groups.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={5} className="text-center text-muted-foreground py-6">
+                <TableCell colSpan={6} className="text-center text-muted-foreground py-6">
                   No deliveries yet.
                 </TableCell>
               </TableRow>
@@ -267,6 +289,7 @@ function GroupCard({
                   <TableCell className="text-right tabular-nums text-green-600 dark:text-green-400">{g.delivered.toLocaleString(DASHBOARD_LOCALE)}</TableCell>
                   <TableCell className="text-right tabular-nums text-amber-600 dark:text-amber-400">{g.pending.toLocaleString(DASHBOARD_LOCALE)}</TableCell>
                   <TableCell className={`text-right tabular-nums ${g.exhausted > 0 ? 'text-destructive' : ''}`}>{g.exhausted.toLocaleString(DASHBOARD_LOCALE)}</TableCell>
+                  <TableCell className={`text-right tabular-nums ${g.parked > 0 ? 'text-violet-700 dark:text-violet-300' : ''}`}>{g.parked.toLocaleString(DASHBOARD_LOCALE)}</TableCell>
                 </TableRow>
                 </Hint>
               ))
@@ -278,6 +301,60 @@ function GroupCard({
   );
 }
 
+// Endpoint health: per delivery group, its health record (tracked groups that ever failed), parked count, last
+// success / failure, 24-hour success rate and p95 send-to-delivered time, and the Retry now / Cancel all actions.
+function EndpointHealthCard({ groups, onOpen }: { groups: WebhookGroupModel[] | undefined; onOpen: (key: string) => void }) {
+  return (
+    <Card className="mb-4">
+      <CardHeader><CardTitle className="text-base">Endpoint health</CardTitle></CardHeader>
+      <CardContent className="p-0 overflow-x-auto">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Endpoint</TableHead>
+              <TableHead className="w-24">State</TableHead>
+              <TableHead className="w-32">Failing since</TableHead>
+              <TableHead className="text-right w-20">Parked</TableHead>
+              <TableHead className="w-32">Last success</TableHead>
+              <TableHead className="w-32">Last failure</TableHead>
+              <TableHead className="text-right w-24">Success (24h)</TableHead>
+              <TableHead className="text-right w-24">p95 (24h)</TableHead>
+              <TableHead className="text-right w-48" />
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {!groups || groups.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={9} className="text-center text-muted-foreground py-6">
+                  No deliveries yet.
+                </TableCell>
+              </TableRow>
+            ) : (
+              groups.map((g) => (
+                <TableRow key={g.key} className="cursor-pointer" onClick={() => onOpen(g.key)}>
+                  <TableCell className="font-mono text-xs truncate max-w-[16rem] text-primary">{g.key}</TableCell>
+                  <TableCell><EndpointHealthBadge health={g.health} /></TableCell>
+                  <TableCell className="text-sm text-muted-foreground">{g.failingSince ? <RelativeTime date={g.failingSince} /> : <Dash />}</TableCell>
+                  <TableCell className={`text-right tabular-nums ${g.parked > 0 ? 'text-violet-700 dark:text-violet-300' : ''}`}>{g.parked.toLocaleString(DASHBOARD_LOCALE)}</TableCell>
+                  <TableCell className="text-sm text-muted-foreground">{g.lastSuccessAt ? <RelativeTime date={g.lastSuccessAt} /> : <Dash />}</TableCell>
+                  <TableCell className="text-sm text-muted-foreground">{g.lastFailureAt ? <RelativeTime date={g.lastFailureAt} /> : <Dash />}</TableCell>
+                  <TableCell className="text-right tabular-nums">{formatSuccessRate(g.successRate)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{formatDeliveryDuration(g.p95DeliveryMs)}</TableCell>
+                  <TableCell className="text-right"><EndpointActions group={g} size="xs" /></TableCell>
+                </TableRow>
+              ))
+            )}
+          </TableBody>
+        </Table>
+      </CardContent>
+    </Card>
+  );
+}
+
+function Dash() {
+  return <span className="text-muted-foreground/40">—</span>;
+}
+
 function Tile({ label, value, emphasis }: { label: string; value: string; emphasis?: string }) {
   return (
     <Card>
@@ -286,35 +363,5 @@ function Tile({ label, value, emphasis }: { label: string; value: string; emphas
         <div className={`text-2xl font-bold ${emphasis ?? ''}`}>{value}</div>
       </CardContent>
     </Card>
-  );
-}
-
-// Delivery-status pill. Pending is in-flight (amber), Delivered settled OK (green), Exhausted
-// settled after the schedule ran out (red).
-const statusStyles: Record<WebhookDeliveryStatus, { label: string; cls: string }> = {
-  [WebhookDeliveryStatus.Pending]: {
-    label: 'Pending',
-    cls: 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400',
-  },
-  [WebhookDeliveryStatus.Delivered]: {
-    label: 'Delivered',
-    cls: 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400',
-  },
-  [WebhookDeliveryStatus.Exhausted]: {
-    label: 'Exhausted',
-    cls: 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400',
-  },
-};
-
-function StatusPill({ status }: { status: WebhookDeliveryStatus }) {
-  const style = statusStyles[status] ?? {
-    label: 'Unknown',
-    cls: 'bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-400',
-  };
-
-  return (
-    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${style.cls}`}>
-      {style.label}
-    </span>
   );
 }

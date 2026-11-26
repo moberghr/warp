@@ -1,6 +1,8 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Shouldly;
+using Warp.Core;
 using Warp.Core.Webhooks;
 
 namespace Warp.Tests.Webhooks;
@@ -31,6 +33,9 @@ public class WebhookExecutorGuardTests
             adapters: null!,
             adapterRegistry: null!,
             notifier: Warp.Tests.Helpers.TestNotifiers.EmptyDispatcher(),
+            endpointHealthHandlers: [],
+            scopeFactory: null!,
+            configuration: Options.Create(new WarpConfiguration()),
             logger: NullLogger<ExecuteWebhookDeliveryHandler<FaultingContext>>.Instance);
 
         await Should.NotThrowAsync(async () =>

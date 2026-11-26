@@ -34,6 +34,27 @@ Set on `AddWarp` (or `AddWarpServer`, which inherits them) and only meaningful w
 
 To keep application versions apart in the stored series (old vs new during a rolling deploy), call `ByVersion()` inside `AddMetrics` on the hosts that should record it. It is off by default and needs `ApplicationName` and `ApplicationVersion`. See [Comparing versions](/docs/features/custom-metrics#comparing-versions).
 
+### Webhooks
+
+Set on `AddWarp` (or `AddWarpServer`, which inherits them). The webhook engine is always on; see [Outbound Webhooks](/docs/features/webhooks).
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `WebhookAttemptTimeout` | `TimeSpan` | `30 seconds` | Budget for one delivery attempt: sending the request, receiving the response headers and reading the captured prefix of the body. An attempt past it is cancelled and counts as a failed attempt (retried per the delivery's `RetrySchedule`). Enforced with a cancellation token, not `HttpClient.Timeout`, so a `warp-webhooks` client you configure keeps its own settings; that client's `Timeout` (100 s by default) still applies to the send, so raise it too before going above 100 s. If the headers arrived in time and only the body capture runs out, the status code still decides the outcome. Must be at least 1 ms (or `Timeout.InfiniteTimeSpan` to disable); `AddWarp` throws otherwise. New in 8.1. |
+| `WebhookDeliveryRetention` | `TimeSpan` | `30 days` | How long a delivery row is kept (`ExpireAt = CreatedAt + retention`); also the default call-log retention of the `warp-webhooks` adapter. |
+| `WebhookDeliveryRetentionCount` | `int?` | `null` | Count cap for settled deliveries (oldest deleted first). `Pending` deliveries are never count-trimmed. `null` disables it. |
+| `WebhookEndpointMonitorInterval` | `TimeSpan?` | `30 seconds` | How often the `WebhookEndpointMonitor` server task runs: it releases the parked deliveries of recovered endpoints, probes failing endpoints that are due and raises the still-failing alert. With no tracked endpoint it reads one small table. `null` turns it off (parked deliveries then wait). Must be greater than zero when set. New in 8.1. See [Endpoint health](/docs/features/webhooks#endpoint-health). |
+| `WebhookEndpointProbeInterval` | `TimeSpan` | `5 minutes` | How long a failing endpoint waits between probes (a probe re-sends its oldest parked delivery once). Must be greater than zero. New in 8.1. |
+| `WebhookEndpointStillFailingAfter` | `TimeSpan` | `30 days` | How long an endpoint must have been failing before the `WebhookEndpointStillFailing` alert and `IWebhookEndpointHealthHandler.OnEndpointStillFailingAsync` fire, once per failing period. Must be greater than zero. New in 8.1. |
+| `WebhookStuckDeliveryGrace` | `TimeSpan` | `10 minutes` | How far past `NextAttemptAt` a `Pending` delivery must be before the stuck-delivery sweep gives it a fresh executor job. |
+
+`opt.AddWebhooks(w => ...)` takes the per-process options: `UseCustomSigner<T>()`, `OnDeliveryExhausted<T>()` and, new in 8.1:
+
+- `PublicAddressesOnly` (default **`true`** since 8.1) — applies where attempts run, so keep it on in every server that runs a worker; set it to `false` only for local development and for tests that stub the `warp-webhooks` client. With it on, `SendAsync` also rejects non-public IP-literal and `localhost` URLs. See [Public addresses only](/docs/features/webhooks#public-addresses-only).
+- `TrackEndpointHealth` (default `false`) — applies where deliveries are sent: stamped on each delivery at `SendAsync`. See [Endpoint health](/docs/features/webhooks#endpoint-health).
+- `DeduplicateByEventId` (default `false`) — applies where deliveries are sent. See [Deduplication](/docs/features/webhooks#deduplication).
+- `OnEndpointHealthChanged<T>()` — registers an `IWebhookEndpointHealthHandler`.
+
 ### Naming Conventions
 
 Warp's entity configurations do **not** hardcode table or column names. If you use a naming convention plugin (e.g., `UseSnakeCaseNamingConvention()`), it will transform Warp's tables and columns just like your own entities:
@@ -212,6 +233,7 @@ builder.Services.AddWarpServer<AppDbContext>(options =>
 |--------|------|---------|-------------|
 | `RunWorker` | `bool` | `true` | Whether this server runs the job worker. Call `DisableWorker()` (which sets this to `false`) for a service-only server: background services + server infrastructure, no worker hosts, no job-only server tasks, no `Worker`/`WorkerGroup` rows. **Do not** set `WorkerCount = 0` while leaving the worker enabled — `AddWarpServer` throws at registration for that contradiction (it would orchestrate jobs but never execute them). Use `DisableWorker()` instead. |
 | `WorkerCount` | `int` | `min(CPU * 5, 20)` | Number of concurrent worker threads |
+| `WebhookWorkerCount` | `int` | `4` | Workers in the dedicated group that runs webhook attempts (polls only `warp:webhooks`); the default group no longer polls it, so slow receivers cannot take job workers. `0` restores the pre-8.1 shape (the default group drains `warp:webhooks`). Ignored when `Queues` or an `AddWorkerGroup` group lists `warp:webhooks` (explicit routing wins). Must be 0 or more. New in 8.1. See [Webhook workers](/docs/features/webhooks#webhook-workers). |
 | `PrefetchCount` | `int?` | `null` (= 0, no prefetch) | **Dispatcher mode only.** How many jobs the dispatcher may claim beyond the workers that are free to start one. Unset or `0` claims only what a worker can start immediately, the fairest across servers. A positive value buffers jobs ahead so a worker that finishes starts its next job without a claim round trip: about 16% more empty jobs per second at `WorkerCount` on one server. A prefetched job is already `Processing` in the database while it waits in the in-memory buffer, so other servers cannot take it, it waits behind this server's running jobs, and its claim ages against `InvisibilityTimeout`. Raise it for many very short jobs on one server or evenly loaded servers; leave it at 0 for long-running jobs. Before 8.0, unset meant `WorkerCount`. |
 | `PollingInterval` | `TimeSpan` | `10 seconds` | Delay between polls when no jobs are available. Also serves as the floor for exponential backoff — it resets to this floor the moment a job is processed, and in-process enqueue signals (and DB push) shortcut it entirely. |
 | `MaxPollingInterval` | `TimeSpan` | `30 seconds` | Upper bound on the polling delay during idle periods. The delay grows from `PollingInterval` by `PollingIntervalFactor` on each empty poll, clamped to this value, and resets instantly when a job is processed. |
@@ -351,6 +373,6 @@ options.Queues = ["a-critical", "b-default", "c-low"];
 
 A worker always picks up jobs from `a-critical` before `b-default`, and `b-default` before `c-low`. Within a queue, jobs are ordered by schedule time.
 
-A queue is drained **completely** before the next one is looked at — priority here is strict, not weighted, so a permanently busy `a-critical` starves `b-default` indefinitely. That is also true of the implicit group, which binds `[DefaultQueue, "warp:webhooks"]`: webhook deliveries wait for the default queue to drain. If one queue must not be starved by another, give it its own worker group (`opt.AddWorkerGroup()`) with its own workers rather than relying on ordering.
+A queue is drained **completely** before the next one is looked at — priority here is strict, not weighted, so a permanently busy `a-critical` starves `b-default` indefinitely. Webhook deliveries are not affected since 8.1: they run on their own group (`WebhookWorkerCount`). With `WebhookWorkerCount = 0` the implicit group binds `[DefaultQueue, "warp:webhooks"]` and webhook deliveries wait for the default queue to drain. If one queue must not be starved by another, give it its own worker group (`opt.AddWorkerGroup()`) with its own workers rather than relying on ordering.
 
 Ordering is **ordinal** (`StringComparer.Ordinal`), not your database's collation — for ASCII queue names the two agree, which is every name Warp itself produces. A worker subscribed to several queues issues one claim statement per queue and spends its budget down queue by queue; a worker subscribed to one queue — the common case — issues exactly one.

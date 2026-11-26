@@ -153,7 +153,13 @@ builder.Services.AddWarpServer<TestContext>(options =>
     // === Durable outbound webhooks — order.paid / order.shipped delivered to subscribers, tracked to done ===
     // Webhook delivery/exhaustion executes on the worker (it drains warp:webhooks), so the host's
     // exhausted-delivery callback is registered here.
-    options.AddWebhooks(w => w.OnDeliveryExhausted<OrderWebhookExhaustedHandler>());
+    // PublicAddressesOnly is on by default since 8.1; the demo's subscriber (Warp.Demo.PartnerApi) runs on localhost,
+    // so the demo turns the guard off. Leave it on in production.
+    options.AddWebhooks(w =>
+    {
+        w.OnDeliveryExhausted<OrderWebhookExhaustedHandler>();
+        w.PublicAddressesOnly = false;
+    });
 });
 builder.Services.AddSagaHandler<OrderSagaWorkflow>();
 

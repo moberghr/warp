@@ -382,6 +382,59 @@ export const redeliverWebhook = async (id: string): Promise<RedeliverOutcome> =>
   }
 };
 
+// Cancel (8.1): 200 cancelled, 409 already settled, 404 unknown.
+export type CancelOutcome = 'cancelled' | 'settled' | 'not-found' | 'error';
+
+export const cancelWebhook = async (id: string): Promise<CancelOutcome> => {
+  try {
+    await api.post(`/webhooks/${encodeURIComponent(id)}/cancel`);
+
+    return 'cancelled';
+  } catch (error) {
+    if (!axios.isAxiosError(error) || !error.response) {
+      return 'error';
+    }
+    if (error.response.status === 404) {
+      return 'not-found';
+    }
+
+    return error.response.status === 409 ? 'settled' : 'error';
+  }
+};
+
+/** Cancels every pending and parked delivery of an endpoint group; resolves to how many were cancelled. */
+export const cancelWebhookGroup = (group: string) =>
+  api.post<{ cancelled: number }>('/webhooks/groups/cancel', null, { params: { group } }).then(r => r.data.cancelled);
+
+// "Retry now" for a failing endpoint (8.1): 200 probing, 404 no health record, 409 told apart by its `reason` code
+// (healthy / nothing-parked / unavailable in this process).
+export type RetryEndpointOutcome = 'probing' | 'not-found' | 'healthy' | 'nothing-parked' | 'unavailable' | 'error';
+
+export const retryWebhookEndpoint = async (group: string): Promise<RetryEndpointOutcome> => {
+  try {
+    await api.post('/webhooks/groups/retry', null, { params: { group } });
+
+    return 'probing';
+  } catch (error) {
+    if (!axios.isAxiosError(error) || !error.response) {
+      return 'error';
+    }
+    if (error.response.status === 404) {
+      return 'not-found';
+    }
+    if (error.response.status === 409) {
+      const reason = (error.response.data as { reason?: string } | undefined)?.reason;
+      if (reason === 'healthy' || reason === 'nothing-parked' || reason === 'unavailable') {
+        return reason;
+      }
+
+      return 'error';
+    }
+
+    return 'error';
+  }
+};
+
 // Issues — error grouping (§8.29). Fingerprints group errors across all four sources (jobs,
 // endpoints, adapters, client). Registered by AddWarp itself (like IAdapterQueryService), so
 // these resolve in dashboard-only processes; the Issues nav is always shown (Core feature).

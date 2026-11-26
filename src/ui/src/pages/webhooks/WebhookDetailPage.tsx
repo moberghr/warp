@@ -11,10 +11,14 @@ import { LoadingState, ErrorState } from '@/components/PageState';
 import * as api from '@/api';
 import { WebhookDeliveryStatus, WebhookSigning } from '@/types/webhooks';
 import { OutcomeBadge, formatMs, HttpStatus } from '@/pages/adapters/shared';
+import { ConfirmDialog } from '@/components/ConfirmDialog';
+import { LastResult, WebhookStatusPill } from './WebhookBadges';
 
 export default function WebhookDetailPage() {
   const { id } = useParams<{ id: string }>();
   const [redelivering, setRedelivering] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [confirmCancel, setConfirmCancel] = useState(false);
 
   const detailQuery = useQuery({
     queryKey: ['webhooks', 'detail', id] as const,
@@ -65,6 +69,34 @@ export default function WebhookDetailPage() {
     }
   };
 
+  const cancel = async () => {
+    setConfirmCancel(false);
+    if (!id) {
+      return;
+    }
+    setCancelling(true);
+    try {
+      const outcome = await api.cancelWebhook(id);
+      switch (outcome) {
+        case 'cancelled':
+          toast.success('Delivery cancelled');
+          break;
+        case 'settled':
+          toast.error('The delivery has already settled — nothing to cancel');
+          break;
+        case 'not-found':
+          toast.error('This delivery no longer exists');
+          break;
+        default:
+          toast.error('Unable to cancel');
+          break;
+      }
+      await detailQuery.refetch();
+    } finally {
+      setCancelling(false);
+    }
+  };
+
   if (notFound) {
     return (
       <div>
@@ -86,6 +118,9 @@ export default function WebhookDetailPage() {
   const canRedeliver =
     detail.status === WebhookDeliveryStatus.Delivered ||
     detail.status === WebhookDeliveryStatus.Exhausted;
+  const canCancel =
+    detail.status === WebhookDeliveryStatus.Pending ||
+    detail.status === WebhookDeliveryStatus.Parked;
 
   return (
     <div>
@@ -94,16 +129,34 @@ export default function WebhookDetailPage() {
           <Link to="/webhooks" className="text-sm text-muted-foreground hover:underline">← Webhooks</Link>
           <div className="flex items-center gap-3 mt-1">
             <h1 className="text-2xl font-bold">{detail.eventType}</h1>
-            <StatusPill status={detail.status} />
+            <WebhookStatusPill status={detail.status} />
           </div>
           <div className="mt-1 font-mono text-xs text-muted-foreground">{detail.eventId}</div>
         </div>
-        {canRedeliver && (
-          <Button size="sm" onClick={redeliver} disabled={redelivering}>
-            {redelivering ? 'Redelivering…' : 'Redeliver'}
-          </Button>
-        )}
+        <div className="flex items-center gap-2">
+          {canCancel && (
+            <Button size="sm" variant="destructive" onClick={() => setConfirmCancel(true)} disabled={cancelling}>
+              {cancelling ? 'Cancelling…' : 'Cancel'}
+            </Button>
+          )}
+          {canRedeliver && (
+            <Button size="sm" onClick={redeliver} disabled={redelivering}>
+              {redelivering ? 'Redelivering…' : 'Redeliver'}
+            </Button>
+          )}
+        </div>
       </div>
+
+      <ConfirmDialog
+        open={confirmCancel}
+        onOpenChange={setConfirmCancel}
+        title="Cancel this delivery?"
+        description="It will not be sent again unless redelivered. An attempt already in flight still reaches the receiver, but its outcome is not recorded."
+        confirmLabel="Cancel delivery"
+        cancelLabel="Keep it"
+        variant="destructive"
+        onConfirm={cancel}
+      />
 
       {/* Self-contained contract — everything the executor needs, secret never revealed. */}
       <Card className="mb-4">
@@ -127,6 +180,16 @@ export default function WebhookDetailPage() {
             <span className="font-mono text-xs">{formatSchedule(detail.retryScheduleSeconds)}</span>
           </Field>
           <Field label="Attempts">{detail.attemptCount}</Field>
+          <Field label="Last result">
+            <LastResult
+              lastStatusCode={detail.lastStatusCode}
+              lastFailureReason={detail.lastFailureReason}
+              lastAttemptAt={detail.lastAttemptAt}
+            />
+          </Field>
+          <Field label="Endpoint health">
+            {detail.trackEndpointHealth ? 'Tracked' : <span className="text-muted-foreground">Not tracked</span>}
+          </Field>
           <Field label="Next attempt">
             {detail.nextAttemptAt ? <RelativeTime date={detail.nextAttemptAt} tense="countdown" /> : <Dash />}
           </Field>
@@ -240,32 +303,4 @@ function prettyJson(json: string): string {
   } catch {
     return json;
   }
-}
-
-const statusStyles: Record<WebhookDeliveryStatus, { label: string; cls: string }> = {
-  [WebhookDeliveryStatus.Pending]: {
-    label: 'Pending',
-    cls: 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400',
-  },
-  [WebhookDeliveryStatus.Delivered]: {
-    label: 'Delivered',
-    cls: 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400',
-  },
-  [WebhookDeliveryStatus.Exhausted]: {
-    label: 'Exhausted',
-    cls: 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400',
-  },
-};
-
-function StatusPill({ status }: { status: WebhookDeliveryStatus }) {
-  const style = statusStyles[status] ?? {
-    label: 'Unknown',
-    cls: 'bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-400',
-  };
-
-  return (
-    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${style.cls}`}>
-      {style.label}
-    </span>
-  );
 }

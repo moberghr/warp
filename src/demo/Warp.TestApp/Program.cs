@@ -84,6 +84,10 @@ builder.Services.AddWarp<TestContext>(options =>
 {
     options.UsePostgreSql();
 
+    // The demo sends webhooks to its subscriber on localhost (Warp.Demo.PartnerApi); with the 8.1 default
+    // (PublicAddressesOnly on) SendAsync would refuse that URL. Leave it on in production.
+    options.AddWebhooks(w => w.PublicAddressesOnly = false);
+
     // Timeout and rate limit must be registered on the PUBLISHER, not just the worker: each addon's
     // *PublishBehavior stamps the job's metadata from the request-type attribute at publish time (§8.8).
     // Without them here, [Timeout] and [RateLimit] parse but nothing is stamped, so the worker-side pipeline

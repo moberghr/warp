@@ -536,6 +536,10 @@ public abstract class FullStackObservabilityTestsBase : IAsyncLifetime
             opt.ApplicationEnvironment = AppEnvironment;
 
             opt.AddAdapters();
+
+            // The webhook leg loops back to this app on localhost; the public-address guard (on by default since 8.1)
+            // would refuse it.
+            opt.AddWebhooks(w => w.PublicAddressesOnly = false);
             opt.AddEndpointObservability(o =>
             {
                 o.CaptureRequestBodies = CaptureMode.Always;

@@ -74,6 +74,7 @@ public class ServiceRegistrationTopologyTests
             typeof(ErrorGroupAggregator<TestContext>),
             typeof(SloEvaluator<TestContext>),
             typeof(StaleJobRecovery<TestContext>),
+            typeof(WebhookEndpointMonitor<TestContext>),
             typeof(BacklogSampler<TestContext>),
             typeof(RecurringJobScheduler<TestContext>),
             typeof(ScheduledJobActivation<TestContext>),

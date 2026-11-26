@@ -94,6 +94,9 @@ Every event is a redaction-safe snapshot: **identity and metadata only, never a 
 | `WarpEventType` | Subtype | Raised when | Severity |
 |---|---|---|---|
 | `WebhookDeliveryExhausted` | `WebhookDeliveryExhaustedEvent` | a webhook delivery exhausts its retry schedule without success | Warning |
+| `WebhookEndpointFailing` | `WebhookEndpointHealthEvent` | a webhook endpoint with [endpoint health](./webhooks.md#endpoint-health) on started failing: one of its deliveries ran out of retries (8.1) | Warning |
+| `WebhookEndpointRecovered` | `WebhookEndpointHealthEvent` | a failing webhook endpoint recovered: a probe or another delivery succeeded, and its parked deliveries are being released (8.1) | Info |
+| `WebhookEndpointStillFailing` | `WebhookEndpointHealthEvent` | a webhook endpoint has been failing for `WebhookEndpointStillFailingAfter` (30 days by default), once per failing period (8.1) | Warning |
 | `SagaForceCompleted` | `SagaForceCompletedEvent` | an operator force-completes (dead-letters) a saga | Info |
 | `InstanceDown` | `InstanceDownEvent` | an application instance or worker server is reaped by the stale sweep (`IsServer` distinguishes them) | Warning |
 | `ClockSkewDetected` | `ClockSkewDetectedEvent` | a server's heartbeat finds its clock further from the database's than `ClockSkewWarningThreshold` (once per excursion; `OffsetMs` is database minus server). Warp corrects for the offset, so this asks you to fix the clock, not the data | Warning |
@@ -108,6 +111,7 @@ Two enum values are **reserved but not yet emitted** — a host can switch on th
 Warp raises these from detections it already had — no new scanning loop, and the worker fetch/execute path is untouched:
 
 - **Webhook exhaustion** — the webhook executor, post-commit, alongside the existing `IWebhookDeliveryExhaustedHandler`. Per-attempt call logs still require `AddAdapters()`; the notification does not.
+- **Webhook endpoint health** (8.1) — failing and recovered from the webhook executor's outcome commit (post-commit); still-failing from the `WebhookEndpointMonitor` server task (`OnCommittedAsync`). The same changes go to `IWebhookEndpointHealthHandler` if one is registered.
 - **Saga force-complete** — `ISagaCommandService.ForceComplete`, after the saga row is removed.
 - **Instance down** — the `ExpirationCleanup` server task's stale-instance sweep (non-server processes, `IsServer=false`) and the `ServerCleanup` server task's stale-server sweep (worker servers, `IsServer=true`).
 

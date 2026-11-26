@@ -38,6 +38,22 @@ public abstract class WarpServerRegistrationTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task StartAsync_DedicatedWebhookGroup_WritesItsGroupAndWorkerRows()
+    {
+        var serverId = Guid.NewGuid();
+        var (registration, state) = CreateRegistration(serverId, c => c.WebhookWorkerCount = 3);
+
+        await registration.StartAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var groups = await _fixture.CreateContext().Set<Warp.Core.Data.Entities.WorkerGroup>()
+            .Where(x => x.ServerId == serverId)
+            .OrderBy(x => x.WorkerCount)
+            .ToListAsync(Xunit.TestContext.Current.CancellationToken);
+        groups.Select(x => x.WorkerCount).ShouldBe([2, 3]);
+        state.Groups.Count.ShouldBe(2);
+    }
+
+    [TimedFact]
     public async Task StartAsync_WritesWorkerGroupAndWorkerRows()
     {
         // Arrange
@@ -228,10 +244,12 @@ public abstract class WarpServerRegistrationTestsBase : IAsyncLifetime
         Guid serverId,
         Action<WarpServerConfiguration>? configure = null)
     {
+        // These tests pin the default group's shape; the dedicated webhook group (8.1) has its own test below.
         var configuration = new WarpServerConfiguration
         {
             ServerId = serverId,
             WorkerCount = 2,
+            WebhookWorkerCount = 0,
         };
         configure?.Invoke(configuration);
         var config = Options.Create(configuration);

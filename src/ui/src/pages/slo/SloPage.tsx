@@ -179,7 +179,7 @@ function ObjectiveRow({
     <tr className="hover:bg-gray-50 dark:hover:bg-gray-900/50">
       <td className="px-4 py-3">
         <Link to={`/slo/${o.id}`} className="font-medium text-blue-600 hover:underline">{o.name}</Link>
-        <div className="text-xs text-gray-500">{SloKindLabel[o.kind]}{o.percentile && !isMetricKind(o.kind) ? ` p${o.percentile}` : ''}</div>
+        <div className="text-xs text-gray-500">{SloKindLabel[o.kind]}{o.percentile && !isMetricKind(o.kind) && o.kind !== SloKind.WebhookDeliveryLatency ? ` p${o.percentile}` : ''}</div>
       </td>
       <td className="px-4 py-3">
         <span className="font-mono text-xs">{o.dimension}</span>
@@ -229,6 +229,7 @@ function ObjectiveForm({
   const metric = isMetricKind(draft.kind);
   const fields = fieldsFor(draft.kind);
   const ratio = isRatioKind(draft.kind);
+  const webhook = draft.kind === SloKind.WebhookDeliveryLatency;
 
   const { data: metrics } = useQuery({ queryKey: queryKeys.metrics, queryFn: getMetrics, enabled: metric });
   const instruments = selectableInstruments(metrics ?? [], draft.kind);
@@ -319,14 +320,14 @@ function ObjectiveForm({
             </>
           ) : (
             <>
-              <Field label="Dimension (queue / job type / *)">
+              <Field label={webhook ? 'Endpoint (group) or *' : 'Dimension (queue / job type / *)'}>
                 <input className={`${inputClass} font-mono`} value={draft.dimension} onChange={(e) => set({ dimension: e.target.value })} />
               </Field>
-              <Field label={ratio ? 'Target ratio (0–1)' : 'Target (ms / count)'}>
+              <Field label={webhook ? 'Delivered within (minutes)' : ratio ? 'Target ratio (0–1)' : 'Target (ms / count)'}>
                 <input className="input tabular-nums" type="number" step="any" value={draft.targetValue} onChange={(e) => set({ targetValue: Number(e.target.value) })} />
               </Field>
               {fields.percentile && (
-                <Field label="Percentile (90 / 95 / 99)">
+                <Field label={webhook ? 'Share delivered in time (%, 1–99)' : 'Percentile (90 / 95 / 99)'}>
                   <input className="input tabular-nums" type="number" value={draft.percentile ?? 95} onChange={(e) => set({ percentile: Number(e.target.value) })} />
                 </Field>
               )}

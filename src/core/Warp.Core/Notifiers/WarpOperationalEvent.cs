@@ -51,6 +51,18 @@ public sealed record WebhookDeliveryExhaustedEvent : WarpOperationalEvent
 }
 
 /// <summary>
+/// A webhook endpoint's health changed (8.1): <c>Type</c> is <c>WebhookEndpointFailing</c>,
+/// <c>WebhookEndpointRecovered</c> or <c>WebhookEndpointStillFailing</c>. The group name is the host's own identifier;
+/// no URL, payload or secret is carried.
+/// </summary>
+public sealed record WebhookEndpointHealthEvent : WarpOperationalEvent
+{
+    public required string GroupName { get; init; }
+
+    public DateTime? FailingSince { get; init; }
+}
+
+/// <summary>
 /// A saga was force-completed by an operator. Mirrors the existing <c>ForceComplete</c> audit-log fields.
 /// </summary>
 public sealed record SagaForceCompletedEvent : WarpOperationalEvent

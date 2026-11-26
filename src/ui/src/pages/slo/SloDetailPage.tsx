@@ -58,7 +58,7 @@ export default function SloDetailPage() {
         <div>
           <h1 className="text-2xl font-semibold">{o.name}</h1>
           <p className="text-sm text-gray-500 mt-1">
-            {SloKindLabel[o.kind]}{o.percentile && !isMetricKind(o.kind) ? ` p${o.percentile}` : ''} · <span className="font-mono">{o.dimension}</span>
+            {SloKindLabel[o.kind]}{o.percentile && !isMetricKind(o.kind) && o.kind !== SloKind.WebhookDeliveryLatency ? ` p${o.percentile}` : ''} · <span className="font-mono">{o.dimension}</span>
             {o.application && <span className="text-gray-400"> @{o.application}</span>}
           </p>
           {isMetricKind(o.kind) && <MetricScope objective={o} />}

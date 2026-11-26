@@ -18,9 +18,23 @@ public class WebhookQueryService<TContext> : IWebhookQueryService
     // Bounds the deliveries list page so a large table can't return an unbounded result set.
     private const int MaxPageSize = 200;
 
-    private readonly TContext _context;
+    // Endpoint stats window (hours) and the most settled rows read for it (newest first): a dashboard read, bounded.
+    private const int StatsWindowHours = 24;
+    private const int MaxStatsRows = 50_000;
 
-    public WebhookQueryService(TContext context) => _context = context;
+    private readonly TContext _context;
+    private readonly TimeProvider _timeProvider;
+
+    public WebhookQueryService(TContext context)
+        : this(context, TimeProvider.System)
+    {
+    }
+
+    public WebhookQueryService(TContext context, TimeProvider timeProvider)
+    {
+        _context = context;
+        _timeProvider = timeProvider;
+    }
 
     public async Task<PagedList<WebhookDeliveryListItem>> GetDeliveries(WebhookDeliveryFilter filter, CancellationToken ct = default)
     {
@@ -49,6 +63,9 @@ public class WebhookQueryService<TContext> : IWebhookQueryService
                     AttemptCount = x.AttemptCount,
                     NextAttemptAt = x.NextAttemptAt,
                     CreatedAt = x.CreatedAt,
+                    LastStatusCode = x.LastStatusCode,
+                    LastFailureReason = x.LastFailureReason,
+                    LastAttemptAt = x.LastAttemptAt,
                 })
             .ToPagedListAsync(request, ct);
     }
@@ -70,9 +87,16 @@ public class WebhookQueryService<TContext> : IWebhookQueryService
                     Pending = g.Count(x => x.Status == WebhookDeliveryStatus.Pending),
                     Delivered = g.Count(x => x.Status == WebhookDeliveryStatus.Delivered),
                     Exhausted = g.Count(x => x.Status == WebhookDeliveryStatus.Exhausted),
+                    Parked = g.Count(x => x.Status == WebhookDeliveryStatus.Parked),
+                    Cancelled = g.Count(x => x.Status == WebhookDeliveryStatus.Cancelled),
                     LastActivityAt = g.Max(x => x.CreatedAt),
                 })
             .ToListAsync(ct);
+
+        if (by == WebhookGroupBy.Endpoint)
+        {
+            await AddEndpointHealthAsync(rows, ct);
+        }
 
         return
         [
@@ -80,6 +104,92 @@ public class WebhookQueryService<TContext> : IWebhookQueryService
                 .OrderByDescending(x => x.LastActivityAt)
                 .ThenBy(x => x.Key, StringComparer.Ordinal),
         ];
+    }
+
+    // Endpoint health (8.1): the health record of every group that has one, plus success rate, p95 send-to-delivered
+    // time and last success/failure from the deliveries that settled in the last 24 hours. Two-step reads joined in
+    // memory (§5.2); the stats read is capped at the newest MaxStatsRows rows.
+    private async Task AddEndpointHealthAsync(List<WebhookGroupModel> rows, CancellationToken ct)
+    {
+        var endpoints = await _context.Set<WebhookEndpoint>()
+            .AsNoTracking()
+            .ToDictionaryAsync(x => x.Name, StringComparer.Ordinal, ct);
+
+        var since = _timeProvider.GetUtcNow().UtcDateTime.AddHours(-StatsWindowHours);
+        var recent = await _context.Set<WebhookDelivery>()
+            .AsNoTracking()
+            .Where(x => x.LastAttemptAt != null)
+            .Where(x => x.LastAttemptAt >= since)
+            .OrderByDescending(x => x.LastAttemptAt)
+            .Take(MaxStatsRows)
+            .Select(x =>
+                new
+                {
+                    Key = x.GroupName ?? x.Url,
+                    x.Status,
+                    x.CreatedAt,
+                    x.LastAttemptAt,
+                    x.LastFailureReason,
+                })
+            .ToListAsync(ct);
+
+        var stats = recent
+            .GroupBy(x => x.Key, StringComparer.Ordinal)
+            .ToDictionary(x => x.Key, x => x.ToList(), StringComparer.Ordinal);
+
+        foreach (var row in rows)
+        {
+            if (endpoints.TryGetValue(row.Key, out var endpoint))
+            {
+                row.Health = endpoint.State;
+                row.FailingSince = endpoint.FailingSince;
+                row.NextProbeAt = endpoint.NextProbeAt;
+                row.LastSuccessAt = endpoint.LastSuccessAt;
+                row.LastFailureAt = endpoint.LastFailureAt;
+            }
+
+            if (!stats.TryGetValue(row.Key, out var group))
+            {
+                continue;
+            }
+
+            var delivered = group
+                .Where(x => x.Status == WebhookDeliveryStatus.Delivered)
+                .ToList();
+            var settled = delivered.Count + group.Count(x => x.Status is WebhookDeliveryStatus.Exhausted or WebhookDeliveryStatus.Parked);
+
+            row.SuccessRate = settled == 0 ? null : (double)delivered.Count / settled;
+            row.P95DeliveryMs = Percentile95(delivered.Select(x => (x.LastAttemptAt!.Value - x.CreatedAt).TotalMilliseconds));
+            row.LastSuccessAt = Latest(row.LastSuccessAt, delivered.Max(x => x.LastAttemptAt));
+            row.LastFailureAt = Latest(row.LastFailureAt, group.Where(x => x.LastFailureReason != null).Max(x => x.LastAttemptAt));
+        }
+    }
+
+    private static DateTime? Latest(DateTime? a, DateTime? b)
+    {
+        if (a is null || b is null)
+        {
+            return a ?? b;
+        }
+
+        return a > b ? a : b;
+    }
+
+    // Nearest-rank p95; null for an empty set.
+    private static double? Percentile95(IEnumerable<double> values)
+    {
+        var sorted = values
+            .Order()
+            .ToArray();
+
+        if (sorted.Length == 0)
+        {
+            return null;
+        }
+
+        var rank = (int)Math.Ceiling(0.95 * sorted.Length) - 1;
+
+        return Math.Max(0, sorted[Math.Clamp(rank, 0, sorted.Length - 1)]);
     }
 
     public async Task<IReadOnlyList<WebhookDeliveryHistoryPoint>> GetDeliveryHistory(WebhookDeliveryFilter filter, CancellationToken ct = default)
@@ -100,6 +210,8 @@ public class WebhookQueryService<TContext> : IWebhookQueryService
                     Delivered = g.Count(x => x.Status == WebhookDeliveryStatus.Delivered),
                     Exhausted = g.Count(x => x.Status == WebhookDeliveryStatus.Exhausted),
                     Pending = g.Count(x => x.Status == WebhookDeliveryStatus.Pending),
+                    Parked = g.Count(x => x.Status == WebhookDeliveryStatus.Parked),
+                    Cancelled = g.Count(x => x.Status == WebhookDeliveryStatus.Cancelled),
                     Total = g.Count(),
                 })
             .ToListAsync(ct);
@@ -114,6 +226,8 @@ public class WebhookQueryService<TContext> : IWebhookQueryService
                         Delivered = x.Delivered,
                         Exhausted = x.Exhausted,
                         Pending = x.Pending,
+                        Parked = x.Parked,
+                        Cancelled = x.Cancelled,
                         Total = x.Total,
                     })
                 .OrderBy(x => x.Hour),
@@ -209,6 +323,10 @@ public class WebhookQueryService<TContext> : IWebhookQueryService
             NextAttemptAt = row.NextAttemptAt,
             CreatedAt = row.CreatedAt,
             ExpireAt = row.ExpireAt,
+            LastStatusCode = row.LastStatusCode,
+            LastFailureReason = row.LastFailureReason,
+            LastAttemptAt = row.LastAttemptAt,
+            TrackEndpointHealth = row.TrackEndpointHealth,
             Attempts = attempts,
         };
     }
@@ -242,6 +360,12 @@ public class WebhookQueryService<TContext> : IWebhookQueryService
                     break;
                 case WebhookDeliveryStatus.Exhausted:
                     summary.Exhausted += row.Count;
+                    break;
+                case WebhookDeliveryStatus.Parked:
+                    summary.Parked += row.Count;
+                    break;
+                case WebhookDeliveryStatus.Cancelled:
+                    summary.Cancelled += row.Count;
                     break;
                 default:
                     break;

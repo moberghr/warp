@@ -121,7 +121,9 @@ public static class SloValidation
             return false;
         }
 
-        if (IsLatencyKind(definition.Kind))
+        // WebhookDeliveryLatency (8.1) keeps a percentile like the latency kinds: the share of deliveries that must
+        // arrive within TargetValue minutes.
+        if (IsLatencyKind(definition.Kind) || definition.Kind == SloKind.WebhookDeliveryLatency)
         {
             if (definition.Percentile is { } p && p is < 1 or > 99)
             {
