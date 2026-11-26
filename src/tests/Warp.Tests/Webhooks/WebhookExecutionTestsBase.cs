@@ -1046,6 +1046,8 @@ public abstract class WebhookExecutionTestsBase : IntegrationTestBase
             scope.ServiceProvider.GetRequiredService<IWarpAdapters>(),
             scope.ServiceProvider.GetRequiredService<AdapterRegistry>(),
             scope.ServiceProvider.GetRequiredService<WarpNotifierDispatcher>(),
+            [],
+            scope.ServiceProvider.GetRequiredService<IServiceScopeFactory>(),
             scope.ServiceProvider.GetRequiredService<IOptions<WarpConfiguration>>(),
             NullLogger<ExecuteWebhookDeliveryHandler<TestContext>>.Instance);
 

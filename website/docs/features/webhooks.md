@@ -27,7 +27,7 @@ Warp does **not** model subscriptions or fan-out — that would duplicate every 
 
 ## Design pillars
 
-1. **The delivery, not the job, is the state machine.** Executor jobs *always complete*; failure lives on the `WebhookDelivery` row (`Pending → Delivered | Exhausted`). No failed jobs, ever — webhooks are visible in their own dashboard section, not the Jobs UI.
+1. **The delivery, not the job, is the state machine.** Executor jobs *always complete*; failure lives on the `WebhookDelivery` row (`Pending → Delivered | Exhausted`, plus `Parked` while its [endpoint is failing](#endpoint-health) and `Cancelled` by an [operator](#cancelling-deliveries)). No failed jobs, ever — webhooks are visible in their own dashboard section, not the Jobs UI.
 2. **Self-contained delivery row.** Everything needed to execute to completion is on the row at `SendAsync` time: URL, headers, payload, retry schedule, success codes, signing mode + secret, group, reference. Nothing is looked up from ambient config mid-flight; a config deploy never reshapes an in-flight delivery.
 3. **Per-send cadence.** `RetrySchedule` is a plain `IReadOnlyList<TimeSpan>` on the send request. There is deliberately *no* app-level schedule setting — cadence is a property of what is being delivered, which only the host knows.
 4. **Attempts are adapter calls.** The HTTP leg goes through the `warp-webhooks` adapter (group = endpoint, operation = event type, `CorrelationId` = delivery id). One capture/redaction/retention machinery; aggregate health appears on the Adapters page for free.
@@ -50,7 +50,7 @@ builder.Services.AddWarpServer<AppDbContext>(opt =>
 });
 ```
 
-`AddWebhooks(...)` is **optional configuration only** — a custom `IWebhookSigner`, the `OnDeliveryExhausted` callback and the [public-addresses-only guard](#public-addresses-only). It is not an enable switch; delivery runs without it. When a delivery exhausts, Warp also emits a `WebhookDeliveryExhausted` [operational notification](./operational-notifications.md) to any registered `IWarpNotifier` — the generic operator-alerting channel, alongside the webhook-specific `OnDeliveryExhausted` callback. `AddAdapters()` is also optional: with it, every attempt is recorded as a `warp-webhooks` `AdapterCallLog` row (response bodies always captured, request bodies never — the payload already lives on the delivery row) and the per-attempt timeline is populated; without it, the delivery state machine, retries, exhaustion, and dashboard still work fully from the `WebhookDelivery` row — only the granular per-attempt HTTP call log is absent (same telemetry-vs-recording split as adapters).
+`AddWebhooks(...)` is **optional configuration only** — a custom `IWebhookSigner`, the `OnDeliveryExhausted` callback, the [public-addresses-only guard](#public-addresses-only), [endpoint health](#endpoint-health) and [deduplication](#deduplication). It is not an enable switch; delivery runs without it. When a delivery exhausts, Warp also emits a `WebhookDeliveryExhausted` [operational notification](./operational-notifications.md) to any registered `IWarpNotifier` — the generic operator-alerting channel, alongside the webhook-specific `OnDeliveryExhausted` callback. `AddAdapters()` is also optional: with it, every attempt is recorded as a `warp-webhooks` `AdapterCallLog` row (response bodies always captured, request bodies never — the payload already lives on the delivery row) and the per-attempt timeline is populated; without it, the delivery state machine, retries, exhaustion, and dashboard still work fully from the `WebhookDelivery` row — only the granular per-attempt HTTP call log is absent (same telemetry-vs-recording split as adapters).
 
 ### Requires a Warp server somewhere
 
@@ -240,7 +240,75 @@ await webhookCommands.Redeliver(
 
 The new secret is validated like `WebhookSend.Secret` (at most 512 characters; base64 for `StandardWebhooks`), and a delivery sent with `Signing = None` rejects one with `ArgumentException`. Without `Secret` the overload behaves exactly like `Redeliver(deliveryId)`. A rejected redeliver (already `Pending`) leaves the stamped secret alone. The dashboard's Redeliver button keeps the stamped secret; the new secret is never returned by any read surface. The overload is a new `IWebhookCommandService` member with a default implementation, so an implementation of your own keeps compiling: without a secret it forwards to `Redeliver(deliveryId)`, and with one it throws `NotSupportedException` instead of signing with the old key.
 
+A `Parked` or `Cancelled` delivery can be redelivered too (anything but `Pending`). A redeliver leaves the [last-attempt fields](#last-attempt) as they are until the new attempt overwrites them.
+
 `Redeliver` returns a `WebhookRedeliveryResult` so callers map outcomes precisely: `Enqueued` (requeued), `NotFound` (unknown id), and `Rejected` (already `Pending` — it owns a live job). Because the redelivery enqueuer is part of Core and registered by `AddWarp`, `Redeliver` works from **any** process (dashboard-only / publisher-only included) — it stages the executor job through the outbox and a server elsewhere runs it. (The `Unavailable` result remains defined for defensiveness but is no longer reachable in a normal `AddWarp` process now that the enqueuer is always present.) The REST endpoint maps `Enqueued`→`200`, `NotFound`→`404`, and `Rejected`→`409`.
+
+## Endpoint health
+
+An **endpoint** is a delivery's `Group` (`WebhookDelivery.GroupName`): you decide what a group is (one subscription, one customer's URL, one tenant). Endpoint health (8.1) watches each group and, while one is down, holds its deliveries instead of exhausting them, then catches up by itself once the receiver is back. It is **opt-in, per sending process**:
+
+```csharp
+opt.AddWebhooks(w =>
+{
+    w.TrackEndpointHealth = true;
+    w.OnEndpointHealthChanged<SubscriptionHealthHandler>(); // optional host callback
+});
+```
+
+The choice is **stamped on each delivery at `SendAsync`** (`TrackEndpointHealth`), so it holds whichever server runs the attempt — set it where you send. **Deliveries without a `Group` are never tracked** and behave as before. One group's success never marks another group healthy, even when both point at the same URL.
+
+**How it works:**
+
+1. A tracked delivery that runs out of retries while its group is **Healthy** is `Exhausted` as usual (the exhausted callback fires) and marks the group **Failing**.
+2. While a group is **Failing**, new deliveries are still sent and retried on their normal schedule. One that runs out of retries is **`Parked`** instead of `Exhausted`: it waits with no live job, no exhausted callback, and is not removed by retention.
+3. Every `WebhookEndpointProbeInterval` (5 minutes by default) the `WebhookEndpointMonitor` server task **probes** each failing group: it re-sends the group's **oldest parked** delivery once. If that fails, the delivery parks again and the next probe is one interval later.
+4. **Any success recovers the group**: the probe, a retry, or a new delivery to that group. The group turns **Healthy** in the same commit as the successful delivery, and the monitor then **releases** its parked deliveries back to `Pending` with a fresh attempt budget, **oldest first**, at most 200 per run (it re-runs at once while there are more). Released deliveries go through the normal queue, so recovery sends no faster than your workers already would.
+5. A failing group with nothing parked (nothing ran out of retries since it started failing) has nothing to probe; it recovers on its next successful delivery. It never stays Failing because of a probe it could not make.
+
+**Retry now.** `IWebhookCommandService.ProbeEndpoint(group)`, `POST {prefix}/api/webhooks/groups/retry?group=…` and the dashboard's **Retry now** button probe a failing group at once instead of waiting for the interval (`WebhookProbeResult`: `Probing`, `NotFound` — no health record, `NotFailing`, `NothingParked`, `Unavailable`).
+
+**Callbacks and alerts.** Warp never disables anything: you own the subscription and decide. It tells you about three changes, after the change commits, through `IWebhookEndpointHealthHandler` (every member has a default no-op) and as [operational notifications](./operational-notifications.md):
+
+| Change | Handler member | `WarpEventType` |
+|---|---|---|
+| A group started failing | `OnEndpointFailingAsync` | `WebhookEndpointFailing` |
+| A failing group recovered | `OnEndpointRecoveredAsync` | `WebhookEndpointRecovered` |
+| A group has been failing for `WebhookEndpointStillFailingAfter` (30 days by default), once per failing period | `OnEndpointStillFailingAsync` | `WebhookEndpointStillFailing` |
+
+Both are best effort, like every operational notification: a crash between the commit and the call loses that call. The group's state on the dashboard and in `IWebhookQueryService.GetGroups(WebhookGroupBy.Endpoint)` is the record. A typical handler disables the subscription after the still-failing alert, or pages someone on the first failure of an important endpoint.
+
+**Settings** (on `WarpConfiguration`): `WebhookEndpointProbeInterval` (5 min), `WebhookEndpointStillFailingAfter` (30 days), `WebhookEndpointMonitorInterval` (how often the monitor runs, 30 s; `null` turns it off, and parked deliveries then wait). The monitor runs on any server with a worker; the state lives in the `WebhookEndpoint` table, one row per group, created the first time a tracked delivery to it runs out of retries.
+
+**Things to know.**
+
+- Parked deliveries are kept until the group recovers or you [cancel](#cancelling-deliveries) them: they are excluded from the retention sweeps like `Pending` ones. A group that never recovers keeps its parked deliveries; the still-failing alert is your cue to act.
+- A probe re-sends the parked delivery itself: the same payload, headers and event id (the subscriber's idempotency key), signed afresh like every attempt.
+- Release order is the order the parked deliveries were created. Workers run deliveries in parallel, so the receiver can still see them out of order, as with any webhook delivery.
+
+## Cancelling deliveries
+
+`IWebhookCommandService.Cancel(id)` cancels a `Pending` or `Parked` delivery (8.1): it becomes `Cancelled`, is never attempted again unless redelivered, and is removed by retention like any settled delivery. A live executor job finds it no longer `Pending` and completes without sending; an attempt already in flight still reaches the receiver, but its outcome is not recorded and no retry follows. A settled delivery returns `Rejected`, an unknown id `NotFound`. `CancelGroup(group)` cancels every pending and parked delivery of a group and returns how many; the group's health is left as it is. REST: `POST {prefix}/api/webhooks/{id}/cancel` (`200`; `409` already settled; `404`) and `POST {prefix}/api/webhooks/groups/cancel?group=…` (`200 { "cancelled": n }`); the dashboard has **Cancel** on the delivery and **Cancel all** on the endpoint.
+
+## Deduplication
+
+Opt-in, per sending process (8.1):
+
+```csharp
+opt.AddWebhooks(w => w.DeduplicateByEventId = true);
+```
+
+`SendAsync` then returns the existing delivery's id, and stores and sends nothing, when a delivery of the **same `EventId` to the same `Url`** still exists, in any status, until retention deletes it. Different URLs (or the same event to another endpoint) are separate deliveries. It only means something when you set `EventId` yourself: a send without one gets a fresh id and never matches. The key is a SHA-256 of the event id and URL in a uniquely indexed `DedupeKey` column, set only on deduplicated sends. The check is a read before the insert; **two concurrent sends of the same pair race on the unique index, and the loser's save fails with a unique-constraint error** — treat that as "already sent". Redeliver is unaffected.
+
+## Last attempt
+
+Every delivery carries the outcome of its last attempt (8.1), stamped in the attempt's outcome commit and shown on the dashboard list and detail and in `IWebhookQueryService`:
+
+- `LastStatusCode` — the HTTP status, or null when there was no response.
+- `LastFailureReason` — null after a success, otherwise `WebhookFailureReason`: `Timeout`, `DnsFailure`, `ConnectionRefused`, `TlsError`, `ConnectionFailed`, `AddressNotPublic`, `UnsuccessfulStatus` (see `LastStatusCode`) or `Other` (building or signing the request failed, a rate limiter refused it).
+- `LastAttemptAt` — when the attempt finished; for a `Delivered` row, when it was delivered.
+
+A redeliver leaves them as they are until the next attempt overwrites them. Rows from before 8.1 have none.
 
 ## Migrating from a hand-rolled implementation
 
@@ -260,7 +328,7 @@ Webhooks require a Warp worker, but you do **not** have to move your whole job w
 
 ## Retention and cleanup
 
-`WebhookDelivery` rows carry an `ExpireAt` from `WarpConfiguration.WebhookDeliveryRetention` (default 30 days). `ExpirationCleanup` — an existing server task, so the worker hot path is untouched — deletes expired **settled** deliveries (`Delivered` / `Exhausted`) on each tick. `Pending` deliveries are excluded from the sweep: a long retry backoff can outrun retention, and an in-flight delivery must never vanish out from under its own scheduled executor job. Redelivery also refreshes `ExpireAt`, so a requeued delivery gets a full retention window from the moment it is requeued. The `warp-webhooks` adapter's call-log retention is aligned to the same value by default, so attempt rows and delivery rows age together (they expire independently — there is no FK cascade — but the aligned default keeps them in step).
+`WebhookDelivery` rows carry an `ExpireAt` from `WarpConfiguration.WebhookDeliveryRetention` (default 30 days). `ExpirationCleanup` — an existing server task, so the worker hot path is untouched — deletes expired **settled** deliveries (`Delivered` / `Exhausted` / `Cancelled`) on each tick. `Pending` deliveries are excluded from the sweep: a long retry backoff can outrun retention, and an in-flight delivery must never vanish out from under its own scheduled executor job. `Parked` deliveries are excluded too: they wait for their endpoint to recover. The count cap (`WebhookDeliveryRetentionCount`) skips both as well. Redelivery also refreshes `ExpireAt`, so a requeued delivery gets a full retention window from the moment it is requeued. The `warp-webhooks` adapter's call-log retention is aligned to the same value by default, so attempt rows and delivery rows age together (they expire independently — there is no FK cascade — but the aligned default keeps them in step).
 
 The `WebhookDelivery` table is added to the model **unconditionally** by `WarpModelCustomizer`, whether or not any host calls `AddWebhooks()` — same principle as the other addon entities, so the migration story is independent of which processes opt in.
 
@@ -272,7 +340,7 @@ In a shared-database deployment with [multi-application observability](./applica
 
 Three counters, in addition to the HTTP leg's spans/duration/error counters that come from the adapter layer (not duplicated here):
 
-- `warp.webhooks.deliveries` (tags: outcome `delivered|exhausted`)
+- `warp.webhooks.deliveries` (tags: outcome `delivered|exhausted|parked`)
 - `warp.webhooks.attempts` (tags: outcome)
 - `warp.webhooks.redeliveries`
 
@@ -280,23 +348,29 @@ Three counters, in addition to the HTTP leg's spans/duration/error counters that
 
 A **Webhooks** nav item (always shown — webhooks is a Core feature; the `webhooks` flag from `GET {prefix}/api/addons` gates on the always-registered redelivery enqueuer) opens two screens:
 
-**Deliveries list** — summary tiles (deliveries, delivered %, pending, exhausted) over a table of status, event, endpoint (the group value), reference, attempts, next-attempt time, and created time — with filters for status, event type, reference, group, and date.
+**Deliveries list** — summary tiles (deliveries, delivered %, pending, parked, exhausted) over a table of status, event, endpoint (the group value), reference, attempts, last result (status code or failure reason), next-attempt time, and created time — with filters for status, event type, reference, group, and date.
 
-**Delivery detail** — the self-contained contract exactly as stamped at `SendAsync` time: URL, group, reference, signing mode, retry schedule, success codes, attempt count, next-attempt/created/expires timestamps — the secret rendered only as `***` via the `HasSecret` flag and `Authorization`-class headers redacted (not caller-toggleable). Below it, the **per-attempt timeline** assembled from `AdapterCallLog` rows by `CorrelationId` — each attempt's outcome, status code, duration, and captured response body — and a **Redeliver** action for settled (`Delivered`/`Exhausted`) deliveries.
+**Endpoint health** (8.1) — one row per endpoint (group): state (Healthy / Failing, or none for an untracked group), failing since, parked count, last success and last failure, success rate and p95 send-to-delivered time over the last 24 hours (from the delivery rows), with **Retry now** for a failing endpoint and **Cancel all** for its pending and parked deliveries.
+
+**Delivery detail** — the self-contained contract exactly as stamped at `SendAsync` time: URL, group, reference, signing mode, retry schedule, success codes, attempt count, next-attempt/created/expires timestamps — the secret rendered only as `***` via the `HasSecret` flag and `Authorization`-class headers redacted (not caller-toggleable). Below it, the **per-attempt timeline** assembled from `AdapterCallLog` rows by `CorrelationId` — each attempt's outcome, status code, duration, and captured response body — the last attempt's status code, failure reason and time, a **Redeliver** action for anything not `Pending`, and **Cancel** for `Pending` and `Parked` deliveries.
 
 The same data is served over Core query/command services (`IWebhookQueryService` / `IWebhookCommandService`, resolvable in any `AddWarp` process), so a host can equally expose it through its own permission-gated portal:
 
 - `GET {prefix}/api/webhooks` — filtered, paged delivery list.
 - `GET {prefix}/api/webhooks/{id}` — one delivery's contract + attempt timeline (secret reduced to `HasSecret`).
 - `GET {prefix}/api/webhooks/summary` — tile counts.
+- `GET {prefix}/api/webhooks/groups?by=endpoint|type` — per-group counts; by endpoint, with the health fields above.
 - `POST {prefix}/api/webhooks/{id}/redeliver` — requeue a settled delivery (`200` requeued; `404` unknown; `409` already pending or no webhooks worker in this process).
+- `POST {prefix}/api/webhooks/{id}/cancel` — cancel a pending or parked delivery (`200`; `409` already settled; `404` unknown).
+- `POST {prefix}/api/webhooks/groups/cancel?group=…` — cancel a group's pending and parked deliveries (`200 { "cancelled": n }`).
+- `POST {prefix}/api/webhooks/groups/retry?group=…` — probe a failing endpoint now (`200`; `404` no health record; `409` healthy, nothing parked, or no webhooks worker in this process).
 
 ## Not in scope
 
 By design (host-owned or deferred):
 
 - **Subscription / registration modeling and fan-out** — host-owned; Warp starts at `SendAsync`.
-- **Automatic endpoint disabling** — the host decides via `IWebhookDeliveryExhaustedHandler`.
+- **Automatic endpoint disabling** — the host decides, via `IWebhookDeliveryExhaustedHandler` or the [endpoint health](#endpoint-health) callbacks.
 - **Per-endpoint keyed rate limiting of deliveries** — a deferred extension of the adapters shared limiter.
 - **FIFO / ordering guarantees across deliveries** — independent deliveries execute independently.
 - **Payload transformations, receiving-side webhooks, migration tooling for legacy delivery tables.**

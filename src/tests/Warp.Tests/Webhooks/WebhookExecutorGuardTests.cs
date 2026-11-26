@@ -33,6 +33,8 @@ public class WebhookExecutorGuardTests
             adapters: null!,
             adapterRegistry: null!,
             notifier: Warp.Tests.Helpers.TestNotifiers.EmptyDispatcher(),
+            endpointHealthHandlers: [],
+            scopeFactory: null!,
             configuration: Options.Create(new WarpConfiguration()),
             logger: NullLogger<ExecuteWebhookDeliveryHandler<FaultingContext>>.Instance);
 

@@ -30,6 +30,13 @@ describe('formatTarget / formatObserved', () => {
     expect(formatObserved(o)).toBe('98.12% ≤ 0.25');
   });
 
+  it('shows a webhook delivery latency objective as the share delivered within the minutes', () => {
+    const o = { kind: SloKind.WebhookDeliveryLatency, targetValue: 5, percentile: 95, attainment: 0.972 };
+
+    expect(formatTarget(o)).toBe('95% delivered within 5 min');
+    expect(formatObserved(o)).toBe('97.20% delivered within 5 min');
+  });
+
   it('formats the other kinds as before', () => {
     expect(formatTarget({ kind: SloKind.SuccessRate, targetValue: 0.995, percentile: null })).toBe('99.50%');
     expect(formatObserved({ kind: SloKind.ExecutionLatency, targetValue: 500, attainment: 420.4 })).toBe('420 ms');
@@ -74,6 +81,7 @@ describe('checkTarget / checkThreshold (the verdict check numbers)', () => {
     [SloKind.ExecutionLatency, 500, 95, 500, null],
     [SloKind.BacklogDepth, 100, null, 100, null],
     [SloKind.MetricVolumeFloor, 0.5, null, 0.5, null],
+    [SloKind.WebhookDeliveryLatency, 5, 99, 0.99, 5],
   ])('kind %s, target %s, percentile %s → target %s, threshold %s', (kind, targetValue, percentile, target, threshold) => {
     expect(checkTarget({ kind, targetValue, percentile })).toBe(target);
     expect(checkThreshold({ kind, targetValue })).toBe(threshold);

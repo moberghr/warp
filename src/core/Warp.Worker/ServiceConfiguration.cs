@@ -191,6 +191,10 @@ public static class ServiceConfiguration
         // (CounterAggregator, ErrorGroupAggregator and SloEvaluator are cluster-locked and fold
         // data any process can write, so they live in AddServerHostCore.)
         services.AddScoped<IServerTask, StaleJobRecovery<TContext>>();
+
+        // Webhook endpoint health (8.1): releases parked deliveries of recovered endpoints and probes failing ones.
+        // Job-only because it stages executor jobs; any server with a worker runs it.
+        services.AddScoped<IServerTask, WebhookEndpointMonitor<TContext>>();
         services.AddScoped<IServerTask, BacklogSampler<TContext>>();
         services.AddScoped<IServerTask, RecurringJobScheduler<TContext>>();
         services.AddScoped<IServerTask, ScheduledJobActivation<TContext>>();

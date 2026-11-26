@@ -50,6 +50,68 @@ public interface IWebhookCommandService
             $"{GetType().Name} does not support redelivering with a new secret. Implement "
             + "IWebhookCommandService.Redeliver(Guid, WebhookRedeliveryOptions, CancellationToken).");
     }
+
+    /// <summary>
+    /// Cancels a <c>Pending</c> or <c>Parked</c> delivery (8.1): it becomes <c>Cancelled</c> and is never attempted
+    /// again unless redelivered. A live executor job finds it no longer <c>Pending</c> and completes without a request;
+    /// an attempt already in flight still reaches the receiver, but its outcome is not recorded and no retry follows.
+    /// A settled delivery (<c>Delivered</c>, <c>Exhausted</c>, <c>Cancelled</c>) returns
+    /// <see cref="WebhookCancelResult.Rejected"/>; an unknown id <see cref="WebhookCancelResult.NotFound"/>.
+    /// Default implementation (for implementers written before 8.1): throws <see cref="NotSupportedException"/>.
+    /// </summary>
+    Task<WebhookCancelResult> Cancel(Guid deliveryId, CancellationToken ct = default)
+        => throw new NotSupportedException($"{GetType().Name} does not support cancelling deliveries.");
+
+    /// <summary>
+    /// Cancels every <c>Pending</c> and <c>Parked</c> delivery of a group (8.1) and returns how many were cancelled.
+    /// <paramref name="groupName"/> is the key the endpoint groups view shows: the delivery's group, or its URL when it
+    /// was sent without one.
+    /// Same per-delivery semantics as <see cref="Cancel(Guid, CancellationToken)"/>. The endpoint's health is left as
+    /// it is. Default implementation: throws <see cref="NotSupportedException"/>.
+    /// </summary>
+    Task<int> CancelGroup(string groupName, CancellationToken ct = default)
+        => throw new NotSupportedException($"{GetType().Name} does not support cancelling a group.");
+
+    /// <summary>
+    /// "Retry now" for a failing endpoint (8.1): probes it at once by re-sending its oldest parked delivery once,
+    /// instead of waiting for <c>WebhookEndpointProbeInterval</c>. Success recovers the endpoint and releases the rest
+    /// of its parked deliveries; failure parks the delivery again and the next scheduled probe is one interval later.
+    /// Default implementation: throws <see cref="NotSupportedException"/>.
+    /// </summary>
+    Task<WebhookProbeResult> ProbeEndpoint(string groupName, CancellationToken ct = default)
+        => throw new NotSupportedException($"{GetType().Name} does not support probing endpoints.");
+}
+
+/// <summary>Outcome of <see cref="IWebhookCommandService.Cancel(Guid, CancellationToken)"/>. Values start at 1 (§8.11).</summary>
+public enum WebhookCancelResult
+{
+    /// <summary>The delivery was <c>Pending</c> or <c>Parked</c> and is now <c>Cancelled</c>.</summary>
+    Cancelled = 1,
+
+    /// <summary>No delivery exists for the given id.</summary>
+    NotFound = 2,
+
+    /// <summary>The delivery is already settled (<c>Delivered</c>, <c>Exhausted</c> or <c>Cancelled</c>) — nothing changed.</summary>
+    Rejected = 3,
+}
+
+/// <summary>Outcome of <see cref="IWebhookCommandService.ProbeEndpoint(string, CancellationToken)"/>. Values start at 1 (§8.11).</summary>
+public enum WebhookProbeResult
+{
+    /// <summary>The endpoint's oldest parked delivery was released for one attempt.</summary>
+    Probing = 1,
+
+    /// <summary>No endpoint health is recorded for this group (no tracked delivery to it ever ran out of retries).</summary>
+    NotFound = 2,
+
+    /// <summary>The endpoint is healthy; there is nothing to probe.</summary>
+    NotFailing = 3,
+
+    /// <summary>The endpoint is failing but has no parked delivery to re-send; it recovers on its next successful delivery.</summary>
+    NothingParked = 4,
+
+    /// <summary>No redelivery enqueuer is registered in this process; nothing was changed.</summary>
+    Unavailable = 5,
 }
 
 /// <summary>

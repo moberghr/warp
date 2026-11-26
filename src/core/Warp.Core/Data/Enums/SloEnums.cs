@@ -54,6 +54,15 @@ public enum SloKind
     /// rate budget with an allowed bad fraction of <c>1 − Percentile/100</c>. Gauges only.
     /// </summary>
     MetricGaugeThreshold = 11,
+
+    /// <summary>
+    /// Webhook delivery latency per endpoint (8.1): at least <c>Percentile</c>% of the deliveries created in the window
+    /// must be delivered within <c>TargetValue</c> minutes of being sent. <c>Dimension</c> is the delivery group
+    /// (<c>GroupName</c>) or <c>*</c> for every delivery. A delivery still undelivered past the threshold, exhausted,
+    /// parked or delivered late is a bad event; cancelled deliveries and those younger than the threshold are not
+    /// counted. Read from the <c>WebhookDelivery</c> rows (no aggregate), so the window is bounded by the delivery retention.
+    /// </summary>
+    WebhookDeliveryLatency = 12,
 }
 
 /// <summary>Which side of <c>TargetValue</c> a <see cref="SloKind.MetricGaugeThreshold"/> objective must stay on. Values start at 1 (§8.11).</summary>

@@ -67,6 +67,11 @@ export function changeKind(draft: SloUpsertRequest, kind: SloKind): SloUpsertReq
   const wasMetric = isMetricKind(draft.kind);
   const base = { ...withoutMetricFields(draft), kind, percentile: null };
 
+  if (kind === SloKind.WebhookDeliveryLatency) {
+    // Dimension = a delivery group (endpoint) or *; target = minutes; percentile = the share delivered in time.
+    return { ...base, dimension: wasMetric ? '' : base.dimension, targetValue: 5, percentile: DEFAULT_LATENCY_PERCENTILE };
+  }
+
   if (!isMetricKind(kind)) {
     return wasMetric ? { ...base, dimension: '' } : base;
   }
@@ -121,6 +126,7 @@ export function fieldsFor(kind: SloKind): KindFields {
       return { tagFilter: true, ratio: false, baseline: 'none', secondary: false, percentile: true };
     case SloKind.QueueWaitLatency:
     case SloKind.ExecutionLatency:
+    case SloKind.WebhookDeliveryLatency:
       return { tagFilter: false, ratio: false, baseline: 'none', secondary: false, percentile: true };
     default:
       return { tagFilter: false, ratio: false, baseline: 'none', secondary: false, percentile: false };
@@ -371,6 +377,8 @@ export function describeMetricKind(kind: SloKind): string | null {
       return 'Primary event count minus secondary event count must not exceed the limit (count ≤ N).';
     case SloKind.MetricGaugeThreshold:
       return 'The gauge\'s per-bucket aggregate must stay at most / at least the threshold in at least the compliant share of the window\'s observed time. Samples from several processes and matching series are averaged (or their min / max taken), never summed.';
+    case SloKind.WebhookDeliveryLatency:
+      return 'At least the percentile share of the deliveries to the endpoint (delivery group, or * for all) created in the window must be delivered within the target minutes of being sent. Exhausted, parked, late and still-pending deliveries count against it; cancelled ones and those younger than the target do not.';
     case SloKind.MetricLatency:
       return 'At least the percentile share of matching histogram events must land in buckets whose upper bound is at most the threshold (in the instrument\'s unit). Thresholds are compared with bucket upper bounds, so resolution is the bucket ladder.';
     default:

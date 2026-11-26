@@ -326,6 +326,38 @@ public class StorageTypeConventionTests
         divergent.ShouldBeEmpty();
     }
 
+    [TimedTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void WebhookEndpointHealthColumns_AreUnderTheStorageContract_WhenConsumerRetypesWarpColumns(bool sqlServer)
+    {
+        // 8.1 columns pinned by name, under the hostile conventions: the sweeps above cover them generically, this
+        // fails loudly if one of them ever falls outside the Warp model (a new entity left out of ApplyWarpModel).
+        using var context = Context<HostileConventionContext>(sqlServer);
+        var delivery = context.Model.FindEntityType(typeof(Warp.Core.Data.Entities.WebhookDelivery))!;
+        var endpoint = context.Model.FindEntityType(typeof(Warp.Core.Data.Entities.WebhookEndpoint)).ShouldNotBeNull();
+
+        UnwrapType(delivery.FindProperty(nameof(Warp.Core.Data.Entities.WebhookDelivery.LastFailureReason))!.GetProviderClrType()).ShouldBe(typeof(int));
+        endpoint.FindProperty(nameof(Warp.Core.Data.Entities.WebhookEndpoint.State))!.GetProviderClrType().ShouldBe(typeof(int));
+        delivery.FindProperty(nameof(Warp.Core.Data.Entities.WebhookDelivery.LastStatusCode))!.GetProviderClrType().ShouldBeNull();
+        delivery.FindProperty(nameof(Warp.Core.Data.Entities.WebhookDelivery.DedupeKey))!.GetMaxLength().ShouldBe(64);
+        endpoint.FindProperty(nameof(Warp.Core.Data.Entities.WebhookEndpoint.Name))!.GetMaxLength().ShouldBe(200);
+        delivery.GetIndexes().ShouldContain(x => x.IsUnique && x.Properties.Count == 1 && x.Properties[0].Name == nameof(Warp.Core.Data.Entities.WebhookDelivery.DedupeKey));
+
+        var times = new[]
+        {
+            delivery.FindProperty(nameof(Warp.Core.Data.Entities.WebhookDelivery.LastAttemptAt))!,
+            endpoint.FindProperty(nameof(Warp.Core.Data.Entities.WebhookEndpoint.FailingSince))!,
+            endpoint.FindProperty(nameof(Warp.Core.Data.Entities.WebhookEndpoint.LastSuccessAt))!,
+            endpoint.FindProperty(nameof(Warp.Core.Data.Entities.WebhookEndpoint.LastFailureAt))!,
+            endpoint.FindProperty(nameof(Warp.Core.Data.Entities.WebhookEndpoint.NextProbeAt))!,
+            endpoint.FindProperty(nameof(Warp.Core.Data.Entities.WebhookEndpoint.StillFailingNotifiedAt))!,
+            endpoint.FindProperty(nameof(Warp.Core.Data.Entities.WebhookEndpoint.CreatedAt))!,
+        };
+
+        times.ShouldAllBe(x => UnwrapType(x.GetValueConverter()!.ProviderClrType) == typeof(DateTime));
+    }
+
     private static DbContextOptionsBuilder Provider(DbContextOptionsBuilder builder, bool sqlServer)
     {
         return sqlServer

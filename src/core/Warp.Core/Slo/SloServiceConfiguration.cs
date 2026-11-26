@@ -60,6 +60,22 @@ public sealed class SloOptions
     }
 
     /// <summary>
+    /// Webhook delivery latency per endpoint (8.1): at least <paramref name="percentile"/>% (1–99) of the deliveries to
+    /// <paramref name="group"/> (a delivery <c>GroupName</c>, or <c>*</c> for every delivery) created in the window must be
+    /// delivered within <paramref name="minutes"/> of being sent. Read from the delivery rows, so keep the window within
+    /// <c>WebhookDeliveryRetention</c>.
+    /// </summary>
+    public SloOptions AddWebhookDeliveryLatency(
+        string group,
+        double minutes,
+        int percentile = 99,
+        int windowSeconds = 86_400,
+        string? application = null,
+        string? name = null,
+        bool enabled = true)
+        => AddObjective(SloKind.WebhookDeliveryLatency, group, minutes, windowSeconds, percentile, application, name ?? $"Webhooks to {group} within {minutes} min", enabled);
+
+    /// <summary>
     /// Good-event ratio over a custom metric (<paramref name="instrument"/>): events whose <paramref name="ratioTag"/>
     /// matches <paramref name="goodValues"/> over good + <paramref name="badValues"/> (CSV, trailing <c>*</c> allowed)
     /// must stay at or above <paramref name="target"/>. With <paramref name="baselineDays"/> (1 or 7) the target is

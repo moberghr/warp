@@ -76,4 +76,30 @@ public class WebhookDelivery
 
     /// <summary>Retention stamp (<c>CreatedAt + WebhookDeliveryRetention</c>); <c>ExpirationCleanup</c> deletes past it.</summary>
     public DateTime? ExpireAt { get; set; }
+
+    /// <summary>
+    /// HTTP status of the last attempt, null when it got no response (8.1, #357). Stamped in the attempt's outcome
+    /// commit; a redeliver leaves it until the next attempt overwrites it.
+    /// </summary>
+    public int? LastStatusCode { get; set; }
+
+    /// <summary>Why the last attempt failed; null after a successful attempt or before the first (8.1, #357).</summary>
+    public WebhookFailureReason? LastFailureReason { get; set; }
+
+    /// <summary>When the last attempt finished (8.1, #357). For a <c>Delivered</c> row, the time it was delivered.</summary>
+    public DateTime? LastAttemptAt { get; set; }
+
+    /// <summary>
+    /// Stamped at <c>SendAsync</c> (8.1): the sender had endpoint health tracking on and the delivery has a
+    /// <see cref="GroupName"/>. Only such deliveries move their endpoint's health and can be <c>Parked</c>, whichever
+    /// server runs them — the decision travels with the row, like the rest of its contract.
+    /// </summary>
+    public bool TrackEndpointHealth { get; set; }
+
+    /// <summary>
+    /// Set at <c>SendAsync</c> only when the sender deduplicates (8.1): a SHA-256 of the event id and URL (lowercase
+    /// hex). Unique, so a second send of the same event to the same URL finds the first delivery instead of adding one.
+    /// Null for deliveries sent without deduplication.
+    /// </summary>
+    public string? DedupeKey { get; set; }
 }

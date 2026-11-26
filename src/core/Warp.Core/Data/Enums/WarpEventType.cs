@@ -34,6 +34,15 @@ public enum WarpEventType
 
     /// <summary>A server's clock is further from the database's than <c>ClockSkewWarningThreshold</c> — raised by its heartbeat, once per excursion (#350).</summary>
     ClockSkewDetected = 9,
+
+    /// <summary>A webhook endpoint (delivery group with endpoint health tracking) started failing: one of its deliveries exhausted its retries (8.1).</summary>
+    WebhookEndpointFailing = 10,
+
+    /// <summary>A failing webhook endpoint recovered: a probe or another delivery succeeded, and its parked deliveries are being released (8.1).</summary>
+    WebhookEndpointRecovered = 11,
+
+    /// <summary>A webhook endpoint has been failing for <c>WebhookEndpointStillFailingAfter</c> (30 days by default) — raised once per failing period (8.1).</summary>
+    WebhookEndpointStillFailing = 12,
 }
 
 /// <summary>

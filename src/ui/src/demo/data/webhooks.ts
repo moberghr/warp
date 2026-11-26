@@ -9,11 +9,13 @@
 // and paginates the list.
 import { FROZEN_NOW } from '@/lib/demoMode';
 import { AdapterCallOutcome } from '@/types/adapters';
-import { WebhookDeliveryStatus, WebhookSigning } from '@/types/webhooks';
+import { WebhookDeliveryStatus, WebhookEndpointState, WebhookFailureReason, WebhookSigning } from '@/types/webhooks';
 import type {
   WebhookDeliveryListItem,
   WebhookDeliveryDetail,
   WebhookDeliverySummary,
+  WebhookEndpointState as EndpointState,
+  WebhookFailureReason as FailureReason,
 } from '@/types/webhooks';
 
 function ago(minutes: number): string {
@@ -45,9 +47,21 @@ const SIGNING = [WebhookSigning.StandardWebhooks, WebhookSigning.None, WebhookSi
 
 const COUNT = 72;
 
+// The endpoint that is failing in the demo (8.1 endpoint health): its newest deliveries park, the first of them
+// exhausted (that is what turned it Failing).
+export const DEMO_FAILING_ENDPOINT = ENDPOINTS[4];
+const FAILING_FROM = COUNT - 24;
+
 // Deterministic status mix: ~every 11th exhausted, ~every 4th pending, rest delivered. The newest few are
-// weighted toward Pending so the "in-flight" tile + latest bar look live.
+// weighted toward Pending so the "in-flight" tile + latest bar look live. The failing endpoint's deliveries of
+// the last ~8 hours are parked; a couple of older ones were cancelled by an operator.
 function statusFor(i: number): WebhookDeliveryStatus {
+  if (ENDPOINTS[(i * 3) % ENDPOINTS.length] === DEMO_FAILING_ENDPOINT && i >= FAILING_FROM) {
+    return i < FAILING_FROM + 5 ? WebhookDeliveryStatus.Exhausted : WebhookDeliveryStatus.Parked;
+  }
+  if (i % 17 === 8) {
+    return WebhookDeliveryStatus.Cancelled;
+  }
   if (i >= COUNT - 3) {
     return WebhookDeliveryStatus.Pending;
   }
@@ -92,10 +106,56 @@ const generated: Gen[] = Array.from({ length: COUNT }, (_, i) => {
     signing: SIGNING[i % SIGNING.length],
     createdMinutesAgo: (COUNT - 1 - i) * 20,
     attemptCount:
-      status === WebhookDeliveryStatus.Exhausted ? 5 : status === WebhookDeliveryStatus.Pending ? (i % 3) + 1 : (i % 2) + 1,
+      status === WebhookDeliveryStatus.Exhausted || status === WebhookDeliveryStatus.Parked
+        ? 5
+        : status === WebhookDeliveryStatus.Pending
+          ? (i % 3) + 1
+          : status === WebhookDeliveryStatus.Cancelled
+            ? 1
+            : (i % 2) + 1,
     reference: i % 5 === 0 ? null : `sub_${1000 + i}`,
   };
 });
+
+// The last-attempt fields (#357): delivered → 200; exhausted / pending retries → 503; parked (the failing endpoint)
+// → a timeout; cancelled → its one failed attempt.
+function lastAttemptFor(g: Gen): Pick<WebhookDeliveryListItem, 'lastStatusCode' | 'lastFailureReason' | 'lastAttemptAt'> {
+  const at = ago(Math.max(0, g.createdMinutesAgo - (g.i % 4) - 1));
+  switch (g.status) {
+    case WebhookDeliveryStatus.Delivered:
+      return { lastStatusCode: 200, lastFailureReason: null, lastAttemptAt: at };
+    case WebhookDeliveryStatus.Parked:
+      return { lastStatusCode: null, lastFailureReason: WebhookFailureReason.Timeout as FailureReason, lastAttemptAt: at };
+    case WebhookDeliveryStatus.Cancelled:
+      return { lastStatusCode: null, lastFailureReason: WebhookFailureReason.ConnectionRefused as FailureReason, lastAttemptAt: at };
+    default:
+      return { lastStatusCode: 503, lastFailureReason: WebhookFailureReason.UnsuccessfulStatus as FailureReason, lastAttemptAt: at };
+  }
+}
+
+/** Endpoint health records for the demo: the failing endpoint, plus one that failed and recovered. */
+export const demoEndpointHealth: Record<string, {
+  health: EndpointState;
+  failingSince: string | null;
+  nextProbeAt: string | null;
+  lastSuccessAt: string | null;
+  lastFailureAt: string | null;
+}> = {
+  [DEMO_FAILING_ENDPOINT]: {
+    health: WebhookEndpointState.Failing as EndpointState,
+    failingSince: ago((COUNT - 1 - FAILING_FROM) * 20),
+    nextProbeAt: ahead(3),
+    lastSuccessAt: ago((COUNT - FAILING_FROM) * 20),
+    lastFailureAt: ago(4),
+  },
+  [ENDPOINTS[0]]: {
+    health: WebhookEndpointState.Healthy as EndpointState,
+    failingSince: null,
+    nextProbeAt: null,
+    lastSuccessAt: ago(15),
+    lastFailureAt: ago(60 * 9),
+  },
+};
 
 export const demoWebhooks: WebhookDeliveryListItem[] = [...generated]
   .sort((a, b) => a.createdMinutesAgo - b.createdMinutesAgo) // newest first for the list
@@ -111,6 +171,7 @@ export const demoWebhooks: WebhookDeliveryListItem[] = [...generated]
     attemptCount: g.attemptCount,
     nextAttemptAt: g.status === WebhookDeliveryStatus.Pending ? ahead((g.i % 6) + 1) : null,
     createdAt: ago(g.createdMinutesAgo),
+    ...lastAttemptFor(g),
   }));
 
 export const demoWebhookSummary: WebhookDeliverySummary = {
@@ -118,6 +179,8 @@ export const demoWebhookSummary: WebhookDeliverySummary = {
   pending: generated.filter((g) => g.status === WebhookDeliveryStatus.Pending).length,
   delivered: generated.filter((g) => g.status === WebhookDeliveryStatus.Delivered).length,
   exhausted: generated.filter((g) => g.status === WebhookDeliveryStatus.Exhausted).length,
+  parked: generated.filter((g) => g.status === WebhookDeliveryStatus.Parked).length,
+  cancelled: generated.filter((g) => g.status === WebhookDeliveryStatus.Cancelled).length,
 };
 
 // Build a plausible attempt timeline for a delivery from its status.
@@ -135,6 +198,17 @@ function attemptsFor(g: Gen): WebhookDeliveryDetail['attempts'] {
     return [
       { callId: `bbbbbbbb-0000-0000-0000-${(g.i * 10 + 1).toString(16).padStart(12, '0')}`, timestamp: ago(base), durationMs: 90 + (g.i % 9) * 14, outcome: AdapterCallOutcome.Success, statusCode: 200, exceptionType: null },
     ];
+  }
+
+  if (g.status === WebhookDeliveryStatus.Parked) {
+    return Array.from({ length: 5 }, (_, k) => ({
+      callId: `bbbbbbbb-0000-0000-0000-${(g.i * 10 + k).toString(16).padStart(12, '0')}`,
+      timestamp: ago(base - k * 2),
+      durationMs: 30_000,
+      outcome: AdapterCallOutcome.Failed,
+      statusCode: null,
+      exceptionType: 'System.TimeoutException',
+    }));
   }
 
   if (g.status === WebhookDeliveryStatus.Exhausted) {
@@ -194,6 +268,8 @@ export const demoWebhookDetails: Record<string, WebhookDeliveryDetail> = Object.
         nextAttemptAt: g.status === WebhookDeliveryStatus.Pending ? ahead((g.i % 6) + 1) : null,
         createdAt: ago(g.createdMinutesAgo),
         expireAt: ahead(60 * 24 * 30),
+        ...lastAttemptFor(g),
+        trackEndpointHealth: g.endpoint === DEMO_FAILING_ENDPOINT || g.endpoint === ENDPOINTS[0],
         attempts: attemptsFor(g),
       } satisfies WebhookDeliveryDetail,
     ];

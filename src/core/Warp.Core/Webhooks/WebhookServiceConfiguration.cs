@@ -48,6 +48,18 @@ public static class WebhookServiceConfiguration
                 + "collection before AddWebhooks. WebhookSigning.Custom must not fail at send time.");
         }
 
+        if (options.EndpointHealthHandlerType is not null)
+        {
+            builder.Services.AddScoped(typeof(IWebhookEndpointHealthHandler), options.EndpointHealthHandlerType);
+        }
+
+        // OR-merged across repeated AddWebhooks calls: a later call without the flag never turns it back off.
+        builder.Services.Configure<WebhookSendBehavior>(x =>
+        {
+            x.TrackEndpointHealth |= options.TrackEndpointHealth;
+            x.DeduplicateByEventId |= options.DeduplicateByEventId;
+        });
+
         if (options.PublicAddressesOnly)
         {
             WebhookHttpClientSetup.AddPublicAddressGuard(builder.Services);
@@ -68,6 +80,36 @@ public sealed class WarpWebhookOptions
     internal Type? CustomSignerType { get; private set; }
 
     internal bool CustomSigningDeclared { get; private set; }
+
+    internal Type? EndpointHealthHandlerType { get; private set; }
+
+    /// <summary>
+    /// When <see langword="true"/>, deliveries this process sends with a <c>Group</c> track their endpoint's health
+    /// (8.1): a delivery that runs out of retries marks its group <c>Failing</c>; while it is failing, deliveries that
+    /// run out of retries are <c>Parked</c> instead of <c>Exhausted</c>; the endpoint monitor probes the group and,
+    /// once a delivery succeeds, releases the parked ones oldest first. The choice is stamped on each delivery at
+    /// <c>SendAsync</c>, so it holds whichever server runs the attempt. Deliveries without a group are not tracked.
+    /// Default <see langword="false"/>.
+    /// </summary>
+    public bool TrackEndpointHealth { get; set; }
+
+    /// <summary>
+    /// When <see langword="true"/>, <c>SendAsync</c> in this process deduplicates on the event id and URL (8.1): if a
+    /// delivery of the same <c>EventId</c> to the same <c>Url</c> still exists (any status, until retention deletes
+    /// it), its id is returned and nothing new is stored or sent. Only meaningful when the caller sets
+    /// <c>EventId</c>; a send without one gets a fresh id and never matches. Two concurrent sends of the same pair
+    /// race on a unique index: one of them fails its save with a unique-constraint error. Default <see langword="false"/>.
+    /// </summary>
+    public bool DeduplicateByEventId { get; set; }
+
+    /// <summary>
+    /// Registers the host callback for endpoint health changes (started failing, recovered, still failing after
+    /// <c>WebhookEndpointStillFailingAfter</c>). Equivalent to registering <typeparamref name="THandler"/> as
+    /// <see cref="IWebhookEndpointHealthHandler"/> in DI. Warp never disables anything itself.
+    /// </summary>
+    public void OnEndpointHealthChanged<THandler>()
+        where THandler : class, IWebhookEndpointHealthHandler
+        => EndpointHealthHandlerType = typeof(THandler);
 
     /// <summary>
     /// When <see langword="true"/>, webhook attempts connect only to publicly routable addresses: the

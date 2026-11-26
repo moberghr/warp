@@ -43,9 +43,17 @@ Set on `AddWarp` (or `AddWarpServer`, which inherits them). The webhook engine i
 | `WebhookAttemptTimeout` | `TimeSpan` | `30 seconds` | Budget for one delivery attempt: sending the request, receiving the response headers and reading the captured prefix of the body. An attempt past it is cancelled and counts as a failed attempt (retried per the delivery's `RetrySchedule`). Enforced with a cancellation token, not `HttpClient.Timeout`, so a `warp-webhooks` client you configure keeps its own settings; that client's `Timeout` (100 s by default) still applies to the send, so raise it too before going above 100 s. If the headers arrived in time and only the body capture runs out, the status code still decides the outcome. Must be at least 1 ms (or `Timeout.InfiniteTimeSpan` to disable); `AddWarp` throws otherwise. New in 8.1. |
 | `WebhookDeliveryRetention` | `TimeSpan` | `30 days` | How long a delivery row is kept (`ExpireAt = CreatedAt + retention`); also the default call-log retention of the `warp-webhooks` adapter. |
 | `WebhookDeliveryRetentionCount` | `int?` | `null` | Count cap for settled deliveries (oldest deleted first). `Pending` deliveries are never count-trimmed. `null` disables it. |
+| `WebhookEndpointMonitorInterval` | `TimeSpan?` | `30 seconds` | How often the `WebhookEndpointMonitor` server task runs: it releases the parked deliveries of recovered endpoints, probes failing endpoints that are due and raises the still-failing alert. With no tracked endpoint it reads one small table. `null` turns it off (parked deliveries then wait). Must be greater than zero when set. New in 8.1. See [Endpoint health](/docs/features/webhooks#endpoint-health). |
+| `WebhookEndpointProbeInterval` | `TimeSpan` | `5 minutes` | How long a failing endpoint waits between probes (a probe re-sends its oldest parked delivery once). Must be greater than zero. New in 8.1. |
+| `WebhookEndpointStillFailingAfter` | `TimeSpan` | `30 days` | How long an endpoint must have been failing before the `WebhookEndpointStillFailing` alert and `IWebhookEndpointHealthHandler.OnEndpointStillFailingAsync` fire, once per failing period. Must be greater than zero. New in 8.1. |
 | `WebhookStuckDeliveryGrace` | `TimeSpan` | `10 minutes` | How far past `NextAttemptAt` a `Pending` delivery must be before the stuck-delivery sweep gives it a fresh executor job. |
 
-`opt.AddWebhooks(w => ...)` takes the per-process options: `UseCustomSigner<T>()`, `OnDeliveryExhausted<T>()` and, new in 8.1, `PublicAddressesOnly` (default `false`; set it on every server that runs a worker, see [Public addresses only](/docs/features/webhooks#public-addresses-only)).
+`opt.AddWebhooks(w => ...)` takes the per-process options: `UseCustomSigner<T>()`, `OnDeliveryExhausted<T>()` and, new in 8.1:
+
+- `PublicAddressesOnly` (default `false`) — applies where attempts run: set it on every server that runs a worker. See [Public addresses only](/docs/features/webhooks#public-addresses-only).
+- `TrackEndpointHealth` (default `false`) — applies where deliveries are sent: stamped on each delivery at `SendAsync`. See [Endpoint health](/docs/features/webhooks#endpoint-health).
+- `DeduplicateByEventId` (default `false`) — applies where deliveries are sent. See [Deduplication](/docs/features/webhooks#deduplication).
+- `OnEndpointHealthChanged<T>()` — registers an `IWebhookEndpointHealthHandler`.
 
 ### Naming Conventions
 

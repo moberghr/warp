@@ -177,7 +177,7 @@ public abstract class ProvenanceStampingTestsBase : IAsyncLifetime
             new ServiceCollection().BuildServiceProvider(),
             TestTasks.NullTransport,
             TestTasks.NullSignals);
-        var dispatcher = new WebhookDispatcher<TestContext>(ctx, publisher, TimeProvider.System, configuration);
+        var dispatcher = new WebhookDispatcher<TestContext>(ctx, publisher, TimeProvider.System, configuration, Microsoft.Extensions.Options.Options.Create(new WebhookSendBehavior()));
 
         var id = await dispatcher.SendAsync(
             new WebhookSend { Url = "https://example.test/hook", EventType = "order.created" },

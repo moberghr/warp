@@ -135,7 +135,8 @@ public abstract class WebhookDispatcherValidationTestsBase : IAsyncLifetime
             ctx,
             Mock.Of<IPublisher>(),
             TimeProvider.System,
-            Options.Create(new WarpConfiguration()));
+            Options.Create(new WarpConfiguration()),
+            Options.Create(new WebhookSendBehavior()));
 
         var id = await dispatcher.SendAsync(
             new WebhookSend
@@ -168,7 +169,8 @@ public abstract class WebhookDispatcherValidationTestsBase : IAsyncLifetime
             ctx,
             Mock.Of<IPublisher>(),
             TimeProvider.System,
-            Options.Create(new WarpConfiguration()));
+            Options.Create(new WarpConfiguration()),
+            Options.Create(new WebhookSendBehavior()));
 
         var id = await dispatcher.SendAsync(
             new WebhookSend
@@ -199,5 +201,6 @@ public abstract class WebhookDispatcherValidationTestsBase : IAsyncLifetime
             _fixture.CreateContext(),
             Mock.Of<IPublisher>(),
             TimeProvider.System,
-            Options.Create(new WarpConfiguration()));
+            Options.Create(new WarpConfiguration()),
+            Options.Create(new WebhookSendBehavior()));
 }

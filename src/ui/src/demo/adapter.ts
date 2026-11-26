@@ -4,7 +4,7 @@ import { decodeUrlSafeId } from '@/lib/urlSafeId';
 import { demoAdapters, demoAdapterDetails, demoAdapterCalls } from './data/adapters';
 import { demoEndpoints, demoEndpointDetails, demoEndpointCalls } from './data/endpoints';
 import { aggregateHistory } from './data/history';
-import { demoWebhooks, demoWebhookDetails, demoWebhookSummary } from './data/webhooks';
+import { demoEndpointHealth, demoWebhooks, demoWebhookDetails, demoWebhookSummary } from './data/webhooks';
 import {
   demoApplications,
   demoApplicationDetails,
@@ -18,7 +18,7 @@ import {
 import { demoSlos, demoSloDetail } from './data/slo';
 import { DEMO_DEFAULT_BOARD, demoBoards, demoBoardTiles, demoMetricBoard } from './data/metricBoard';
 import { demoAnnotationList } from './data/annotations';
-import { WebhookDeliveryStatus } from '@/types/webhooks';
+import { WebhookDeliveryStatus, type WebhookGroupModel } from '@/types/webhooks';
 import type { ConcurrencyLimitInfo, RateLimitInfo, SagaDetail, SagaStats } from '@/types';
 import type { BackgroundServiceLeaseDto } from '@/types/backgroundServices';
 
@@ -325,22 +325,64 @@ function routeWebhooks(
     return resolve(demoWebhookSummary, config);
   }
 
-  // GET /webhooks/groups?by=type|endpoint — grouped counts (checked before the list + {id} routes).
+  // POST /webhooks/groups/cancel|retry?group= — endpoint actions (8.1). The demo is read-only: both succeed
+  // without changing the fixtures (cancel reports what would be cancelled).
+  if (method === 'post' && url.startsWith('/webhooks/groups/cancel')) {
+    const group = String(params.group ?? '');
+    const cancelled = demoWebhooks.filter(
+      (x) => (x.groupName ?? x.url) === group && (x.status === WebhookDeliveryStatus.Pending || x.status === WebhookDeliveryStatus.Parked),
+    ).length;
+
+    return resolve({ cancelled }, config);
+  }
+  if (method === 'post' && url.startsWith('/webhooks/groups/retry')) {
+    return resolve({}, config);
+  }
+
+  // GET /webhooks/groups?by=type|endpoint — grouped counts (checked before the list + {id} routes). The endpoint
+  // grouping carries the 8.1 health record and the 24-hour success rate / p95 like the server.
   if (method === 'get' && url.startsWith('/webhooks/groups')) {
     const by = String(params.by ?? 'type');
     const keyOf = (x: (typeof demoWebhooks)[number]) => (by === 'endpoint' ? (x.groupName ?? x.url) : x.eventType);
-    const map = new Map<string, { key: string; total: number; pending: number; delivered: number; exhausted: number; lastActivityAt: string }>();
+    const map = new Map<string, WebhookGroupModel & { durations: number[]; settled: number }>();
     for (const x of demoWebhooks) {
       const key = keyOf(x);
-      const g = map.get(key) ?? { key, total: 0, pending: 0, delivered: 0, exhausted: 0, lastActivityAt: x.createdAt };
+      const g = map.get(key) ?? {
+        key, total: 0, pending: 0, delivered: 0, exhausted: 0, parked: 0, cancelled: 0, lastActivityAt: x.createdAt, durations: [], settled: 0,
+      };
       g.total += 1;
       if (x.status === WebhookDeliveryStatus.Pending) g.pending += 1;
       if (x.status === WebhookDeliveryStatus.Delivered) g.delivered += 1;
       if (x.status === WebhookDeliveryStatus.Exhausted) g.exhausted += 1;
+      if (x.status === WebhookDeliveryStatus.Parked) g.parked += 1;
+      if (x.status === WebhookDeliveryStatus.Cancelled) g.cancelled += 1;
+      if (x.status === WebhookDeliveryStatus.Delivered || x.status === WebhookDeliveryStatus.Exhausted || x.status === WebhookDeliveryStatus.Parked) g.settled += 1;
+      if (x.status === WebhookDeliveryStatus.Delivered && x.lastAttemptAt) {
+        g.durations.push(Date.parse(x.lastAttemptAt) - Date.parse(x.createdAt));
+      }
       if (x.createdAt > g.lastActivityAt) g.lastActivityAt = x.createdAt;
       map.set(key, g);
     }
-    const groups = [...map.values()].sort((a, b) => (a.lastActivityAt < b.lastActivityAt ? 1 : -1));
+    const groups: WebhookGroupModel[] = [...map.values()]
+      .sort((a, b) => (a.lastActivityAt < b.lastActivityAt ? 1 : -1))
+      .map(({ durations, settled, ...g }) => {
+        if (by !== 'endpoint') {
+          return g;
+        }
+        const sorted = [...durations].sort((a, b) => a - b);
+        const health = demoEndpointHealth[g.key];
+
+        return {
+          ...g,
+          health: health?.health ?? null,
+          failingSince: health?.failingSince ?? null,
+          nextProbeAt: health?.nextProbeAt ?? null,
+          lastSuccessAt: health?.lastSuccessAt ?? null,
+          lastFailureAt: health?.lastFailureAt ?? null,
+          successRate: settled === 0 ? null : g.delivered / settled,
+          p95DeliveryMs: sorted.length === 0 ? null : sorted[Math.max(0, Math.ceil(0.95 * sorted.length) - 1)],
+        };
+      });
 
     return resolve(groups, config);
   }
@@ -355,14 +397,16 @@ function routeWebhooks(
 
       return true;
     });
-    const map = new Map<string, { hour: string; delivered: number; exhausted: number; pending: number; total: number }>();
+    const map = new Map<string, { hour: string; delivered: number; exhausted: number; pending: number; parked: number; cancelled: number; total: number }>();
     for (const x of scoped) {
       const hour = `${x.createdAt.slice(0, 13)}:00:00.000Z`;
-      const g = map.get(hour) ?? { hour, delivered: 0, exhausted: 0, pending: 0, total: 0 };
+      const g = map.get(hour) ?? { hour, delivered: 0, exhausted: 0, pending: 0, parked: 0, cancelled: 0, total: 0 };
       g.total += 1;
       if (x.status === WebhookDeliveryStatus.Delivered) g.delivered += 1;
       if (x.status === WebhookDeliveryStatus.Exhausted) g.exhausted += 1;
       if (x.status === WebhookDeliveryStatus.Pending) g.pending += 1;
+      if (x.status === WebhookDeliveryStatus.Parked) g.parked += 1;
+      if (x.status === WebhookDeliveryStatus.Cancelled) g.cancelled += 1;
       map.set(hour, g);
     }
     const points = [...map.values()].sort((a, b) => (a.hour < b.hour ? -1 : 1));
@@ -422,6 +466,23 @@ function routeWebhooks(
           headers: {},
           config,
         },
+      });
+    }
+
+    return resolve({}, config);
+  }
+
+  // POST /webhooks/{id}/cancel — 200 for a pending/parked delivery, 409 once settled, 404 unknown (8.1). The
+  // fixtures stay as they are (the demo is read-only).
+  const cancelMatch = url.match(/^\/webhooks\/([^/?]+)\/cancel$/);
+  if (method === 'post' && cancelMatch) {
+    const detail = demoWebhookDetails[decodeURIComponent(cancelMatch[1])];
+    if (!detail) {
+      return Promise.reject({ response: { status: 404, statusText: 'Not Found', data: {}, headers: {}, config } });
+    }
+    if (detail.status !== WebhookDeliveryStatus.Pending && detail.status !== WebhookDeliveryStatus.Parked) {
+      return Promise.reject({
+        response: { status: 409, statusText: 'Conflict', data: { message: 'Delivery is already settled.' }, headers: {}, config },
       });
     }
 

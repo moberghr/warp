@@ -84,6 +84,15 @@ describe('changeKind', () => {
     expect(changeKind(baseDraft, SloKind.MetricGap)).toMatchObject({ targetValue: 0, secondaryMetric: '' });
   });
 
+  it('defaults a webhook delivery latency objective to 5 minutes at 95%, keeping it a non-metric kind', () => {
+    const next = changeKind({ ...baseDraft, dimension: 'acme' }, SloKind.WebhookDeliveryLatency);
+
+    expect(next).toMatchObject({ kind: SloKind.WebhookDeliveryLatency, dimension: 'acme', targetValue: 5, percentile: 95 });
+    expect(fieldsFor(SloKind.WebhookDeliveryLatency)).toMatchObject({ percentile: true, tagFilter: false });
+    expect(validateMetricDraft(next)).toBeNull();
+    expect(buildUpsertRequest(next)).toMatchObject({ dimension: 'acme', targetValue: 5, percentile: 95 });
+  });
+
   it('raises a short window to the metric minimum', () => {
     expect(changeKind({ ...baseDraft, windowSeconds: 60 }, SloKind.MetricThreshold).windowSeconds).toBe(600);
   });

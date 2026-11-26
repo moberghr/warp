@@ -1,0 +1,1 @@
+var e={Pending:1,Delivered:2,Exhausted:3,Parked:4,Cancelled:5},t={Healthy:1,Failing:2},n={Timeout:1,DnsFailure:2,ConnectionRefused:3,TlsError:4,ConnectionFailed:5,AddressNotPublic:6,UnsuccessfulStatus:7,Other:8},r={None:1,StandardWebhooks:2,Custom:3};export{r as i,t as n,n as r,e as t};

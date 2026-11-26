@@ -19,25 +19,6 @@ using Warp.Core.Webhooks;
 
 namespace Warp.Worker.Services;
 
-// Non-generic holder so S2743 (static fields in generic types) is not tripped by state that doesn't
-// depend on TContext — same pattern as ServerTaskLoopConstants.
-file static class StaleJobRecoveryConstants
-{
-    // [Restart] on ExecuteWebhookDelivery is applied by NoRestartPublishBehavior, which only runs when the
-    // host called AddNoRestart() and is bypassed entirely by staging a job directly. Stamped on the staged
-    // job so a recovered executor that itself crashes mid-attempt is always re-run: the delivery-completes
-    // guarantee must not depend on an addon being registered or on RestartStaleJobsByDefault (§8.20).
-    public static readonly string? RestartMetadata = BuildRestartMetadata();
-
-    private static string? BuildRestartMetadata()
-    {
-        var metadata = MetadataFactory.Create<ICanBeRestartedMetadata>([]);
-        metadata.CanBeRestarted = true;
-
-        return MetadataSerializer.Serialize((Dictionary<string, object>)(object)metadata);
-    }
-}
-
 /// <summary>
 /// Crash recovery for stalled in-flight work, in two sweeps. Jobs: finds rows in
 /// <see cref="State.Processing"/> whose worker stopped refreshing <c>LastKeepAlive</c> past
@@ -382,32 +363,7 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
 
     // Immediate (not scheduled) so signal-driven pickup applies — mirrors the first attempt in SendAsync.
     private void StageExecutorJob(Guid deliveryId, DateTime now)
-    {
-        var job = JobHelper.CreateJob(
-            message: JsonSerializer.Serialize(new ExecuteWebhookDelivery { DeliveryId = deliveryId }),
-            type: typeof(ExecuteWebhookDelivery).AssemblyQualifiedName!,
-            scheduleTime: now,
-            queue: WebhookConstants.Queue,
-            parentId: null,
-            state: State.Enqueued,
-            now: now,
-            metadata: StaleJobRecoveryConstants.RestartMetadata,
-            application: _configuration.ApplicationName);
-
-        // Recovery is its own unit of work with no caller trace to inherit, so the job roots a fresh trace —
-        // the same fallback Publisher lands on from here (mirrors RecurringJobScheduler).
-        job.TraceId = job.Id;
-
-        _context.Set<Job>().Add(job);
-        _context.Set<JobLog>().Add(new JobLog
-        {
-            JobId = job.Id,
-            EventType = "Created",
-            Timestamp = now,
-            Level = "Information",
-            Message = $"Job {job.Id} created by crash recovery for stuck webhook delivery {deliveryId}",
-        });
-    }
+        => WebhookExecutorJobs.Stage(_context, deliveryId, now, now, _configuration.ApplicationName, "crash recovery for stuck delivery");
 
     // A job recovery ends (deleted or failed) is settled work: it can be what completes its batch or
     // message, and a continuation may be waiting on it. The Orchestrator checks what a wake names and

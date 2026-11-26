@@ -516,6 +516,7 @@ public static class ServiceConfiguration
         AddAdapterDefinitionEntity(modelBuilder, schema);
         AddAdapterCallLogEntity(modelBuilder, schema);
         AddWebhookDeliveryEntity(modelBuilder, schema);
+        AddWebhookEndpointEntity(modelBuilder, schema);
         AddEndpointCallLogEntity(modelBuilder, schema);
         AddClientEventLogEntity(modelBuilder, schema);
         AddApplicationInstanceEntity(modelBuilder, schema);
@@ -1513,6 +1514,20 @@ public static class ServiceConfiguration
         delivery.Property(p => p.CreatedAt);
         delivery.Property(p => p.Application).HasMaxLength(200);
         delivery.Property(p => p.ExpireAt);
+        delivery.Property(p => p.LastStatusCode);
+        delivery.Property(p => p.LastFailureReason).HasConversion<int?>();
+        delivery.Property(p => p.LastAttemptAt);
+        delivery.Property(p => p.TrackEndpointHealth);
+        delivery.Property(p => p.DedupeKey).HasMaxLength(64);
+
+        // Dedupe (8.1): unique among the rows that carry a key. EF Core's SQL Server provider filters a unique
+        // index on a nullable column to non-null values, and PostgreSQL treats nulls as distinct, so deliveries
+        // sent without deduplication (null key) never collide on either provider.
+        delivery.HasIndex(p => p.DedupeKey).IsUnique();
+
+        // Endpoint health (8.1): a group's parked deliveries oldest first (release, probe, parked count) and the
+        // endpoints page's per-group status counts.
+        delivery.HasIndex(p => new { p.GroupName, p.Status, p.CreatedAt });
 
         // Status filtering + display of the pending/next-attempt band.
         delivery.HasIndex(p => new { p.Status, p.NextAttemptAt });
@@ -1532,6 +1547,27 @@ public static class ServiceConfiguration
         delivery.HasIndex(p => p.ExpireAt);
 
         delivery.Metadata.SetSchema(schema);
+    }
+
+    public static void AddWebhookEndpointEntity(ModelBuilder modelBuilder, string? schema)
+    {
+        var endpoint = modelBuilder.Entity<WebhookEndpoint>();
+
+        endpoint.Property(p => p.Name).HasMaxLength(200);
+        endpoint.HasKey(p => p.Name);
+
+        endpoint.Property(p => p.State).HasConversion<int>();
+        endpoint.Property(p => p.FailingSince);
+        endpoint.Property(p => p.LastSuccessAt);
+        endpoint.Property(p => p.LastFailureAt);
+        endpoint.Property(p => p.NextProbeAt);
+        endpoint.Property(p => p.StillFailingNotifiedAt);
+        endpoint.Property(p => p.CreatedAt);
+
+        // The endpoint monitor's due-probe scan: failing endpoints by next probe time.
+        endpoint.HasIndex(p => new { p.State, p.NextProbeAt });
+
+        endpoint.Metadata.SetSchema(schema);
     }
 
     public static void AddApplicationInstanceEntity(ModelBuilder modelBuilder, string? schema)

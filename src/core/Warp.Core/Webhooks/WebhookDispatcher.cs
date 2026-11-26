@@ -23,17 +23,20 @@ internal sealed class WebhookDispatcher<TContext> : IWebhookDispatcher
     private readonly IPublisher _publisher;
     private readonly TimeProvider _timeProvider;
     private readonly WarpConfiguration _configuration;
+    private readonly WebhookSendBehavior _behavior;
 
     public WebhookDispatcher(
         TContext context,
         IPublisher publisher,
         TimeProvider timeProvider,
-        IOptions<WarpConfiguration> configuration)
+        IOptions<WarpConfiguration> configuration,
+        IOptions<WebhookSendBehavior> behavior)
     {
         _context = context;
         _publisher = publisher;
         _timeProvider = timeProvider;
         _configuration = configuration.Value;
+        _behavior = behavior.Value;
     }
 
     public async Task<Guid> SendAsync(WebhookSend send, CancellationToken cancellationToken = default)
@@ -86,6 +89,30 @@ internal sealed class WebhookDispatcher<TContext> : IWebhookDispatcher
             WebhookSecretValidation.ValidateStandardWebhooksSecret(send.Secret, nameof(send));
         }
 
+        var eventId = Clamp(string.IsNullOrWhiteSpace(send.EventId) ? Guid.NewGuid().ToString() : send.EventId, WebhookColumnCaps.EventId);
+        var groupName = ClampOptional(send.Group, WebhookColumnCaps.GroupName);
+
+        // Dedupe (8.1, opt-in): the same event to the same URL returns the delivery already stored, in any status,
+        // until retention deletes it. The unique index on DedupeKey backs the check against a concurrent send.
+        string? dedupeKey = null;
+        if (_behavior.DeduplicateByEventId)
+        {
+            // The caller's own event id, not the stored (clamped) one: two ids that differ only past the column
+            // cap are different events.
+            dedupeKey = WebhookDedupe.Key(string.IsNullOrWhiteSpace(send.EventId) ? eventId : send.EventId, send.Url);
+
+            var existing = await _context.Set<WebhookDelivery>()
+                .AsNoTracking()
+                .Where(x => x.DedupeKey == dedupeKey)
+                .Select(x => (Guid?)x.Id)
+                .FirstOrDefaultAsync(cancellationToken);
+
+            if (existing is { } existingId)
+            {
+                return existingId;
+            }
+        }
+
         var now = _timeProvider.GetUtcNow().UtcDateTime;
         var schedule = send.RetrySchedule ?? WebhookDefaults.RetrySchedule;
 
@@ -93,10 +120,10 @@ internal sealed class WebhookDispatcher<TContext> : IWebhookDispatcher
         {
             Id = Warp.Core.Data.WarpId.Next(),
             EventType = Clamp(send.EventType, WebhookColumnCaps.EventType),
-            EventId = Clamp(string.IsNullOrWhiteSpace(send.EventId) ? Guid.NewGuid().ToString() : send.EventId, WebhookColumnCaps.EventId),
+            EventId = eventId,
             Url = send.Url,
             HeadersJson = send.Headers is { Count: > 0 } ? JsonSerializer.Serialize(send.Headers) : null,
-            GroupName = ClampOptional(send.Group, WebhookColumnCaps.GroupName),
+            GroupName = groupName,
             Reference = ClampOptional(send.Reference, WebhookColumnCaps.Reference),
             PayloadJson = send.Payload,
             SigningMode = send.Signing,
@@ -109,6 +136,8 @@ internal sealed class WebhookDispatcher<TContext> : IWebhookDispatcher
             CreatedAt = now,
             Application = _configuration.ApplicationName,
             ExpireAt = now + _configuration.WebhookDeliveryRetention,
+            TrackEndpointHealth = _behavior.TrackEndpointHealth && groupName is not null,
+            DedupeKey = dedupeKey,
         };
 
         await _context.Set<WebhookDelivery>().AddAsync(delivery, cancellationToken);

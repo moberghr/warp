@@ -63,6 +63,88 @@ public class WebhookCommandService<TContext> : IWebhookCommandService
         return RedeliverCoreAsync(deliveryId, options.Secret, ct);
     }
 
+    public async Task<WebhookCancelResult> Cancel(Guid deliveryId, CancellationToken ct = default)
+    {
+        var cancelled = await CancelWhere(_context.Set<WebhookDelivery>().Where(x => x.Id == deliveryId), ct);
+        if (cancelled == 1)
+        {
+            return WebhookCancelResult.Cancelled;
+        }
+
+        var exists = await _context.Set<WebhookDelivery>()
+            .AsNoTracking()
+            .Where(x => x.Id == deliveryId)
+            .AnyAsync(ct);
+
+        return exists ? WebhookCancelResult.Rejected : WebhookCancelResult.NotFound;
+    }
+
+    public Task<int> CancelGroup(string groupName, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(groupName);
+
+        // Same identity as the endpoint groups view and the list filter: the group name, or the URL of deliveries
+        // sent without a group.
+        return CancelWhere(_context.Set<WebhookDelivery>().Where(x => (x.GroupName ?? x.Url) == groupName), ct);
+    }
+
+    public async Task<WebhookProbeResult> ProbeEndpoint(string groupName, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(groupName);
+
+        var state = await _context.Set<WebhookEndpoint>()
+            .AsNoTracking()
+            .Where(x => x.Name == groupName)
+            .Select(x => (WebhookEndpointState?)x.State)
+            .FirstOrDefaultAsync(ct);
+
+        if (state is null)
+        {
+            return WebhookProbeResult.NotFound;
+        }
+
+        if (state == WebhookEndpointState.Healthy)
+        {
+            return WebhookProbeResult.NotFailing;
+        }
+
+        // Same reason as Redeliver: without an enqueuer the released delivery would be Pending with no job.
+        var enqueuer = _redeliveryEnqueuers.FirstOrDefault();
+        if (enqueuer is null)
+        {
+            return WebhookProbeResult.Unavailable;
+        }
+
+        var now = _timeProvider.GetUtcNow().UtcDateTime;
+
+        await using var transaction = await _context.Database.BeginTransactionAsync(ct);
+
+        // One attempt left: on failure the delivery runs out of retries again and, the endpoint still failing, parks.
+        var probed = await WebhookParkedRelease.ProbeOldestAsync(_context, groupName, now, now + _configuration.WebhookDeliveryRetention, ct);
+        if (probed is not { } deliveryId)
+        {
+            await transaction.RollbackAsync(ct);
+
+            return WebhookProbeResult.NothingParked;
+        }
+
+        await WebhookParkedRelease.DeferNextProbeAsync(_context, groupName, now + _configuration.WebhookEndpointProbeInterval, ct);
+        await enqueuer.EnqueueAsync(deliveryId, ct);
+        await transaction.CommitAsync(ct);
+
+        return WebhookProbeResult.Probing;
+    }
+
+    // Pending or Parked -> Cancelled in one guarded statement: a row that settled in the meantime is left alone.
+    private static Task<int> CancelWhere(IQueryable<WebhookDelivery> deliveries, CancellationToken ct)
+        => deliveries
+            .Where(x => x.Status == WebhookDeliveryStatus.Pending || x.Status == WebhookDeliveryStatus.Parked)
+            .ExecuteUpdateAsync(
+                s => s
+                    .SetProperty(x => x.Status, WebhookDeliveryStatus.Cancelled)
+                    .SetProperty(x => x.NextAttemptAt, (DateTime?)null),
+                ct);
+
     private async Task<WebhookRedeliveryResult> RedeliverCoreAsync(Guid deliveryId, string? newSecret, CancellationToken ct)
     {
         var current = await _context.Set<WebhookDelivery>()

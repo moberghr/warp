@@ -360,4 +360,27 @@ public class WarpConfiguration
     /// <see cref="System.Threading.Timeout.InfiniteTimeSpan"/> to disable. Default 30 seconds.
     /// </summary>
     public TimeSpan WebhookAttemptTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// How often the <c>WebhookEndpointMonitor</c> server task runs (8.1): it releases the parked deliveries of
+    /// recovered endpoints, probes failing endpoints that are due, and raises the "still failing" alert. Only
+    /// deliveries sent with endpoint health tracking create work for it; with none it reads one small table and
+    /// stops. <c>null</c> disables the task (parked deliveries then wait until it is turned back on). Default 30 seconds.
+    /// </summary>
+    public TimeSpan? WebhookEndpointMonitorInterval { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// How long a failing webhook endpoint waits between probes (8.1). A probe re-sends the endpoint's oldest parked
+    /// delivery once; success recovers the endpoint and releases its parked deliveries. "Retry now" on the dashboard
+    /// probes at once. Must be greater than zero. Default 5 minutes.
+    /// </summary>
+    public TimeSpan WebhookEndpointProbeInterval { get; set; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// How long a webhook endpoint must have been failing before the <c>WebhookEndpointStillFailing</c> alert and
+    /// the <c>IWebhookEndpointHealthHandler.OnEndpointStillFailingAsync</c> callback fire, once per failing period
+    /// (8.1). Warp never disables anything itself; this is the host's cue to act on its subscription. Must be greater
+    /// than zero. Default 30 days.
+    /// </summary>
+    public TimeSpan WebhookEndpointStillFailingAfter { get; set; } = TimeSpan.FromDays(30);
 }

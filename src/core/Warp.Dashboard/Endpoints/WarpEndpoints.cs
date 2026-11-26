@@ -1114,6 +1114,50 @@ public static class WarpEndpoints
             };
         });
 
+        apiGroup.MapPost("webhooks/{id}/cancel", async ([FromServices] IWebhookCommandService svc, Guid id, CancellationToken ct) =>
+        {
+            var result = await svc.Cancel(id, ct);
+
+            return result switch
+            {
+                WebhookCancelResult.Cancelled => Results.Ok(),
+                WebhookCancelResult.Rejected => Results.Conflict(
+                    new { message = "Delivery is already settled (delivered, exhausted or cancelled) — only pending or parked deliveries can be cancelled." }),
+                _ => Results.NotFound(),
+            };
+        });
+
+        // Endpoint (delivery group) actions (8.1). The group travels in the query string: a group name is the host's
+        // own identifier and may contain characters that do not survive a path segment.
+        apiGroup.MapPost("webhooks/groups/cancel", async ([FromServices] IWebhookCommandService svc, [FromQuery] string? group, CancellationToken ct) =>
+        {
+            if (string.IsNullOrWhiteSpace(group))
+            {
+                return Results.BadRequest(new { message = "The group query parameter is required." });
+            }
+
+            return Results.Ok(new { cancelled = await svc.CancelGroup(group, ct) });
+        });
+
+        apiGroup.MapPost("webhooks/groups/retry", async ([FromServices] IWebhookCommandService svc, [FromQuery] string? group, CancellationToken ct) =>
+        {
+            if (string.IsNullOrWhiteSpace(group))
+            {
+                return Results.BadRequest(new { message = "The group query parameter is required." });
+            }
+
+            var result = await svc.ProbeEndpoint(group, ct);
+
+            return result switch
+            {
+                WebhookProbeResult.Probing => Results.Ok(),
+                WebhookProbeResult.NotFound => Results.NotFound(new { message = "No endpoint health is recorded for this group." }),
+                WebhookProbeResult.NotFailing => Results.Conflict(new { reason = "healthy", message = "The endpoint is healthy — there is nothing to retry." }),
+                WebhookProbeResult.NothingParked => Results.Conflict(new { reason = "nothing-parked", message = "The endpoint has no parked delivery to re-send; it recovers on its next successful delivery." }),
+                _ => Results.Conflict(new { reason = "unavailable", message = "Retry is unavailable in this process — no webhooks worker is wired here." }),
+            };
+        });
+
         apiGroup.MapGet("services", async ([FromServices] IBackgroundServiceQueryService svc, CancellationToken ct) =>
         {
             var list = await svc.ListAsync(ct);

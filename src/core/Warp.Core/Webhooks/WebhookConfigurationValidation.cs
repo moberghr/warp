@@ -19,5 +19,23 @@ internal static class WebhookConfigurationValidation
                 $"WebhookAttemptTimeout must be at least 1 ms and at most 49 days (was {timeout}); use Timeout.InfiniteTimeSpan "
                 + "to disable the per-attempt timeout.");
         }
+
+        if (configuration.WebhookEndpointProbeInterval <= TimeSpan.Zero)
+        {
+            throw new InvalidOperationException(
+                $"WebhookEndpointProbeInterval must be greater than zero (was {configuration.WebhookEndpointProbeInterval}).");
+        }
+
+        if (configuration.WebhookEndpointStillFailingAfter <= TimeSpan.Zero)
+        {
+            throw new InvalidOperationException(
+                $"WebhookEndpointStillFailingAfter must be greater than zero (was {configuration.WebhookEndpointStillFailingAfter}).");
+        }
+
+        if (configuration.WebhookEndpointMonitorInterval is { } monitor && monitor <= TimeSpan.Zero)
+        {
+            throw new InvalidOperationException(
+                $"WebhookEndpointMonitorInterval must be greater than zero when set (was {monitor}); set it to null to disable the endpoint monitor.");
+        }
     }
 }

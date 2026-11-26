@@ -88,8 +88,47 @@ public sealed class WebhookGroupModel
 
     public int Exhausted { get; set; }
 
+    /// <summary>Deliveries waiting for their endpoint to recover (8.1).</summary>
+    public int Parked { get; set; }
+
+    /// <summary>Deliveries an operator cancelled (8.1).</summary>
+    public int Cancelled { get; set; }
+
     /// <summary>Most recent <c>CreatedAt</c> in the group — drives the newest-activity-first ordering.</summary>
     public DateTime LastActivityAt { get; set; }
+
+    /// <summary>
+    /// Endpoint health (8.1), only when grouping by endpoint and the group has a health record (a tracked delivery to
+    /// it ran out of retries at least once); null otherwise.
+    /// </summary>
+    public WebhookEndpointState? Health { get; set; }
+
+    /// <summary>When the endpoint's current failing period began; null while healthy or untracked.</summary>
+    public DateTime? FailingSince { get; set; }
+
+    /// <summary>When a probe of the failing endpoint is next due; null while healthy or untracked.</summary>
+    public DateTime? NextProbeAt { get; set; }
+
+    /// <summary>
+    /// The newest successful delivery in the group (endpoint grouping only): the later of the health record's
+    /// <c>LastSuccessAt</c> and the newest <c>Delivered</c> row's <c>LastAttemptAt</c>.
+    /// </summary>
+    public DateTime? LastSuccessAt { get; set; }
+
+    /// <summary>The newest failed attempt in the group (endpoint grouping only), same sources as <see cref="LastSuccessAt"/>.</summary>
+    public DateTime? LastFailureAt { get; set; }
+
+    /// <summary>
+    /// Share of the deliveries that settled in the last 24 hours (by <c>LastAttemptAt</c>) that were delivered, out of
+    /// delivered + exhausted + parked; null without any (endpoint grouping only).
+    /// </summary>
+    public double? SuccessRate { get; set; }
+
+    /// <summary>
+    /// 95th percentile of send-to-delivered time, in milliseconds, over the deliveries delivered in the last 24 hours;
+    /// null without any (endpoint grouping only). Includes retries and redeliveries: it is the delay a subscriber saw.
+    /// </summary>
+    public double? P95DeliveryMs { get; set; }
 }
 
 /// <summary>One hourly point of the delivery-statistics time-series (deliveries created that hour, by status).</summary>
@@ -103,6 +142,10 @@ public sealed class WebhookDeliveryHistoryPoint
     public int Exhausted { get; set; }
 
     public int Pending { get; set; }
+
+    public int Parked { get; set; }
+
+    public int Cancelled { get; set; }
 
     public int Total { get; set; }
 }
@@ -131,6 +174,15 @@ public sealed class WebhookDeliveryListItem
     public DateTime? NextAttemptAt { get; set; }
 
     public DateTime CreatedAt { get; set; }
+
+    /// <summary>HTTP status of the last attempt; null without a response or before the first attempt (#357).</summary>
+    public int? LastStatusCode { get; set; }
+
+    /// <summary>Why the last attempt failed; null after a success or before the first attempt (#357).</summary>
+    public WebhookFailureReason? LastFailureReason { get; set; }
+
+    /// <summary>When the last attempt finished (#357).</summary>
+    public DateTime? LastAttemptAt { get; set; }
 }
 
 /// <summary>The delivery detail page payload — the self-contained contract, with secret + headers redacted.</summary>
@@ -173,6 +225,18 @@ public sealed class WebhookDeliveryDetail
 
     public DateTime? ExpireAt { get; set; }
 
+    /// <summary>HTTP status of the last attempt; null without a response or before the first attempt (#357).</summary>
+    public int? LastStatusCode { get; set; }
+
+    /// <summary>Why the last attempt failed; null after a success or before the first attempt (#357).</summary>
+    public WebhookFailureReason? LastFailureReason { get; set; }
+
+    /// <summary>When the last attempt finished (#357).</summary>
+    public DateTime? LastAttemptAt { get; set; }
+
+    /// <summary>Whether the delivery was sent with endpoint health tracking (8.1).</summary>
+    public bool TrackEndpointHealth { get; set; }
+
     /// <summary>
     /// The per-attempt timeline, oldest first. Assembled from the <c>AdapterCallLog</c> rows whose
     /// <c>CorrelationId</c> is this delivery's id (attempts are adapter calls, not a second table); empty
@@ -208,4 +272,8 @@ public sealed class WebhookDeliverySummary
     public int Delivered { get; set; }
 
     public int Exhausted { get; set; }
+
+    public int Parked { get; set; }
+
+    public int Cancelled { get; set; }
 }

@@ -8,7 +8,7 @@ sidebar_position: 6
 
 *unreleased*
 
-Outbound webhook hardening. No migration and no breaking change.
+Outbound webhook hardening and **webhook endpoint health**: endpoints that go down hold their deliveries and catch up by themselves once they are back. **One migration** (additive: five columns on the webhook delivery table and one new table, see [Migration](#migration-81)) and no breaking API change; two behaviour changes for webhooks (redirects and the 30 s attempt timeout, below).
 
 ### Webhooks: bounded attempts
 
@@ -26,6 +26,43 @@ Outbound webhook hardening. No migration and no breaking change.
 ### Webhooks: redeliver with a rotated secret
 
 `IWebhookCommandService.Redeliver(deliveryId, new WebhookRedeliveryOptions { Secret = ... }, ct)` replaces the delivery's stamped signing secret in the same atomic settled→`Pending` flip, so a redelivery after a key rotation is signed with the new key. The new overload has a default implementation, so your own `IWebhookCommandService` implementations keep compiling (with a secret, the default throws `NotSupportedException` rather than signing with the old key). The dashboard's Redeliver is unchanged. See [Redelivery](features/webhooks.md#redelivery).
+
+### Webhooks: endpoint health (opt-in)
+
+`opt.AddWebhooks(w => w.TrackEndpointHealth = true)` tracks the health of each endpoint, where an endpoint is a delivery's `Group` (one group never marks another healthy, even on the same URL; deliveries without a group are not tracked). The choice is stamped on each delivery at `SendAsync`.
+
+- A tracked delivery that runs out of retries marks its group **Failing**. While it fails, deliveries are still sent and retried, and one that runs out of retries is **`Parked`** (new `WebhookDeliveryStatus` value 4) instead of `Exhausted`.
+- The new `WebhookEndpointMonitor` server task probes each failing group every `WebhookEndpointProbeInterval` (5 min) by re-sending its oldest parked delivery once. Any success (the probe, a retry, a new delivery) recovers the group, and the monitor releases its parked deliveries back to `Pending`, oldest first, through the normal queue.
+- Host callbacks through the new `IWebhookEndpointHealthHandler` (`w.OnEndpointHealthChanged<T>()`) and new operational events `WebhookEndpointFailing`, `WebhookEndpointRecovered` and `WebhookEndpointStillFailing` (after `WebhookEndpointStillFailingAfter`, 30 days). Warp never disables anything itself.
+- "Retry now": `IWebhookCommandService.ProbeEndpoint(group)`, `POST {prefix}/api/webhooks/groups/retry?group=…` and a dashboard button.
+- New settings `WebhookEndpointMonitorInterval` (30 s), `WebhookEndpointProbeInterval` (5 min), `WebhookEndpointStillFailingAfter` (30 days).
+
+See [Endpoint health](features/webhooks.md#endpoint-health).
+
+### Webhooks: cancel, dedupe, last attempt
+
+- **Cancel** a `Pending` or `Parked` delivery, or all of a group's: `IWebhookCommandService.Cancel(id)` / `CancelGroup(group)`, `POST {prefix}/api/webhooks/{id}/cancel`, `POST {prefix}/api/webhooks/groups/cancel?group=…`, and dashboard buttons. New status **`Cancelled`** (value 5). See [Cancelling deliveries](features/webhooks.md#cancelling-deliveries).
+- **Dedupe** (opt-in, `w.DeduplicateByEventId = true`): `SendAsync` returns the existing delivery for the same `EventId` and `Url` while it is retained. See [Deduplication](features/webhooks.md#deduplication).
+- **Last attempt** (#357): `LastStatusCode`, `LastFailureReason` (`WebhookFailureReason`) and `LastAttemptAt` on every delivery, in `IWebhookQueryService`, the REST list and detail, and the dashboard. See [Last attempt](features/webhooks.md#last-attempt).
+
+`IWebhookCommandService` gains `Cancel`, `CancelGroup` and `ProbeEndpoint` as default interface members, so an implementation of your own keeps compiling (they throw `NotSupportedException` until you implement them). **If you `switch` over `WebhookDeliveryStatus`, handle `Parked` and `Cancelled`.** `Redeliver` also accepts `Parked` and `Cancelled` deliveries (anything but `Pending`). The retention sweeps skip `Parked` deliveries, like `Pending` ones.
+
+### Webhooks: dashboard
+
+The endpoint table on the Webhooks page is now **Endpoint health**: state, failing since, parked count, last success and failure, success rate and p95 send-to-delivered time over 24 hours, with **Retry now** and **Cancel all**. The delivery list and detail show `Parked` / `Cancelled`, the last attempt's result, and **Cancel**.
+
+### SLO: webhook delivery latency
+
+New objective kind `WebhookDeliveryLatency` (value 12): at least `Percentile`% of an endpoint's deliveries delivered within `TargetValue` minutes of being sent, `Dimension` = the group or `*`. Builder: `o.AddWebhookDeliveryLatency(group, minutes, percentile: 99)`. Read from the delivery rows, so keep the window within `WebhookDeliveryRetention`. See [Webhook delivery latency](features/slo-error-budget.md#webhook-delivery-latency).
+
+### Migration (8.1)
+
+Generate it with your normal `dotnet ef migrations add <Name>` and apply it before any 8.1 process starts (an 8.1 server reads and writes the new columns). It contains, all additive:
+
+- On the webhook delivery table: `LastStatusCode` (int, null), `LastFailureReason` (int, null), `LastAttemptAt` (timestamp, null), `TrackEndpointHealth` (bool, not null, default false), `DedupeKey` (string(64), null), a unique index on `DedupeKey` (filtered to non-null values on SQL Server; PostgreSQL treats nulls as distinct), and an index on `(GroupName, Status, CreatedAt)`.
+- A new table for `WebhookEndpoint` (key `Name`, string(200); `State`, `FailingSince`, `LastSuccessAt`, `LastFailureAt`, `NextProbeAt`, `StillFailingNotifiedAt`, `CreatedAt`) with an index on `(State, NextProbeAt)`.
+
+A rolling deploy from 8.0 is safe after the migration: an 8.0 server ignores the new columns and never parks, and 8.0 deliveries carry `TrackEndpointHealth = false`. While 8.0 servers still run, their retention sweep treats `Parked` as settled and may delete a parked delivery once its `ExpireAt` passes (30 days after it was sent by default). Do not roll back to 8.0 while deliveries are `Parked` or `Cancelled`: 8.0 does not know those statuses.
 
 ## 8.0.0
 
