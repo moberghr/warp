@@ -193,13 +193,18 @@ public sealed class WarpStartupGate : IDisposable
 
     internal static bool IsUnreachableByDefault(Exception exception)
     {
+        // A socket or timeout anywhere in the chain first: a provider exception wrapping one says nothing on its own
+        // (SqlClient on Linux reports a refused port as SqlException, provider error 35, around a SocketException).
         for (var current = exception; current is not null; current = current.InnerException)
         {
             if (current is SocketException or TimeoutException)
             {
                 return true;
             }
+        }
 
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
             if (current is DbException db)
             {
                 return db.IsTransient

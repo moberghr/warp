@@ -195,6 +195,9 @@ public sealed class StartupWithoutDatabaseTests
     {
         WarpStartupGate.IsUnreachableByDefault(new InvalidOperationException("wrapped", new SocketException())).ShouldBeTrue();
         WarpStartupGate.IsUnreachableByDefault(new TimeoutException()).ShouldBeTrue();
+
+        // SqlClient on Linux: a refused port is a SqlException (no SQLSTATE, not transient) around a SocketException.
+        WarpStartupGate.IsUnreachableByDefault(new DatabaseDownException("refused", new SocketException()) { State = null }).ShouldBeTrue();
         WarpStartupGate.IsUnreachableByDefault(new InvalidOperationException("not the database")).ShouldBeFalse();
     }
 
