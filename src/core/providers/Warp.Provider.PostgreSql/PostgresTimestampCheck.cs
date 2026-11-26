@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Warp.Core.Entities;
 
 namespace Warp.Provider.PostgreSql;
@@ -57,17 +58,35 @@ internal static class PostgresTimestampCheck
 
 // Runs the check when the host starts, in every process that uses the provider: a publisher writes the
 // schedule times a server compares, so it is held to the same columns. It reads the model only, no database.
+// A context on another provider (EF in-memory in an application's own tests) has no column types to check
+// (GetColumnType is relational-only), so the check stands down.
 internal sealed class PostgresTimestampCheckService<TContext> : IHostedService
     where TContext : DbContext
 {
     private readonly IServiceScopeFactory _scopes;
+    private readonly ILogger<PostgresTimestampCheckService<TContext>> _logger;
 
-    public PostgresTimestampCheckService(IServiceScopeFactory scopes) => _scopes = scopes;
+    public PostgresTimestampCheckService(IServiceScopeFactory scopes, ILogger<PostgresTimestampCheckService<TContext>> logger)
+    {
+        _scopes = scopes;
+        _logger = logger;
+    }
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
         using var scope = _scopes.CreateScope();
-        PostgresTimestampCheck.Ensure(scope.ServiceProvider.GetRequiredService<TContext>().Model);
+        var context = scope.ServiceProvider.GetRequiredService<TContext>();
+        if (!context.Database.IsNpgsql())
+        {
+            _logger.LogDebug(
+                "Skipping Warp's PostgreSQL timestamp check for {Context}: its provider is {Provider}, not Npgsql.",
+                typeof(TContext).Name,
+                context.Database.ProviderName);
+
+            return Task.CompletedTask;
+        }
+
+        PostgresTimestampCheck.Ensure(context.Model);
 
         return Task.CompletedTask;
     }

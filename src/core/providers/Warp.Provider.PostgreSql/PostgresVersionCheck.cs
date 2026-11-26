@@ -2,6 +2,7 @@ using System.Globalization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Warp.Core;
 
 namespace Warp.Provider.PostgreSql;
@@ -39,16 +40,19 @@ internal static class PostgresVersionCheck
 
 // Runs the check when a Warp server starts. A process that only publishes (AddWarp) claims nothing, so it is
 // left alone. The query goes through the application's context so a host's own data source is honoured.
+// A context on another provider (EF in-memory in an application's own tests) has no server to ask.
 internal sealed class PostgresVersionCheckService<TContext> : IHostedService
     where TContext : DbContext
 {
     private readonly IServiceScopeFactory _scopes;
     private readonly IEnumerable<IWarpServerPresence> _servers;
+    private readonly ILogger<PostgresVersionCheckService<TContext>> _logger;
 
-    public PostgresVersionCheckService(IServiceScopeFactory scopes, IEnumerable<IWarpServerPresence> servers)
+    public PostgresVersionCheckService(IServiceScopeFactory scopes, IEnumerable<IWarpServerPresence> servers, ILogger<PostgresVersionCheckService<TContext>> logger)
     {
         _scopes = scopes;
         _servers = servers;
+        _logger = logger;
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -59,7 +63,18 @@ internal sealed class PostgresVersionCheckService<TContext> : IHostedService
         }
 
         await using var scope = _scopes.CreateAsyncScope();
-        await PostgresVersionCheck.EnsureAsync(scope.ServiceProvider.GetRequiredService<TContext>(), cancellationToken);
+        var context = scope.ServiceProvider.GetRequiredService<TContext>();
+        if (!context.Database.IsNpgsql())
+        {
+            _logger.LogDebug(
+                "Skipping Warp's PostgreSQL version check for {Context}: its provider is {Provider}, not Npgsql.",
+                typeof(TContext).Name,
+                context.Database.ProviderName);
+
+            return;
+        }
+
+        await PostgresVersionCheck.EnsureAsync(context, cancellationToken);
     }
 
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
