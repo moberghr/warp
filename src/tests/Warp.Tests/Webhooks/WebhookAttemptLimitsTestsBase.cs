@@ -116,7 +116,9 @@ public abstract class WebhookAttemptLimitsTestsBase : IntegrationTestBase
                 cfg.AddWebhooks(w => w.PublicAddressesOnly = true);
             });
 
-        var deliveryId = await SendAsync(server, retrySchedule: [], url: "http://127.0.0.1:9/hook");
+        // SendAsync refuses a loopback literal up front when the guard is on (8.1), so the row is staged directly to
+        // exercise the connect-time refusal (a host NAME resolving to loopback takes this path in production).
+        var deliveryId = await StageDeliveryAsync(server, "http://127.0.0.1:9/hook");
 
         await WaitForDeliveryStatusAsync(server, deliveryId, WebhookDeliveryStatus.Exhausted);
 
@@ -129,6 +131,32 @@ public abstract class WebhookAttemptLimitsTestsBase : IntegrationTestBase
     }
 
     private static CancellationToken Ct => Xunit.TestContext.Current.CancellationToken;
+
+    private static async Task<Guid> StageDeliveryAsync(WarpTestServer server, string url)
+    {
+        var deliveryId = Guid.NewGuid();
+        var ctx = server.CreateContext();
+        ctx.Set<WebhookDelivery>().Add(new WebhookDelivery
+        {
+            Id = deliveryId,
+            EventType = "order.created",
+            EventId = Guid.NewGuid().ToString(),
+            Url = url,
+            PayloadJson = "{}",
+            SigningMode = WebhookSigning.None,
+            RetrySchedule = [],
+            Status = WebhookDeliveryStatus.Pending,
+            NextAttemptAt = DateTime.UtcNow,
+            CreatedAt = DateTime.UtcNow,
+        });
+        await ctx.SaveChangesAsync(Ct);
+
+        var publisher = server.CreatePublisher();
+        await publisher.Enqueue(new ExecuteWebhookDelivery { DeliveryId = deliveryId }, WebhookConstants.Queue);
+        await publisher.SaveChangesAsync(Ct);
+
+        return deliveryId;
+    }
 
     private Task<WarpTestServer> StartServerAsync(Action<WarpServerConfiguration> configure, HttpMessageHandler primaryHandler)
     {

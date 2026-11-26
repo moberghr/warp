@@ -158,11 +158,11 @@ public class WebhookAddressGuardTests
     }
 
     [TimedFact]
-    public async Task PublicAddressesOnly_Off_DoesNotInstallTheGuard()
+    public async Task PublicAddressesOnly_OptedOut_DoesNotInstallTheGuard()
     {
-        // Default off: the host's own primary handler is used untouched (local development sends to localhost).
+        // Opted out (local development): the host's own primary handler is used untouched.
         await using var sp = BuildProvider(
-            configureWebhooks: null,
+            w => w.PublicAddressesOnly = false,
             services => services.AddHttpClient(WebhookConstants.AdapterName)
                 .ConfigurePrimaryHttpMessageHandler(() => new StubWebhookHandler(HttpStatusCode.OK)));
 

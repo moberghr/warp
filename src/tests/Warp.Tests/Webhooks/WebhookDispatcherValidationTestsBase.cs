@@ -37,6 +37,45 @@ public abstract class WebhookDispatcherValidationTestsBase : IAsyncLifetime
             await CreateDispatcher().SendAsync(new WebhookSend { Url = "/relative/path", EventType = "order.created" }, Ct));
     }
 
+    [TimedTheory]
+    [InlineData("http://127.0.0.1:8080/hook")]
+    [InlineData("http://10.0.0.5/hook")]
+    [InlineData("http://169.254.169.254/latest/meta-data/")]
+    [InlineData("http://[::1]:9000/hook")]
+    [InlineData("http://[fd00::1]/hook")]
+    [InlineData("http://localhost:5230/hook")]
+    [InlineData("http://api.localhost/hook")]
+    [InlineData("http://localhost.:5230/hook")]
+    public async Task SendAsync_NonPublicLiteralWithTheGuardOn_ThrowsUpFront(string url)
+    {
+        // PublicAddressesOnly is on by default (8.1): a destination that can only be non-public is refused at send.
+        var ex = await Should.ThrowAsync<ArgumentException>(async () =>
+            await CreateDispatcher().SendAsync(new WebhookSend { Url = url, EventType = "order.created" }, Ct));
+
+        ex.Message.ShouldContain("PublicAddressesOnly");
+    }
+
+    [TimedTheory]
+    [InlineData("http://127.0.0.1:8080/hook", false)]
+    [InlineData("http://localhost:5230/hook", false)]
+    [InlineData("https://8.8.8.8/hook", true)]
+    [InlineData("https://hooks.internal.example/hook", true)]
+    public async Task SendAsync_AllowedDestinations_AreStored(string url, bool publicAddressesOnly)
+    {
+        // Opted out, anything goes; with the guard on, a public literal or a host NAME is stored (a name is resolved and
+        // checked by the guard at attempt time, since its DNS answer can change).
+        var ctx = _fixture.CreateContext();
+        var dispatcher = new WebhookDispatcher<TestContext>(
+            ctx,
+            Mock.Of<IPublisher>(),
+            TimeProvider.System,
+            Options.Create(new WarpConfiguration()),
+            Options.Create(new WebhookSendBehavior()),
+            Options.Create(new WebhookAddressPolicy { PublicAddressesOnly = publicAddressesOnly }));
+
+        await Should.NotThrowAsync(async () => await dispatcher.SendAsync(new WebhookSend { Url = url, EventType = "order.created" }, Ct));
+    }
+
     [TimedFact]
     public async Task SendAsync_NonHttpScheme_Throws()
     {
@@ -136,7 +175,8 @@ public abstract class WebhookDispatcherValidationTestsBase : IAsyncLifetime
             Mock.Of<IPublisher>(),
             TimeProvider.System,
             Options.Create(new WarpConfiguration()),
-            Options.Create(new WebhookSendBehavior()));
+            Options.Create(new WebhookSendBehavior()),
+            Options.Create(new WebhookAddressPolicy()));
 
         var id = await dispatcher.SendAsync(
             new WebhookSend
@@ -170,7 +210,8 @@ public abstract class WebhookDispatcherValidationTestsBase : IAsyncLifetime
             Mock.Of<IPublisher>(),
             TimeProvider.System,
             Options.Create(new WarpConfiguration()),
-            Options.Create(new WebhookSendBehavior()));
+            Options.Create(new WebhookSendBehavior()),
+            Options.Create(new WebhookAddressPolicy()));
 
         var id = await dispatcher.SendAsync(
             new WebhookSend
@@ -202,5 +243,6 @@ public abstract class WebhookDispatcherValidationTestsBase : IAsyncLifetime
             Mock.Of<IPublisher>(),
             TimeProvider.System,
             Options.Create(new WarpConfiguration()),
-            Options.Create(new WebhookSendBehavior()));
+            Options.Create(new WebhookSendBehavior()),
+            Options.Create(new WebhookAddressPolicy()));
 }

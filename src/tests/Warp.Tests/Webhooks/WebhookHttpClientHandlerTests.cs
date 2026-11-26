@@ -8,6 +8,7 @@ using Shouldly;
 using Warp.Core;
 using Warp.Core.Webhooks;
 using Warp.Tests.Observability;
+using Warp.Worker;
 
 namespace Warp.Tests.Webhooks;
 
@@ -21,14 +22,42 @@ namespace Warp.Tests.Webhooks;
 public class WebhookHttpClientHandlerTests
 {
     [TimedFact]
-    public void Default_PrimaryHandlerIsSocketsHandlerWithRedirectsOff()
+    public void Default_PrimaryHandlerIsAGuardedSocketsHandlerWithRedirectsOff()
     {
+        // PublicAddressesOnly is on by default since 8.1, without any AddWebhooks call.
         using var sp = BuildProvider(configureWebhooks: null);
 
         var primary = PrimaryHandler(sp).ShouldBeOfType<SocketsHttpHandler>();
 
         primary.AllowAutoRedirect.ShouldBeFalse();
+        primary.ConnectCallback.ShouldNotBeNull();
+    }
+
+    [TimedFact]
+    public void OptedOut_PrimaryHandlerIsUnguarded()
+    {
+        using var sp = BuildProvider(w => w.PublicAddressesOnly = false);
+
+        var primary = PrimaryHandler(sp).ShouldBeOfType<SocketsHttpHandler>();
+
+        primary.AllowAutoRedirect.ShouldBeFalse();
         primary.ConnectCallback.ShouldBeNull();
+    }
+
+    [TimedFact]
+    public void OptedOut_ALaterAddWebhooksWithoutTheSetting_DoesNotTurnTheGuardBackOn()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddDbContext<TestContext>(o => o.UseInMemoryDatabase($"wh-{Guid.NewGuid():N}"));
+        services.AddWarp<TestContext>(x =>
+        {
+            x.AddWebhooks(w => w.PublicAddressesOnly = false);
+            x.AddWebhooks(w => w.TrackEndpointHealth = true);
+        });
+        using var sp = services.BuildServiceProvider();
+
+        PrimaryHandler(sp).ShouldBeOfType<SocketsHttpHandler>().ConnectCallback.ShouldBeNull();
     }
 
     [TimedFact]
@@ -60,9 +89,10 @@ public class WebhookHttpClientHandlerTests
     [TimedFact]
     public void HostPrimaryHandlerRegisteredBeforeAddWarp_IsUsedUntouched()
     {
-        // Warp's default is the FIRST builder action, so a host handler wins in either registration order.
+        // Warp's default is the FIRST builder action, so a host handler wins in either registration order (with the
+        // guard off; with it on, a non-Sockets handler is replaced, covered below).
         using var sp = BuildProvider(
-            configureWebhooks: null,
+            w => w.PublicAddressesOnly = false,
             before: services => services.AddHttpClient(WebhookConstants.AdapterName)
                 .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = true }));
 
@@ -113,7 +143,7 @@ public class WebhookHttpClientHandlerTests
     }
 
     [TimedFact]
-    public async Task PublicAddressesOnly_ReplacedHostHandler_IsReportedAtHostStartup()
+    public async Task PublicAddressesOnly_ReplacedHostHandler_IsReportedOnceTheHostHasStarted()
     {
         var logs = new CapturingLoggerProvider();
         await using var sp = BuildProvider(
@@ -122,15 +152,54 @@ public class WebhookHttpClientHandlerTests
                 .ConfigurePrimaryHttpMessageHandler(() => new StubWebhookHandler(HttpStatusCode.OK)),
             logs: logs);
 
-        var startupCheck = sp.GetServices<IHostedService>().OfType<WebhookClientStartupCheck>().ShouldHaveSingleItem();
+        var startupCheck = ActivatorUtilities.CreateInstance<WebhookClientStartupCheck>(sp);
 
-        await startupCheck.StartAsync(Xunit.TestContext.Current.CancellationToken);
+        await startupCheck.StartedAsync(Xunit.TestContext.Current.CancellationToken);
 
         logs.Logs.Where(x => x.Level == LogLevel.Warning).ShouldHaveSingleItem().Message.ShouldContain("PublicAddressesOnly replaced");
 
         // Later clients reuse the handler; the warning is not repeated.
         sp.GetRequiredService<IHttpClientFactory>().CreateClient(WebhookConstants.AdapterName).Dispose();
         logs.Logs.Count(x => x.Level == LogLevel.Warning).ShouldBe(1);
+    }
+
+    [TimedFact]
+    public async Task StartupCheck_HandlerThatCannotBeBuilt_LogsAndNeverStopsTheHost()
+    {
+        var logs = new CapturingLoggerProvider();
+        await using var sp = BuildProvider(
+            w => w.PublicAddressesOnly = true,
+            after: services => services.AddHttpClient(WebhookConstants.AdapterName)
+                .ConfigurePrimaryHttpMessageHandler(() => throw new InvalidOperationException("not ready")),
+            logs: logs);
+
+        var startupCheck = ActivatorUtilities.CreateInstance<WebhookClientStartupCheck>(sp);
+
+        await Should.NotThrowAsync(() => startupCheck.StartedAsync(Xunit.TestContext.Current.CancellationToken));
+        logs.Logs.ShouldContain(x => x.Level == LogLevel.Warning && x.Message.Contains("could not be built", StringComparison.Ordinal));
+    }
+
+    [TimedFact]
+    public void AddWarpServer_RegistersTheStartupCheckOnlyWithAWorker()
+    {
+        var withWorker = WithContext();
+        withWorker.AddWarpServer<TestContext>(_ => { });
+        var serviceOnly = WithContext();
+        serviceOnly.AddWarpServer<TestContext>(x => x.DisableWorker());
+        var publisherOnly = WithContext();
+        publisherOnly.AddWarp<TestContext>();
+
+        static ServiceCollection WithContext()
+        {
+            var services = new ServiceCollection();
+            services.AddDbContext<TestContext>(o => o.UseInMemoryDatabase($"wh-{Guid.NewGuid():N}"));
+
+            return services;
+        }
+
+        withWorker.Count(x => x.ImplementationType == typeof(WebhookClientStartupCheck)).ShouldBe(1);
+        serviceOnly.ShouldNotContain(x => x.ImplementationType == typeof(WebhookClientStartupCheck));
+        publisherOnly.ShouldNotContain(x => x.ImplementationType == typeof(WebhookClientStartupCheck));
     }
 
     [TimedFact]
@@ -148,11 +217,14 @@ public class WebhookHttpClientHandlerTests
     }
 
     [TimedFact]
-    public void Default_WithoutPublicAddressesOnly_RegistersNoStartupCheck()
+    public void AddWarpTwice_RegistersTheGuardOnce()
     {
-        using var sp = BuildProvider(configureWebhooks: null);
+        var services = new ServiceCollection();
+        services.AddDbContext<TestContext>(o => o.UseInMemoryDatabase($"wh-{Guid.NewGuid():N}"));
+        services.AddWarp<TestContext>();
+        services.AddWarp<TestContext>();
 
-        sp.GetServices<IHostedService>().OfType<WebhookClientStartupCheck>().ShouldBeEmpty();
+        services.Count(x => x.ServiceType == typeof(WebhookHandlerReplacementWarning)).ShouldBe(1);
     }
 
     private static HttpMessageHandler PrimaryHandler(IServiceProvider sp)

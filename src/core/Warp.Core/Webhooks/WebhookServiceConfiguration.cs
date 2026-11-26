@@ -60,9 +60,11 @@ public static class WebhookServiceConfiguration
             x.DeduplicateByEventId |= options.DeduplicateByEventId;
         });
 
-        if (options.PublicAddressesOnly)
+        // Only an explicit setting configures the policy, so a later AddWebhooks call that does not mention it never
+        // undoes an opt-out (or an opt-in) made earlier.
+        if (options.PublicAddressesOnlySet is { } publicAddressesOnly)
         {
-            WebhookHttpClientSetup.AddPublicAddressGuard(builder.Services);
+            builder.Services.Configure<WebhookAddressPolicy>(x => x.PublicAddressesOnly = publicAddressesOnly);
         }
 
         return builder;
@@ -112,28 +114,35 @@ public sealed class WarpWebhookOptions
         => EndpointHealthHandlerType = typeof(THandler);
 
     /// <summary>
-    /// When <see langword="true"/>, webhook attempts connect only to publicly routable addresses: the
-    /// <c>warp-webhooks</c> client resolves the destination host itself, drops every loopback, private,
-    /// link-local (including cloud metadata at 169.254.169.254), shared, documentation, multicast and
-    /// reserved address (see <see cref="WebhookAddressGuard.IsPublic"/>), and connects to exactly the
-    /// addresses that passed — redirects included. A host that resolves to no public address fails the
-    /// attempt with a <see cref="WebhookAddressNotPublicException"/> (retried per the schedule like any
-    /// failed attempt). Default <see langword="false"/>, so local development can send to <c>localhost</c>.
+    /// Whether webhook attempts connect only to publicly routable addresses. <b>On by default since 8.1</b>: a
+    /// delivery URL usually comes from a customer, and without the guard it could point at <c>localhost</c>, a private
+    /// network or a cloud metadata endpoint. The <c>warp-webhooks</c> client resolves the destination host itself,
+    /// drops every loopback, private, link-local (including 169.254.169.254), shared, documentation, multicast and
+    /// reserved address (see <see cref="WebhookAddressGuard.IsPublic"/>), and connects to exactly the addresses that
+    /// passed — redirects included. A host that resolves to no public address fails the attempt with a
+    /// <see cref="WebhookAddressNotPublicException"/> (retried per the schedule). In the sending process,
+    /// <c>SendAsync</c> also rejects a URL whose host is a non-public IP literal or <c>localhost</c> with an
+    /// <see cref="ArgumentException"/>. Set it to <see langword="false"/> for local development and for tests that
+    /// stub the client: with the guard on, a stub primary handler is replaced (see below).
     /// <para>
-    /// <b>With an HTTP proxy</b> (an explicit <c>Proxy</c>, or the system proxy from <c>HTTP_PROXY</c> /
-    /// <c>HTTPS_PROXY</c>) the client connects to the proxy, so the guard checks the proxy's address and
-    /// the proxy must enforce the policy for the destination. A proxy on a private address is refused.
+    /// It applies per process: the attempt is guarded by the process that runs it, so leave it on in every server that
+    /// runs a worker. <b>With an HTTP proxy</b> (an explicit <c>Proxy</c>, or <c>HTTP_PROXY</c> / <c>HTTPS_PROXY</c>)
+    /// the client connects to the proxy, so the guard checks the proxy's address and the proxy must enforce the policy.
     /// </para>
     /// <para>
     /// The guard needs a <see cref="SocketsHttpHandler"/> primary handler. Configure that client with
     /// <c>UseSocketsHttpHandler(...)</c>: its settings are kept, except a host <c>ConnectCallback</c>, which the
-    /// guard replaces. A primary handler of another type (for example an <c>HttpClientHandler</c> carrying a
-    /// proxy or client certificates) is replaced by Warp's default handler, and a Warning is logged once.
-    /// Set it on <b>every server that runs a worker</b>: the attempt runs wherever the executor job is
-    /// picked up, and the guard lives on that process's client.
+    /// guard replaces. A primary handler of another type (an <c>HttpClientHandler</c> carrying a proxy or client
+    /// certificates, a test stub) is replaced by Warp's default handler, and a Warning is logged once.
     /// </para>
     /// </summary>
-    public bool PublicAddressesOnly { get; set; }
+    public bool PublicAddressesOnly
+    {
+        get => PublicAddressesOnlySet ?? true;
+        set => PublicAddressesOnlySet = value;
+    }
+
+    internal bool? PublicAddressesOnlySet { get; private set; }
 
     /// <summary>
     /// Registers the host callback invoked once when a delivery exhausts its retry schedule. Equivalent

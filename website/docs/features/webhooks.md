@@ -56,6 +56,19 @@ builder.Services.AddWarpServer<AppDbContext>(opt =>
 
 Webhooks **execute jobs**, so a Warp server (worker) must run somewhere in the deployment to drain the `warp:webhooks` queue. Because delivery is a Core feature, **every `AddWarpServer` with a worker drains it** — there is no per-server opt-in to remember. The publisher process that calls `SendAsync` need not be the worker; the delivery row and executor job commit through the outbox and any server in the cluster picks the job up. An `AddWarp`-only publisher/dashboard process stages deliveries and relies on a server elsewhere to run them.
 
+### Webhook workers
+
+Attempts wait on other people's servers, up to `WebhookAttemptTimeout` (30 s) each, so since 8.1 **every server runs them on a dedicated worker group** that polls only `warp:webhooks`, with `WebhookWorkerCount` workers (default **4**), and the default worker group no longer polls `warp:webhooks`. A receiver that hangs can hold at most those workers; your jobs keep their own. It also caps concurrent attempts per server: with 4 workers and receivers that answer in 200 ms, a server sends about 20 deliveries a second, so raise it for high webhook volume (or add servers).
+
+```csharp
+builder.Services.AddWarpServer<AppDbContext>(opt =>
+{
+    opt.WebhookWorkerCount = 8; // 0 = the pre-8.1 shape: the default group drains warp:webhooks
+});
+```
+
+The group takes the top-level polling settings and no prefetch. It shows on the dashboard like any worker group, its workers count in the server's worker total, and it is paused on its own: **pausing the default group no longer stops webhook delivery** (pause the webhook group as well, or the whole server). A group listing `warp:webhooks` with no workers does not count as routing it. If you route `warp:webhooks` yourself (listed in `Queues`, or in an `AddWorkerGroup(...)` group), that wins: no dedicated group is added, and with an explicit group listing it the default group does not poll it either.
+
 ### Sending
 
 Inject `IWebhookDispatcher` and hand it a fully-described `WebhookSend`. `SendAsync` persists a `Pending` delivery row and enqueues the first attempt — both in the caller's transaction (outbox), so the delivery becomes visible atomically with your own writes — and returns the delivery id (the value used as the adapter `CorrelationId`):
@@ -161,23 +174,29 @@ The timeout is a cancellation token, not `HttpClient.Timeout`, so a `warp-webhoo
 
 ## Public addresses only
 
-A webhook URL usually comes from a customer, so by default nothing stops it from pointing at `localhost`, a private network or a cloud metadata endpoint (`169.254.169.254`). Turn on `PublicAddressesOnly` in production:
+A webhook URL usually comes from a customer, and nothing about a URL stops it from pointing at `localhost`, a private network or a cloud metadata endpoint (`169.254.169.254`). **Since 8.1 `PublicAddressesOnly` is on by default**, in every process, with or without `AddWebhooks`. Turn it off only for local development (a receiver on `localhost`) and in tests that stub the client:
 
 ```csharp
-opt.AddWebhooks(w => w.PublicAddressesOnly = true);
+opt.AddWebhooks(w => w.PublicAddressesOnly = false); // local development only
 ```
+
+Only an explicit setting changes it: a later `AddWebhooks(...)` call that does not mention it leaves an earlier opt-out in place.
 
 With it on, the `warp-webhooks` client's primary handler is a `SocketsHttpHandler` whose `ConnectCallback` resolves the host, drops every address that is not publicly routable and connects to exactly the addresses that passed. The address checked is the address connected to, so a DNS answer that changes between a check and the connection (DNS rebinding) cannot get through, and a redirect opens its connection through the same callback. A host that resolves to no public address fails the attempt with `WebhookAddressNotPublicException` ("Webhook host '…' does not resolve to a public address."); the resolved addresses are never logged or recorded. Like any failed attempt it is retried per the schedule, so validate URLs when subscriptions are created as well.
 
+**Refused up front where it is certain.** In a process with the guard on, `SendAsync` throws `ArgumentException` for a URL whose host is a non-public **IP literal** (`http://10.0.0.5/…`, `http://[::1]/…`, `http://169.254.169.254/…`) or `localhost` (and any name under `.localhost`). A host **name** is accepted and checked at attempt time, because its DNS answer can change between send and attempt.
+
 Refused ranges, from the IANA IPv4 and IPv6 special-purpose address registries (RFC 6890 and its successors): `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10`, `127.0.0.0/8`, `169.254.0.0/16`, `172.16.0.0/12`, `192.0.0.0/24`, `192.0.2.0/24`, `192.88.99.0/24`, `192.168.0.0/16`, `198.18.0.0/15`, `198.51.100.0/24`, `203.0.113.0/24`, `224.0.0.0/4` and everything above it (multicast, `240.0.0.0/4`, broadcast); for IPv6 everything outside `2000::/3` (which covers `::`, `::1`, `fc00::/7`, `fe80::/10`, `fec0::/10`, `ff00::/8`, `64:ff9b:1::/48`, `100::/64`), plus `2001::/23`, `2001:db8::/32` and `3fff::/20`. IPv4-mapped (`::ffff:0:0/96`), NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`) addresses are judged by the IPv4 address they embed. The classification is public as `WebhookAddressGuard.IsPublic(IPAddress)`, so you can run the same check when a subscription is saved.
 
-It is off by default so local development can send to `localhost`.
+**It applies per process.** The guard sits on the `warp-webhooks` client of the process that runs the attempt, which is whichever server picks up the executor job. Keep it on (the default) in every server that runs a worker; an opt-out on the API process that calls `SendAsync` only relaxes the up-front check there.
 
-**Set it on every server that runs a worker.** The guard is installed on the `warp-webhooks` client of the process that calls `AddWebhooks`, and an attempt runs on whichever server picks up the executor job. Turning it on only in the API process that calls `SendAsync` protects nothing; call `opt.AddWebhooks(w => w.PublicAddressesOnly = true)` inside every `AddWarpServer` (with a worker) in the deployment.
+**Upgrading a client you configured yourself.** A `warp-webhooks` primary handler that is not a `SocketsHttpHandler` (an `HttpClientHandler` carrying a proxy or client certificates) is replaced by the guard on upgrade, with a Warning; move its settings into `UseSocketsHttpHandler`, or opt out.
+
+**Tests that stub the client.** With the guard on, a stub primary handler (`ConfigurePrimaryHttpMessageHandler(() => new MyStub())`) is not a `SocketsHttpHandler`, so it is replaced by Warp's guarded handler (with the Warning below) and your test talks to the network instead of the stub. Set `PublicAddressesOnly = false` in those tests.
 
 **With an HTTP proxy** (an explicit `Proxy`, or the system proxy from `HTTP_PROXY` / `HTTPS_PROXY`), the client connects to the proxy, not to the destination. The guard then checks the proxy's address — a proxy on a private address is refused — and **the proxy must enforce the policy** for the destination itself.
 
-**Configuring the client yourself.** Configure the `warp-webhooks` client with `UseSocketsHttpHandler((handler, _) => ...)`; it composes with the guard and every setting you make is kept, except a `ConnectCallback` of your own, which the guard replaces. A primary handler of any other type (for example an `HttpClientHandler` you set with `ConfigurePrimaryHttpMessageHandler` to carry a proxy or client certificates), registered before or after `AddWebhooks`, cannot carry the guard: it is replaced by Warp's default `SocketsHttpHandler` (redirects off) and **its settings are lost**. Warp logs one Warning at startup naming the `warp-webhooks` client and the replaced handler type. Move those settings into `UseSocketsHttpHandler`.
+**Configuring the client yourself.** Configure the `warp-webhooks` client with `UseSocketsHttpHandler((handler, _) => ...)`; it composes with the guard and every setting you make is kept, except a `ConnectCallback` of your own, which the guard replaces. A primary handler of any other type (for example an `HttpClientHandler` you set with `ConfigurePrimaryHttpMessageHandler` to carry a proxy or client certificates), registered before or after `AddWebhooks`, cannot carry the guard: it is replaced by Warp's default `SocketsHttpHandler` (redirects off) and **its settings are lost**. Warp logs one Warning at startup naming the `warp-webhooks` client and the replaced handler type. Move those settings into `UseSocketsHttpHandler`. The startup check never stops the host: if your handler can only be built after startup, the guard is applied when it is first built.
 
 ## Signing
 

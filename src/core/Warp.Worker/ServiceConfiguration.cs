@@ -68,6 +68,12 @@ public static class ServiceConfiguration
 
         WebhookConfigurationValidation.Validate(builder);
 
+        if (builder.WebhookWorkerCount < 0)
+        {
+            throw new InvalidOperationException(
+                $"WebhookWorkerCount must be zero or greater (was {builder.WebhookWorkerCount}); 0 lets the default worker group drain warp:webhooks.");
+        }
+
         // Fail fast on the contradictory "run the worker, but with zero workers" shape. Without
         // this, such a server registers the worker hosts and all job-orchestration tasks (taking
         // distributed locks, routing messages, activating scheduled jobs) yet never fetches a
@@ -195,6 +201,10 @@ public static class ServiceConfiguration
         // Webhook endpoint health (8.1): releases parked deliveries of recovered endpoints and probes failing ones.
         // Job-only because it stages executor jobs; any server with a worker runs it.
         services.AddScoped<IServerTask, WebhookEndpointMonitor<TContext>>();
+
+        // Applies the public-address guard to the warp-webhooks handler once the host has started, so a replaced host
+        // handler is reported at startup. Only where attempts run.
+        services.AddHostedService<WebhookClientStartupCheck>();
         services.AddScoped<IServerTask, BacklogSampler<TContext>>();
         services.AddScoped<IServerTask, RecurringJobScheduler<TContext>>();
         services.AddScoped<IServerTask, ScheduledJobActivation<TContext>>();

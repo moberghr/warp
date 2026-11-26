@@ -2,11 +2,13 @@ using System.Net.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Http;
+using Microsoft.Extensions.Options;
 
 namespace Warp.Core.Webhooks;
 
-// Registration of the "warp-webhooks" named HttpClient: Core's default primary handler (redirects off) and
-// the opt-in public-address guard.
+// Registration of the "warp-webhooks" named HttpClient: Core's default primary handler (redirects off) and the
+// public-address guard, on by default since 8.1 (WebhookAddressPolicy; AddWebhooks(w => w.PublicAddressesOnly = false)
+// turns it off for local development).
 internal static class WebhookHttpClientSetup
 {
     // Registered by AddWarp. The default handler is installed by the FIRST builder action (inserted at index
@@ -19,14 +21,16 @@ internal static class WebhookHttpClientSetup
         services.Configure<HttpClientFactoryOptions>(
             WebhookConstants.AdapterName,
             x => x.HttpMessageHandlerBuilderActions.Insert(0, y => y.PrimaryHandler = CreateDefaultHandler()));
-    }
 
-    // Registered by AddWebhooks(w => w.PublicAddressesOnly = true). PostConfigure runs after every
-    // Configure, so the guard sees the final primary handler whatever order the host registered things in.
-    internal static void AddPublicAddressGuard(IServiceCollection services)
-    {
+        // The guard, once per service collection (AddWarp can run twice). PostConfigure runs after every Configure, so
+        // it sees the final primary handler whatever order the host registered things in; it reads the policy when the
+        // handler is built, so an AddWebhooks opt-out registered later still applies.
+        if (services.Any(x => x.ServiceType == typeof(WebhookHandlerReplacementWarning)))
+        {
+            return;
+        }
+
         services.TryAddSingleton<WebhookHandlerReplacementWarning>();
-        services.AddHostedService<WebhookClientStartupCheck>();
         services.PostConfigure<HttpClientFactoryOptions>(
             WebhookConstants.AdapterName,
             x => x.HttpMessageHandlerBuilderActions.Add(ApplyPublicAddressGuard));
@@ -42,6 +46,11 @@ internal static class WebhookHttpClientSetup
     // asked for must never be silently dropped, and lost proxy or certificate settings must not be silent.
     private static void ApplyPublicAddressGuard(HttpMessageHandlerBuilder builder)
     {
+        if (!builder.Services.GetRequiredService<IOptions<WebhookAddressPolicy>>().Value.PublicAddressesOnly)
+        {
+            return;
+        }
+
         if (builder.PrimaryHandler is not SocketsHttpHandler sockets)
         {
             builder.Services.GetRequiredService<WebhookHandlerReplacementWarning>()

@@ -24,14 +24,17 @@ internal sealed class WebhookDispatcher<TContext> : IWebhookDispatcher
     private readonly TimeProvider _timeProvider;
     private readonly WarpConfiguration _configuration;
     private readonly WebhookSendBehavior _behavior;
+    private readonly bool _publicAddressesOnly;
 
     public WebhookDispatcher(
         TContext context,
         IPublisher publisher,
         TimeProvider timeProvider,
         IOptions<WarpConfiguration> configuration,
-        IOptions<WebhookSendBehavior> behavior)
+        IOptions<WebhookSendBehavior> behavior,
+        IOptions<WebhookAddressPolicy> addressPolicy)
     {
+        _publicAddressesOnly = addressPolicy.Value.PublicAddressesOnly;
         _context = context;
         _publisher = publisher;
         _timeProvider = timeProvider;
@@ -58,6 +61,17 @@ internal sealed class WebhookDispatcher<TContext> : IWebhookDispatcher
                 && !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.Ordinal)))
         {
             throw new ArgumentException("WebhookSend.Url must be an absolute http or https URL.", nameof(send));
+        }
+
+        // With the public-address guard on in this process, a destination that can only be non-public is refused
+        // here, where the caller gets a clear error, instead of failing every attempt. A host NAME is resolved at
+        // attempt time by the guard (a DNS answer can change); only literals and localhost are known now.
+        if (_publicAddressesOnly && IsNonPublicLiteral(uri))
+        {
+            throw new ArgumentException(
+                $"WebhookSend.Url host '{uri.Host}' is not a public address, and PublicAddressesOnly is on. "
+                + "Use a public destination, or set AddWebhooks(w => w.PublicAddressesOnly = false) for local development.",
+                nameof(send));
         }
 
         if (send.Url.Length > WebhookColumnCaps.Url)
@@ -148,6 +162,20 @@ internal sealed class WebhookDispatcher<TContext> : IWebhookDispatcher
         await _publisher.SaveChangesAsync(cancellationToken);
 
         return delivery.Id;
+    }
+
+    private static bool IsNonPublicLiteral(Uri uri)
+    {
+        if (uri.HostNameType is UriHostNameType.IPv4 or UriHostNameType.IPv6)
+        {
+            return System.Net.IPAddress.TryParse(uri.IdnHost, out var address) && !WebhookAddressGuard.IsPublic(address);
+        }
+
+        // RFC 6761: localhost and every name under it resolve to loopback (a trailing root dot is the same name).
+        var host = uri.IdnHost.TrimEnd('.');
+
+        return string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase)
+            || host.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string Clamp(string value, int max)
