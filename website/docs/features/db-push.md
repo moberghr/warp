@@ -37,7 +37,7 @@ The provider-specific transport is wired by whichever `UsePostgreSql()` / `UseSq
 | `MessageRouter`              | `MessageEnqueued`                 | &lt;50ms        |
 | `Orchestrator`               | `JobFinalized`                    | &lt;50ms        |
 
-A cross-process `JobEnqueued` wakes workers in both modes: the listener wakes the dispatcher **and** signals every bare worker of the process. In dispatcher mode (the default) one fetch hands out the work; with `UseDispatcher = false` every bare worker of the process wakes at once and each fetches for itself. Push is not "without effect" in either mode.
+A cross-process `JobEnqueued` wakes workers in both modes, but only in the worker groups that drain the notification's queue (since 8.1): the listener wakes those groups' dispatchers **and** signals their bare workers. In dispatcher mode (the default) one fetch per group hands out the work; with `UseDispatcher = false` every bare worker of those groups wakes at once and each fetches for itself. A group whose queues do not include the queue is not woken, so it runs no claim against a queue it would find empty. Push is not "without effect" in either mode.
 
 ## Which Saves Send a Notification
 
