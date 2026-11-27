@@ -10,54 +10,82 @@ namespace Warp.Worker;
 /// <para>
 /// Exposed to the Core notification listener through the <see cref="IDispatcherWake"/> seam so the
 /// listener can wake dispatchers on a cross-process push without <c>Warp.Core</c> depending on
-/// <c>Warp.Worker</c> (§0.5).
+/// <c>Warp.Worker</c> (§0.5). Each dispatcher registers with its group's queues, so a push for one
+/// queue wakes only the groups that drain it.
 /// </para>
 /// </summary>
 public sealed class DispatcherRegistry : IDispatcherWake
 {
-    private readonly List<SemaphoreSlim> _signals = [];
+    private readonly List<Registration> _registrations = [];
     private readonly Lock _lock = new();
 
-    public IDisposable Register(SemaphoreSlim signal)
-    {
-        lock (_lock)
-        {
-            _signals.Add(signal);
-        }
-
-        return new Registration(this, signal);
-    }
+    /// <summary>
+    /// Registers a dispatcher's wake semaphore for every queue: it is woken by every push.
+    /// </summary>
+    public IDisposable Register(SemaphoreSlim signal) => Add(new Registration(this, signal, null));
 
     /// <summary>
-    /// Wakes every registered dispatcher — used by the notification listener so a
-    /// <see cref="Warp.Core.Notifications.NotificationKind.JobEnqueued"/> push shortcuts the
-    /// current exponential-backoff sleep.
+    /// Registers a dispatcher's wake semaphore for the given <paramref name="queues"/> (exact, ordinal
+    /// match): <see cref="Signal"/> for another queue does not wake it.
     /// </summary>
-    public void SignalAll()
+    public IDisposable Register(SemaphoreSlim signal, IReadOnlyCollection<string> queues) =>
+        Add(new Registration(this, signal, new HashSet<string>(queues, StringComparer.Ordinal)));
+
+    /// <summary>
+    /// Wakes every registered dispatcher — used when the caller cannot say which queue has work
+    /// (the notification listener's reconnect drain).
+    /// </summary>
+    public void SignalAll() => Signal(null);
+
+    /// <summary>
+    /// Wakes the registered dispatchers that drain <paramref name="queue"/>, so a
+    /// <see cref="NotificationKind.JobEnqueued"/> push shortcuts their exponential-backoff sleep. A null
+    /// <paramref name="queue"/> wakes every dispatcher.
+    /// </summary>
+    public void Signal(string? queue)
     {
         lock (_lock)
         {
-            foreach (var signal in _signals)
+            foreach (var registration in _registrations)
             {
-                if (signal.CurrentCount == 0)
+                if (queue is not null && registration.Queues is { } queues && !queues.Contains(queue))
                 {
-                    signal.Release();
+                    continue;
+                }
+
+                if (registration.Semaphore.CurrentCount == 0)
+                {
+                    registration.Semaphore.Release();
                 }
             }
         }
     }
 
-    private void Unregister(SemaphoreSlim signal)
+    private Registration Add(Registration registration)
     {
         lock (_lock)
         {
-            _signals.Remove(signal);
+            _registrations.Add(registration);
+        }
+
+        return registration;
+    }
+
+    private void Unregister(Registration registration)
+    {
+        lock (_lock)
+        {
+            _registrations.Remove(registration);
         }
     }
 
-    private sealed class Registration(DispatcherRegistry registry, SemaphoreSlim signal) : IDisposable
+    private sealed class Registration(DispatcherRegistry registry, SemaphoreSlim signal, HashSet<string>? queues) : IDisposable
     {
         private bool _disposed;
+
+        public SemaphoreSlim Semaphore => signal;
+
+        public HashSet<string>? Queues => queues;
 
         public void Dispose()
         {
@@ -67,7 +95,7 @@ public sealed class DispatcherRegistry : IDispatcherWake
             }
 
             _disposed = true;
-            registry.Unregister(signal);
+            registry.Unregister(this);
         }
     }
 }

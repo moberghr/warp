@@ -22,7 +22,7 @@ public sealed class ServerTaskSignals<TContext>
 {
     private readonly List<Action> _jobFinalizedWakers = [];
     private readonly List<Action> _messageEnqueuedWakers = [];
-    private readonly List<Action> _jobEnqueuedWakers = [];
+    private readonly List<Action<string?>> _jobEnqueuedWakers = [];
     private readonly List<Action<string>> _backgroundServiceLeaseLostWakers = [];
     private const int MaxFinalizedParents = 10_000;
 
@@ -225,12 +225,15 @@ public sealed class ServerTaskSignals<TContext>
     public void SignalMessageEnqueued() => Fire(_messageEnqueuedWakers);
 
     /// <summary>
-    /// Called when a <c>Kind=Job</c> row is enqueued or activated — wakes all subscribers to
-    /// <see cref="ServerTaskSignal.JobEnqueued"/>. Bare workers and dispatchers subscribe so they
-    /// bypass exponential-backoff sleep when work appears, both for local enqueues and (when DB
-    /// push is enabled) for cross-server pushes drained by <c>NotificationListenerTask</c>.
+    /// Called when a <c>Kind=Job</c> row is enqueued or activated — wakes the subscribers to
+    /// <see cref="ServerTaskSignal.JobEnqueued"/> that drain <paramref name="queue"/>. Bare workers and
+    /// dispatchers subscribe with their group's queues (<see cref="SubscribeJobEnqueued"/>) so they bypass
+    /// exponential-backoff sleep when work appears on a queue they claim, both for local enqueues and (when
+    /// DB push is enabled) for cross-server pushes drained by <c>NotificationListenerTask</c>. A null
+    /// <paramref name="queue"/> (the sender cannot say, e.g. a reconnect drain) wakes every subscriber;
+    /// a subscriber registered through <see cref="Subscribe(ServerTaskSignal, Action)"/> is woken for every queue.
     /// </summary>
-    public void SignalJobEnqueued() => Fire(_jobEnqueuedWakers);
+    public void SignalJobEnqueued(string? queue = null) => FireWithPayload(_jobEnqueuedWakers, queue);
 
     /// <summary>
     /// Subscribe <paramref name="wake"/> to the given channel. Dispose the returned handle to
@@ -241,9 +244,28 @@ public sealed class ServerTaskSignals<TContext>
     {
         ServerTaskSignal.JobFinalized => Subscribe(_jobFinalizedWakers, wake),
         ServerTaskSignal.MessageEnqueued => Subscribe(_messageEnqueuedWakers, wake),
-        ServerTaskSignal.JobEnqueued => Subscribe(_jobEnqueuedWakers, wake),
+        ServerTaskSignal.JobEnqueued => SubscribeWithPayload(_jobEnqueuedWakers, _ => wake()),
         _ => throw new ArgumentOutOfRangeException(nameof(channel), channel, "Unknown server-task signal channel."),
     };
+
+    /// <summary>
+    /// Subscribe <paramref name="wake"/> to <see cref="ServerTaskSignal.JobEnqueued"/> for the given
+    /// <paramref name="queues"/> only (exact, ordinal match): an enqueue to any other queue does not wake
+    /// it, so a worker group is not sent to claim from queues it would find empty. A signal that names no
+    /// queue still wakes it. Dispose the returned handle to unregister.
+    /// </summary>
+    public IDisposable SubscribeJobEnqueued(IEnumerable<string> queues, Action wake)
+    {
+        var drained = new HashSet<string>(queues, StringComparer.Ordinal);
+
+        return SubscribeWithPayload(_jobEnqueuedWakers, x =>
+        {
+            if (x is null || drained.Contains(x))
+            {
+                wake();
+            }
+        });
+    }
 
     /// <summary>
     /// Called by <c>Heartbeat</c> when a singleton lease held by this server was not renewed
@@ -271,14 +293,14 @@ public sealed class ServerTaskSignals<TContext>
         return new Subscription(list, wake, _gate);
     }
 
-    private PayloadSubscription<string> SubscribeWithPayload(List<Action<string>> list, Action<string> wake)
+    private PayloadSubscription<T> SubscribeWithPayload<T>(List<Action<T>> list, Action<T> wake)
     {
         lock (_gate)
         {
             list.Add(wake);
         }
 
-        return new PayloadSubscription<string>(list, wake, _gate);
+        return new PayloadSubscription<T>(list, wake, _gate);
     }
 
     private void Fire(List<Action> list)
@@ -295,9 +317,9 @@ public sealed class ServerTaskSignals<TContext>
         }
     }
 
-    private void FireWithPayload(List<Action<string>> list, string payload)
+    private void FireWithPayload<T>(List<Action<T>> list, T payload)
     {
-        Action<string>[] snapshot;
+        Action<T>[] snapshot;
         lock (_gate)
         {
             snapshot = [.. list];
