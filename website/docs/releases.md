@@ -6,9 +6,9 @@ sidebar_position: 6
 
 ## 8.1.0
 
-*unreleased*
+*2026-11-27*
 
-Outbound webhook hardening and **webhook endpoint health**: endpoints that go down hold their deliveries and catch up by themselves once they are back. **One migration** (additive: five columns on the webhook delivery table, one new table and three indexes, see [Migration](#migration-81)) and no breaking API change; **four behaviour changes for webhooks** (see below), each marked *Behaviour change* with its one-line way back. Applications can also boot their own test hosts without Warp getting in the way (`RemoveWarpHostedServices()`, `RequireDatabaseAtStartup = false`). Also **security hardening** of the dashboard, `Warp.Http`, adapters and concurrency locks, with several behaviour changes of its own; see [Security hardening](#security-hardening).
+Outbound webhook hardening and **webhook endpoint health**: endpoints that go down hold their deliveries and catch up by themselves once they are back. **One migration** (additive: five columns on the webhook delivery table, one new table and four indexes, see [Migration](#migration-81)), one binary-breaking API change (`MapWarpHttp()` returns a convention builder, so a library compiled against 8.0 that calls it must be rebuilt; see [Security hardening](#security-hardening)) and otherwise no breaking API change; **four behaviour changes for webhooks** (see below), each marked *Behaviour change* with its one-line way back. Applications can also boot their own test hosts without Warp getting in the way (`RemoveWarpHostedServices()`, `RequireDatabaseAtStartup = false`). Also **security hardening** of the dashboard, `Warp.Http`, adapters and concurrency locks, with several behaviour changes of its own; see [Security hardening](#security-hardening).
 
 ### Webhooks: bounded attempts
 
@@ -36,6 +36,12 @@ Outbound webhook hardening and **webhook endpoint health**: endpoints that go do
 **Behaviour change.** Webhook attempts now run on a dedicated worker group with `WebhookWorkerCount` workers (default 4), and the default group no longer polls `warp:webhooks`, so a slow or hanging receiver cannot starve your job workers. It also caps concurrent attempts per server at that count: raise it for high webhook volume, or set `0` to go back to the shared shape. The new group is a worker group like any other: a server's reported worker count includes its workers, and **pausing the default group no longer pauses webhook delivery** — pause the webhook group too, or the server. Routing `warp:webhooks` yourself (in `Queues` or an `AddWorkerGroup` group) still wins. See [Webhook workers](features/webhooks.md#webhook-workers).
 
 **To go back:** `opt.WebhookWorkerCount = 0` (the default group drains `warp:webhooks` again, alongside your jobs).
+
+### An enqueue wakes only the groups that drain its queue
+
+A newly enqueued job now wakes only the local worker groups whose queues include the job's queue, in-process and on a cross-process push alike. Before, it woke every group, so with the dedicated webhook group every job a handler enqueued also sent the webhook group to claim from its empty queue: in the handler-staged benchmark about one extra statement, command and transaction per job, gone again in this release (fan-out is back at 8.0.0's 10.6 statements per job). A wake that names no queue, such as the push listener's reconnect drain, still wakes every group.
+
+For code that hooks the wake: `ServerTaskSignals.SignalJobEnqueued(string? queue = null)` takes the queue, `ServerTaskSignals.SubscribeJobEnqueued(queues, wake)` subscribes to some queues only (the existing `Subscribe(ServerTaskSignal.JobEnqueued, ...)` still hears every queue), and `IDispatcherWake` gains `Signal(string? queue)`, a default method that calls `SignalAll()`, so existing implementations still compile.
 
 ### Webhooks: public-address guard details
 
