@@ -34,6 +34,9 @@ namespace Warp.Tests.Fixtures;
 /// </summary>
 public class WarpTestServer : IAsyncDisposable
 {
+    // The host's own default ShutdownTimeout.
+    internal static readonly TimeSpan StopBudget = TimeSpan.FromSeconds(30);
+
     private readonly IHost _host;
     private readonly IDatabaseFixture _fixture;
 
@@ -381,16 +384,27 @@ public class WarpTestServer : IAsyncDisposable
             ServerLifecycleTrace.Record(serverId, "SqlServer pool warm-up returned");
         }
 
-        ServerLifecycleTrace.Record(serverId, "IHost.StartAsync starting");
-        await host.StartAsync(Xunit.TestContext.Current.CancellationToken);
-        ServerLifecycleTrace.Record(serverId, "IHost.StartAsync returned");
+        // Registered before the start, so a start that fails or is cancelled part way (a timed-out test)
+        // still stops the services it already started before the next test resets the database.
+        RunningTestServers.Started(fixture, serverId);
+        try
+        {
+            ServerLifecycleTrace.Record(serverId, "IHost.StartAsync starting");
+            await host.StartAsync(Xunit.TestContext.Current.CancellationToken);
+            ServerLifecycleTrace.Record(serverId, "IHost.StartAsync returned");
 
-        // Gate test return on the push listener finishing its registration (Postgres LISTEN on
-        // the wire / SQL Server Service Broker setup done). Without this the first publish
-        // races the listener and can be silently dropped — see issue #201. NullNotificationTransport
-        // completes ListenerReady immediately, so tests not using push pay nothing.
-        var transport = host.Services.GetRequiredService<IWarpNotificationTransport>();
-        await transport.ListenerReady.WaitAsync(TimeSpan.FromSeconds(10), Xunit.TestContext.Current.CancellationToken);
+            // Gate test return on the push listener finishing its registration (Postgres LISTEN on
+            // the wire / SQL Server Service Broker setup done). Without this the first publish
+            // races the listener and can be silently dropped — see issue #201. NullNotificationTransport
+            // completes ListenerReady immediately, so tests not using push pay nothing.
+            var transport = host.Services.GetRequiredService<IWarpNotificationTransport>();
+            await transport.ListenerReady.WaitAsync(TimeSpan.FromSeconds(10), Xunit.TestContext.Current.CancellationToken);
+        }
+        catch
+        {
+            await StopAndDisposeAsync(host, fixture, serverId);
+            throw;
+        }
 
         TestLifecycleTrace.Record($"WarpTestServer.StartAsync returned (server={serverId})");
 
@@ -774,9 +788,26 @@ public class WarpTestServer : IAsyncDisposable
                 $"[WARP-PRE-STOP-DIAG server={ServerId}] capture failed: {ex.GetType().Name}: {ex.Message}");
         }
 
-        ServerLifecycleTrace.Record(ServerId, "IHost.StopAsync starting");
-        await _host.StopAsync(Xunit.TestContext.Current.CancellationToken);
-        ServerLifecycleTrace.Record(ServerId, "IHost.StopAsync returned");
-        _host.Dispose();
+        await StopAndDisposeAsync(_host, _fixture, ServerId);
+    }
+
+    // Never the test's token (#364): when a [TimedFact] times out, xUnit has already cancelled it, and a
+    // stop passed a cancelled token does not wait for the services to finish. The timed-out test's
+    // workers went on claiming for seconds, taking the jobs of the next test, which had already reset
+    // the same database.
+    private static async Task StopAndDisposeAsync(IHost host, IDatabaseFixture fixture, Guid serverId)
+    {
+        try
+        {
+            ServerLifecycleTrace.Record(serverId, "IHost.StopAsync starting");
+            using var stopCts = new CancellationTokenSource(StopBudget);
+            await host.StopAsync(stopCts.Token);
+            ServerLifecycleTrace.Record(serverId, "IHost.StopAsync returned");
+        }
+        finally
+        {
+            host.Dispose();
+            RunningTestServers.Stopped(fixture, serverId);
+        }
     }
 }

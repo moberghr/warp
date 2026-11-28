@@ -63,6 +63,7 @@ public class SqlServerClassFixture : IAsyncLifetime, IDatabaseFixture
 
     public async Task ResetAsync()
     {
+        await RunningTestServers.WaitForAllStoppedAsync(this);
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(Xunit.TestContext.Current.CancellationToken);
         await _respawner.ResetAsync(conn);
@@ -78,6 +79,9 @@ public class SqlServerClassFixture : IAsyncLifetime, IDatabaseFixture
 
     public async ValueTask DisposeAsync()
     {
+        // The class's last test may have timed out with its server still stopping (#364).
+        await RunningTestServers.WaitForAllStoppedAsync(this);
+
         // Mirror of PostgreSqlClassFixture.DisposeAsync. SQL Server's default max user
         // connections is 32,767 so per-fixture leak doesn't cause "too many connections"
         // failures the way PG's max_connections=500 does, but the latent leak still wastes

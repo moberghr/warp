@@ -42,6 +42,7 @@ internal sealed class ActivityListenerHarness : IDisposable
     private readonly object? _previousSentinel;
     private readonly ActivityListener _listener;
     private readonly List<Activity> _captured = [];
+    private readonly List<SpanWaiter> _waiters = [];
     private readonly ConcurrentDictionary<string, byte> _ours = new(StringComparer.Ordinal);
     private readonly Lock _lock = new();
 
@@ -89,6 +90,28 @@ internal sealed class ActivityListenerHarness : IDisposable
         }
     }
 
+    /// <summary>
+    /// Completes once the captured spans named <paramref name="operationName"/> satisfy
+    /// <paramref name="condition"/>. Re-checked on every captured span, so a test waits for the span it
+    /// asserts on rather than for a row state that is committed before that span stops.
+    /// </summary>
+    public async Task<IReadOnlyList<Activity>> WaitForAsync(
+        string operationName,
+        Func<IReadOnlyList<Activity>, bool> condition,
+        CancellationToken cancellationToken)
+    {
+        var waiter = new SpanWaiter(operationName, condition);
+        lock (_lock)
+        {
+            if (!waiter.TryComplete(_captured))
+            {
+                _waiters.Add(waiter);
+            }
+        }
+
+        return await waiter.Matched.Task.WaitAsync(cancellationToken);
+    }
+
     public void Dispose()
     {
         _activeSentinel.Value = _previousSentinel;
@@ -120,6 +143,7 @@ internal sealed class ActivityListenerHarness : IDisposable
             lock (_lock)
             {
                 _captured.Add(activity);
+                _waiters.RemoveAll(x => x.TryComplete(_captured));
             }
         }
     }
@@ -131,5 +155,23 @@ internal sealed class ActivityListenerHarness : IDisposable
         // Activity.Id is W3C-formatted ("00-<traceid>-<spanid>-<flags>") and unique per activity.
         // Falls back to the SpanId hex if Id is null (legacy non-W3C formats — unlikely in our code).
         return activity.Id ?? activity.SpanId.ToHexString();
+    }
+
+    private sealed class SpanWaiter(string operationName, Func<IReadOnlyList<Activity>, bool> condition)
+    {
+        public TaskCompletionSource<IReadOnlyList<Activity>> Matched { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public bool TryComplete(List<Activity> captured)
+        {
+            IReadOnlyList<Activity> named = [.. captured.Where(x => string.Equals(x.OperationName, operationName, StringComparison.Ordinal))];
+            if (!condition(named))
+            {
+                return false;
+            }
+
+            Matched.TrySetResult(named);
+
+            return true;
+        }
     }
 }

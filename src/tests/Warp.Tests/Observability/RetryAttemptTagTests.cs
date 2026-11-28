@@ -1,9 +1,5 @@
 using System.Diagnostics;
-using Microsoft.EntityFrameworkCore;
 using Shouldly;
-using Warp.Core.Data.Entities;
-using Warp.Core.Entities;
-using Warp.Core.Enums;
 using Warp.Core.Logging;
 using Warp.Core.Retry;
 using Warp.Tests.Fixtures;
@@ -20,61 +16,41 @@ public abstract class RetryAttemptTagTestsBase : IntegrationTestBase
     {
     }
 
+    // Every test here waits for the consumer spans it asserts on, not for State.Failed (#364): the row can
+    // read Failed before the last attempt's span has stopped, so a test that read the spans then raced it.
+    // Nor does any test need the whole retry chain (six attempts a second apart took 7 of the 10 s budget
+    // on an idle machine): the handlers retry with no delay, and each test waits only for the attempts its
+    // assertion is about.
     [TimedFact]
     public async Task GivenAlwaysFailingJob_WhenRetried_ThenConsumerSpansCarryIncrementingAttemptTag()
     {
+        var ct = Xunit.TestContext.Current.CancellationToken;
         using var harness = new ActivityListenerHarness();
 
         await using var server = await WarpTestServer.StartAsync(Fixture);
         var publisher = server.CreatePublisher();
-        var jobId = await publisher.Enqueue(new RetryAttributeHandlerRequest());
-        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+        var jobId = await publisher.Enqueue(new ImmediateRetryAttributeRequest());
+        await publisher.SaveChangesAsync(ct);
 
-        // Wait until the job's failure state is final. [Retry(5)] means 5 retries → 6 total
-        // attempts. WarpTestServer overrides retry delays to [1] second (see WarpTestServer.cs)
-        // so worst case is 5 × 1s = 5s of retry delay PLUS each attempt's processing time PLUS
-        // ScheduledJobActivation tick latency. The default WaitForJobState timeout (5s) is too
-        // tight when SQL Server is under parallel-test load — give it 20s explicitly.
-        await server.WaitForJobState(jobId, State.Failed, TimeSpan.FromSeconds(20));
+        // Attempts run one after another, so the first three spans to stop are attempts 1 to 3.
+        var consumerSpans = await WaitForConsumerSpans(harness, jobId, 3, ct);
 
-        var ctx = Fixture.CreateContext();
-        var job = await ctx.Set<Job>().FirstAsync(x => x.Id == jobId, Xunit.TestContext.Current.CancellationToken);
-        job.CurrentState.ShouldBe(State.Failed);
-
-        // We expect at least 2 consumer spans for this trace (initial + at least one retry).
-        var jobIdString = jobId.ToString();
-        var consumerSpans = harness.AllByName("process default")
-            .Where(a => string.Equals(a.GetTagItem(WarpTelemetryAttributes.MessagingMessageId)?.ToString(), jobIdString, StringComparison.Ordinal))
-            .OrderBy(a => a.StartTimeUtc)
-            .ToList();
-
-        // [Retry(5)] gives 6 total attempts before State.Failed. Assert at least 2 retries
-        // happened — the worker may slot in extra spans on shutdown so we tolerate a generous
-        // upper bound, but the lower bound must be >=2 to cover the retry tag increment.
-        consumerSpans.Count.ShouldBeGreaterThanOrEqualTo(2);
-
-        // First attempt: warp.job.attempt = 1
-        consumerSpans[0].GetTagItem(WarpTelemetryAttributes.WarpJobAttempt).ShouldBe(1L);
-
-        // Subsequent attempts: warp.job.attempt strictly increases (1-based)
-        for (var i = 1; i < consumerSpans.Count; i++)
-        {
-            var attemptValue = (long)consumerSpans[i].GetTagItem(WarpTelemetryAttributes.WarpJobAttempt)!;
-            attemptValue.ShouldBe(i + 1L);
-        }
+        consumerSpans
+            .OrderBy(x => x.StartTimeUtc)
+            .Take(3)
+            .Select(x => x.GetTagItem(WarpTelemetryAttributes.WarpJobAttempt))
+            .ShouldBe([1L, 2L, 3L]);
 
         // Every failed/retried consumer span carries error.type from the worker's catch path.
         // (The worker dispatches via reflection so the underlying exception is wrapped — we
         // only assert the tag is set to a non-empty exception-type string.)
-        foreach (var span in consumerSpans)
-        {
-            span.GetTagItem(WarpTelemetryAttributes.ErrorType)?.ToString().ShouldNotBeNullOrEmpty();
-        }
+        consumerSpans.ShouldAllBe(x => !string.IsNullOrEmpty(x.GetTagItem(WarpTelemetryAttributes.ErrorType) as string));
     }
 
     [TimedFact]
     public async Task GivenJobWithMaxRetriesMetadata_WhenProcessed_ThenConsumerSpanCarriesMaxAttemptsTag()
     {
+        var ct = Xunit.TestContext.Current.CancellationToken;
         using var harness = new ActivityListenerHarness();
 
         await using var server = await WarpTestServer.StartAsync(Fixture);
@@ -86,24 +62,15 @@ public abstract class RetryAttemptTagTestsBase : IntegrationTestBase
         // the type at retry-pipeline-behavior time, not at metadata-deserialize time.
         var jobId = await publisher.Enqueue(
             new RetryAttributeHandlerRequest(),
-            new Warp.Core.Helper.JobParameters().WithRetry(maxRetries: 2));
-        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+            new Warp.Core.Helper.JobParameters().WithRetry(maxRetries: 2, delays: [0]));
+        await publisher.SaveChangesAsync(ct);
 
-        await server.WaitForJobState(jobId, State.Failed, TimeSpan.FromSeconds(20));
-
-        var jobIdString = jobId.ToString();
-        var consumerSpans = harness.AllByName("process default")
-            .Where(a => string.Equals(a.GetTagItem(WarpTelemetryAttributes.MessagingMessageId)?.ToString(), jobIdString, StringComparison.Ordinal))
-            .ToList();
-
-        consumerSpans.ShouldNotBeEmpty();
+        // The first attempt and a retry.
+        var consumerSpans = await WaitForConsumerSpans(harness, jobId, 2, ct);
 
         // max_attempts = MaxRetries + 1 (initial attempt counts). Set on every consumer span
         // for this job because the metadata key is read on each worker invocation.
-        foreach (var span in consumerSpans)
-        {
-            span.GetTagItem(WarpTelemetryAttributes.WarpJobMaxAttempts).ShouldBe(3L);
-        }
+        consumerSpans.ShouldAllBe(x => Equals(x.GetTagItem(WarpTelemetryAttributes.WarpJobMaxAttempts), 3L));
     }
 
     [TimedFact]
@@ -112,27 +79,28 @@ public abstract class RetryAttemptTagTestsBase : IntegrationTestBase
         // Nothing is stamped at publish any more (§8.8): the budget is resolved by the pipeline during
         // the attempt. Reading the metadata BEFORE the handler ran left the first attempt's span without
         // max_attempts while attempts 2+ carried it — the tag must be read after the pipeline resolved.
+        var ct = Xunit.TestContext.Current.CancellationToken;
         using var harness = new ActivityListenerHarness();
 
         await using var server = await WarpTestServer.StartAsync(Fixture);
         var publisher = server.CreatePublisher();
-        var jobId = await publisher.Enqueue(new RetryAttributeHandlerRequest());
-        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+        var jobId = await publisher.Enqueue(new ImmediateRetryAttributeRequest());
+        await publisher.SaveChangesAsync(ct);
 
-        await server.WaitForJobState(jobId, State.Failed, TimeSpan.FromSeconds(20));
-
-        var jobIdString = jobId.ToString();
-        var consumerSpans = harness.AllByName("process default")
-            .Where(a => string.Equals(a.GetTagItem(WarpTelemetryAttributes.MessagingMessageId)?.ToString(), jobIdString, StringComparison.Ordinal))
-            .OrderBy(a => a.StartTimeUtc)
-            .ToList();
-
-        consumerSpans.Count.ShouldBeGreaterThanOrEqualTo(2);
+        // The first attempt and a retry.
+        var consumerSpans = await WaitForConsumerSpans(harness, jobId, 2, ct);
 
         // [Retry(5)] on the handler → 6 attempts, on the FIRST span as much as on the retries.
-        foreach (var span in consumerSpans)
-        {
-            span.GetTagItem(WarpTelemetryAttributes.WarpJobMaxAttempts).ShouldBe(6L);
-        }
+        consumerSpans.ShouldAllBe(x => Equals(x.GetTagItem(WarpTelemetryAttributes.WarpJobMaxAttempts), 6L));
+    }
+
+    private static async Task<IReadOnlyList<Activity>> WaitForConsumerSpans(ActivityListenerHarness harness, Guid jobId, int count, CancellationToken ct)
+    {
+        var id = jobId.ToString();
+        bool OfJob(Activity x) => string.Equals(x.GetTagItem(WarpTelemetryAttributes.MessagingMessageId)?.ToString(), id, StringComparison.Ordinal);
+
+        var spans = await harness.WaitForAsync("process default", x => x.Count(OfJob) >= count, ct);
+
+        return [.. spans.Where(OfJob)];
     }
 }
