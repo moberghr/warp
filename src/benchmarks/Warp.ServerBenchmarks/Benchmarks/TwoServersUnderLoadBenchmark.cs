@@ -38,8 +38,7 @@ namespace Warp.ServerBenchmarks.Benchmarks;
     "Two servers under load",
     "Two servers with 10 workers each, DB push on, drain one queue of 2,010 job rows: 1,400 empty jobs, 100 that run 300 ms, and five batches of 50 each followed by a continuation batch of 50 (500 jobs and 10 batch rows). Both worker modes.",
     "What a second server adds per job while it competes for the same rows: claim contention, completions beside the other server's renewals, and cluster-task leases moving between servers while both signal the Orchestrator. No other draining scenario runs more than one server.",
-    Order = 15,
-    Calibrated = false)]
+    Order = 15)]
 [CaseLabel(nameof(UseDispatcher), "False", "single-worker")]
 [CaseLabel(nameof(UseDispatcher), "True", "dispatcher")]
 [CaseLabel(nameof(Provider), "PostgreSql", "PostgreSQL")]
