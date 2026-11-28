@@ -3,6 +3,8 @@
 > Portable agent guidelines, generated from MTK references. AGENTS.md-aware tools (Codex, etc.) read this file.
 > The authoritative source for Claude Code is `CLAUDE.md` + `.claude/rules/`.
 
+> **Using Warp in another project, not changing this one?** Read <https://moberghr.github.io/warp/llms.txt> (index) or <https://moberghr.github.io/warp/llms-full.txt> (full reference) instead. This file is for work inside this repository.
+
 ## Project
 
 Warp is a distributed job processing and message queue library for .NET 10. Provider-agnostic core (`Warp.Core`) plus Postgres / SQL Server providers, a worker runtime (`Warp.Worker`), a dashboard (`Warp.Dashboard`), and optional HTTP exposure (`Warp.Http`).
@@ -19,7 +21,7 @@ Warp is a distributed job processing and message queue library for .NET 10. Prov
 ## Build & test
 
 - `dotnet build src/Warp.slnx`
-- `dotnet test --project src/tests/Warp.Tests/Warp.Tests.csproj` (full suite ~1m 30s)
+- `dotnet test --project src/tests/Warp.Tests/Warp.Tests.csproj` (full suite about 4–5 min, ~6,000 tests; needs Docker)
 - By category: `-- --filter-trait "Category=NoDb"` / `Category=PostgreSql` / `Category=SqlServer`
 - `dotnet format --verbosity quiet`
 

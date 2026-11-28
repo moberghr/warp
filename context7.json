@@ -1,0 +1,16 @@
+{
+  "$schema": "https://context7.com/schema/context7.json",
+  "projectTitle": "Warp",
+  "description": "Background jobs, pub/sub messages, in-process requests and streams for .NET 10, stored in your PostgreSQL or SQL Server database through EF Core. Transactional outbox, no broker, real-time dashboard.",
+  "folders": ["website/docs", "README.md"],
+  "excludeFolders": ["docs", "tasks", "src", ".claude", ".mtk"],
+  "rules": [
+    "NuGet package ids are Moberg.Warp.*; namespaces are Warp.*. Use the same version for every package.",
+    "Register with AddWarpServer<TContext> in a process that runs jobs and AddWarp<TContext> in one that only publishes. AddWarpWorker was removed.",
+    "Call opt.UsePostgreSql() or opt.UseSqlServer(); a provider package is required.",
+    "Publish through IPublisher, then call SaveChangesAsync on the same DbContext so the job commits with the data.",
+    "Do not register handlers by hand; a source generator finds IJobHandler<T>, IMessageHandler<T>, IRequestHandler<T, TResponse> and IStreamRequestHandler<T, TResponse>.",
+    "Register AddRetry() before AddTimeout(), and AddConcurrency() before AddRateLimit().",
+    "Enums in Warp start at 1; do not rely on default(T)."
+  ]
+}

@@ -1,7 +1,8 @@
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap');
+/* Geist is the typeface the Warp dashboard itself is set in, so the docs and the product read as one. */
+@import url('https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap');
 
-/* ── Infima primary color overrides (Moberg purple) ──────────────────────── */
 :root {
+  /* ── Infima overrides (Moberg purple) ───────────────────────────────────── */
   --ifm-color-primary: #4E0EFF;
   --ifm-color-primary-dark: #4508e6;
   --ifm-color-primary-darker: #4106d9;
@@ -10,72 +11,149 @@
   --ifm-color-primary-lighter: #6f3fff;
   --ifm-color-primary-lightest: #8f66ff;
 
+  --ifm-font-family-base: 'Geist', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --ifm-font-family-monospace: 'Geist Mono', ui-monospace, 'SF Mono', Consolas, 'Liberation Mono', monospace;
+  --ifm-heading-font-weight: 600;
   --ifm-code-font-size: 90%;
-  --ifm-font-family-monospace: 'JetBrains Mono', 'SF Mono', Consolas, 'Liberation Mono', monospace;
+  --ifm-line-height-base: 1.65;
+  --ifm-font-color-base: #14121f;
+  --ifm-background-color: #ffffff;
+  --ifm-navbar-shadow: 0 1px 0 #e4e2ee;
+  --ifm-navbar-height: 3.5rem;
+  --ifm-global-radius: 8px;
+  --ifm-code-border-radius: 6px;
+  --ifm-table-border-color: #e4e2ee;
+  --ifm-toc-border-color: #e4e2ee;
+  --ifm-menu-color: #4a4860;
+  --ifm-menu-color-background-active: rgba(78, 14, 255, 0.07);
+  --ifm-menu-color-background-hover: rgba(20, 18, 31, 0.04);
   --docusaurus-highlighted-code-line-bg: rgba(78, 14, 255, 0.08);
 
-  /* ── Warp design tokens ─────────────────────────────────────────────────── */
+  /* ── Warp tokens ────────────────────────────────────────────────────────── */
   --wp-accent: #4E0EFF;
-  --wp-accent-dark: #230083;
-  --wp-accent-light: #5634FF;
+  --wp-accent-solid: #4E0EFF;
+  --wp-accent-solid-hover: #3d08d1;
   --wp-accent-dim: rgba(78, 14, 255, 0.07);
-  --wp-accent-gradient: linear-gradient(135deg, #4E0EFF 0%, #230083 100%);
 
-  --wp-surface: #FFFFFF;
-  --wp-surface2: #F4F6FA;
-  --wp-border: #E1E7EB;
-  --wp-border-bright: rgba(0, 0, 0, 0.13);
-  --wp-text: #121212;
-  --wp-text-muted: #545454;
-  --wp-text-dim: #717A80;
-
-  --wp-terminal-bg: #0E1218;
-  --wp-terminal-border: #1f2532;
-  --wp-terminal-bar-bg: #0a0d12;
-
-  --wp-radius: 12px;
-  --wp-radius-sm: 8px;
-  --wp-radius-pill: 20px;
+  --wp-surface: #ffffff;
+  --wp-surface2: #f6f5fb;
+  --wp-border: #e4e2ee;
+  --wp-track: #e9e7f2;
+  --wp-text: #14121f;
+  --wp-text-muted: #4a4860;
+  --wp-text-dim: #74728a;
+  --wp-shadow: 0 1px 2px rgba(20, 10, 60, 0.06), 0 24px 48px -20px rgba(20, 10, 60, 0.22);
 }
 
 [data-theme='dark'] {
-  --ifm-color-primary: #9b7aff;
-  --ifm-color-primary-dark: #8560ff;
-  --ifm-color-primary-darker: #7a4dff;
-  --ifm-color-primary-darkest: #5a20ff;
-  --ifm-color-primary-light: #b097ff;
-  --ifm-color-primary-lighter: #beaaff;
-  --ifm-color-primary-lightest: #d4c5ff;
-  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
+  --ifm-color-primary: #a78bff;
+  --ifm-color-primary-dark: #9172ff;
+  --ifm-color-primary-darker: #8563ff;
+  --ifm-color-primary-darkest: #643aff;
+  --ifm-color-primary-light: #bda4ff;
+  --ifm-color-primary-lighter: #c8b3ff;
+  --ifm-color-primary-lightest: #ddd0ff;
 
-  --wp-accent: #9b7aff;
-  --wp-accent-dark: #4E0EFF;
-  --wp-accent-dim: rgba(155, 122, 255, 0.12);
+  --ifm-font-color-base: #ecebf5;
+  --ifm-background-color: #0e0d16;
+  --ifm-background-surface-color: #0e0d16;
+  --ifm-navbar-background-color: #0e0d16;
+  --ifm-navbar-shadow: 0 1px 0 #26243a;
+  --ifm-table-border-color: #26243a;
+  --ifm-toc-border-color: #26243a;
+  --ifm-menu-color: #b3b1c6;
+  --ifm-menu-color-background-active: rgba(167, 139, 255, 0.13);
+  --ifm-menu-color-background-hover: rgba(255, 255, 255, 0.05);
+  --docusaurus-highlighted-code-line-bg: rgba(167, 139, 255, 0.14);
 
-  --wp-surface: #14181f;
-  --wp-surface2: #1a1f2c;
-  --wp-border: #252d3d;
-  --wp-border-bright: rgba(255, 255, 255, 0.09);
-  --wp-text: #edf0f7;
-  --wp-text-muted: #a8b4c8;
-  --wp-text-dim: #6878a0;
+  --wp-accent: #a78bff;
+  --wp-accent-solid: #5a1fff;
+  --wp-accent-solid-hover: #6b36ff;
+  --wp-accent-dim: rgba(167, 139, 255, 0.1);
+
+  --wp-surface: #0e0d16;
+  --wp-surface2: #14131f;
+  --wp-border: #26243a;
+  --wp-track: #211f33;
+  --wp-text: #ecebf5;
+  --wp-text-muted: #b3b1c6;
+  --wp-text-dim: #86849c;
+  --wp-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 24px 48px -20px rgba(0, 0, 0, 0.7);
 }
 
-/* ── Terminal syntax highlight colours (global — used in dangerouslySetInnerHTML) ── */
-.k-green  { color: #4ade80; }
-.k-blue   { color: #9b7aff; }
-.k-yellow { color: #fbbf24; }
-.k-purple { color: #c084fc; }
-.k-red    { color: #fb7185; }
-.k-dim    { color: #6b7280; }
-.k-mute   { color: #8b95a2; }
+/* ── Type ────────────────────────────────────────────────────────────────── */
+h1, h2, h3 {
+  letter-spacing: -0.02em;
+}
 
-/* ── Themed screenshots ─────────────────────────────────────────────────── */
+.markdown > h2 {
+  margin-top: 2.5rem;
+}
+
+.markdown h1:first-child {
+  --ifm-h1-font-size: 2.5rem;
+  letter-spacing: -0.03em;
+}
+
+/* ── Navbar and footer ───────────────────────────────────────────────────── */
+.navbar__title {
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.navbar__logo {
+  height: 1.5rem;
+}
+
+.navbar__link {
+  font-weight: 500;
+  font-size: 0.9375rem;
+}
+
+.footer {
+  --ifm-footer-background-color: var(--wp-surface2);
+  --ifm-footer-color: var(--wp-text-muted);
+  --ifm-footer-link-color: var(--wp-text-muted);
+  --ifm-footer-title-color: var(--wp-text);
+  border-top: 1px solid var(--wp-border);
+  font-size: 0.9375rem;
+}
+
+/* ── Docs chrome ─────────────────────────────────────────────────────────── */
+.menu__link {
+  font-size: 0.9375rem;
+}
+
+.menu__list-item-collapsible .menu__link {
+  font-weight: 500;
+}
+
+.table-of-contents {
+  font-size: 0.8125rem;
+}
+
+.theme-code-block {
+  border: 1px solid var(--wp-border);
+  box-shadow: none;
+}
+
+.markdown table {
+  font-size: 0.9375rem;
+}
+
+.markdown table thead tr {
+  background: var(--wp-surface2);
+}
+
+.markdown table tr:nth-child(2n) {
+  background: none;
+}
+
+.markdown img {
+  border: 1px solid var(--wp-border);
+  border-radius: 8px;
+}
+
+/* ── Themed screenshots ──────────────────────────────────────────────────── */
 [data-theme='light'] img[data-theme-target='dark']  { display: none !important; }
 [data-theme='dark']  img[data-theme-target='light'] { display: none !important; }
-
-/* ── Subtle body accent glow ─────────────────────────────────────────────── */
-[data-theme='light'] body {
-  background-image: radial-gradient(ellipse at 10% 0%, var(--wp-accent-dim) 0%, transparent 55%);
-  background-attachment: fixed;
-}
