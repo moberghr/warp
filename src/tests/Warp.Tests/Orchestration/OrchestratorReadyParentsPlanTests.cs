@@ -32,7 +32,24 @@ public abstract partial class OrchestratorReadyParentsPlanTestsBase : IAsyncLife
 
     protected OrchestratorReadyParentsPlanTestsBase(IDatabaseFixture fixture) => _fixture = fixture;
 
-    public async ValueTask InitializeAsync() => await _fixture.ResetAsync();
+    public async ValueTask InitializeAsync()
+    {
+        await _fixture.ResetAsync();
+
+        // SQL Server: Respawn DELETEs the earlier tests' rows (20,000 in one of them), and their emptied and
+        // ghost pages stay allocated until the server's background ghost cleanup gets to them. A scan of the
+        // job table then read them too, and the optimizer, costing the scan by those pages, switched to a
+        // key lookup per row: 241 and 1,578 pages after the other tests in this class, under 200 alone
+        // (#364). A rebuild gives every test the table a fresh database has.
+        await using var context = _fixture.CreateContext();
+        if (context.Database.ProviderName?.Contains("SqlServer", StringComparison.Ordinal) == true)
+        {
+            // No parameters; the identifiers come from the model.
+            var entity = context.Model.FindEntityType(typeof(Job))!;
+            var rebuild = "ALTER INDEX ALL ON [" + entity.GetSchema() + "].[" + entity.GetTableName() + "] REBUILD";
+            await context.Database.ExecuteSqlRawAsync(rebuild, Xunit.TestContext.Current.CancellationToken);
+        }
+    }
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
