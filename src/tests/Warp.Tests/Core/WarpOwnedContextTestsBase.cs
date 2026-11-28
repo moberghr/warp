@@ -112,7 +112,7 @@ public abstract class WarpOwnedContextTestsBase : IAsyncLifetime
         var delivery = await ctx.Set<WebhookDelivery>().AsNoTracking().SingleAsync(x => x.Id == deliveryId, Ct);
         delivery.Status.ShouldBe(WebhookDeliveryStatus.Pending);
         var job = await ctx.Set<Job>().AsNoTracking().SingleAsync(Ct);
-        job.Queue.ShouldBe(WebhookConstants.Queue);
+        job.Queue.ShouldBe("default");
         job.CurrentState.ShouldBe(State.Enqueued);
         job.Message.ShouldNotBeNull().ShouldContain(deliveryId.ToString());
         host.ApplicationCommands.Count.ShouldBe(0);

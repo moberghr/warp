@@ -79,7 +79,7 @@ public class WarpServerConfigurationTests
 
         var groups = config.GetEffectiveWorkerGroups();
 
-        groups.Count.ShouldBe(2); // the default group + the dedicated warp:webhooks group (8.1)
+        groups.Count.ShouldBe(1);
         groups[0].Queues.ShouldContain("orders");
         groups[0].Queues.ShouldNotContain("default");
     }
@@ -125,7 +125,7 @@ public class WarpServerConfigurationTests
 
         var groups = config.GetEffectiveWorkerGroups();
 
-        groups.Count.ShouldBe(2); // the default group + the dedicated warp:webhooks group (8.1)
+        groups.Count.ShouldBe(1);
         groups[0].PollingInterval.ShouldBe(TimeSpan.FromSeconds(2));
         groups[0].MaxPollingInterval.ShouldBe(TimeSpan.FromSeconds(45));
         groups[0].PollingIntervalFactor.ShouldBe(3.0);

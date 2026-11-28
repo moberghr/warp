@@ -21,13 +21,14 @@ internal static class WebhookExecutorJobs
     // on an addon being registered or on RestartStaleJobsByDefault (§8.20).
     private static readonly string? RestartMetadata = BuildRestartMetadata();
 
-    internal static void Stage(DbContext context, Guid deliveryId, DateTime scheduleTime, DateTime now, string? application, string createdBy, Guid? traceId = null)
+    // queue is the delivery's resolved queue (WebhookSendBehavior.ResolveQueue): a delivery stays on its queue for life.
+    internal static void Stage(DbContext context, Guid deliveryId, string queue, DateTime scheduleTime, DateTime now, string? application, string createdBy, Guid? traceId = null)
     {
         var job = JobHelper.CreateJob(
             message: JsonSerializer.Serialize(new ExecuteWebhookDelivery { DeliveryId = deliveryId }),
             type: typeof(ExecuteWebhookDelivery).AssemblyQualifiedName!,
             scheduleTime: scheduleTime,
-            queue: WebhookConstants.Queue,
+            queue: queue,
             parentId: null,
             state: State.Enqueued,
             now: now,

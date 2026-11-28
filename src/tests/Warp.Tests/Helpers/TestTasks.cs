@@ -138,7 +138,9 @@ public static class TestTasks
         bool restartByDefault = true,
         ServerTaskSignals<TContext>? signals = null,
         IWarpNotificationTransport? transport = null,
-        string? applicationName = null)
+        string? applicationName = null,
+        string? webhookQueue = null,
+        string defaultQueue = "default")
         where TContext : DbContext
     {
         return new StaleJobRecovery<TContext>(
@@ -150,7 +152,9 @@ public static class TestTasks
                 InvisibilityTimeout = invisibilityTimeout,
                 RestartStaleJobsByDefault = restartByDefault,
                 ApplicationName = applicationName,
+                DefaultQueue = defaultQueue,
             }),
+            Options.Create(new Warp.Core.Webhooks.WebhookSendBehavior { Queue = webhookQueue }),
             transport ?? NullTransport,
             signals ?? new ServerTaskSignals<TContext>());
     }

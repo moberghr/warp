@@ -127,6 +127,11 @@ internal sealed class WebhookDispatcher<TContext> : IWebhookDispatcher
             }
         }
 
+        if (send.Queue is not null && string.IsNullOrWhiteSpace(send.Queue))
+        {
+            throw new ArgumentException("WebhookSend.Queue must not be empty; leave it null to use the default webhook queue.", nameof(send));
+        }
+
         var now = _timeProvider.GetUtcNow().UtcDateTime;
         var schedule = send.RetrySchedule ?? WebhookDefaults.RetrySchedule;
 
@@ -152,12 +157,13 @@ internal sealed class WebhookDispatcher<TContext> : IWebhookDispatcher
             ExpireAt = now + _configuration.WebhookDeliveryRetention,
             TrackEndpointHealth = _behavior.TrackEndpointHealth && groupName is not null,
             DedupeKey = dedupeKey,
+            Queue = send.Queue ?? _behavior.ResolveQueue(null, _configuration),
         };
 
         await _context.Set<WebhookDelivery>().AddAsync(delivery, cancellationToken);
 
         // First attempt runs immediately: enqueued (not scheduled) so signal-driven pickup applies.
-        await _publisher.Enqueue(new ExecuteWebhookDelivery { DeliveryId = delivery.Id }, WebhookDefaults.Queue);
+        await _publisher.Enqueue(new ExecuteWebhookDelivery { DeliveryId = delivery.Id }, delivery.Queue);
 
         await _publisher.SaveChangesAsync(cancellationToken);
 

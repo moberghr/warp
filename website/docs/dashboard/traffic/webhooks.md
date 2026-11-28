@@ -53,8 +53,8 @@ secrets at rest is unacceptable in your environment, use `Signing = None` and si
 
 ## Adoption note
 
-A Warp **server** must be running somewhere to drain the `warp:webhooks` queue. Any `AddWarpServer` with a
-worker does it — there is no per-process opt-in to forget.
+A Warp **server** must be running somewhere that drains the webhook queue (`DefaultQueue` unless the senders choose
+another with `AddWebhooks(w => w.Queue)` or `WebhookSend.Queue`). No `AddWebhooks` call is needed on that server.
 
 ## See also
 

@@ -39,13 +39,14 @@ public class WebhookCommandService<TContext> : IWebhookCommandService
     private readonly IEnumerable<IWebhookRedeliveryEnqueuer> _redeliveryEnqueuers;
     private readonly ServerTaskSignals<TContext>? _signals;
     private readonly IWarpNotificationTransport? _notificationTransport;
+    private readonly WebhookSendBehavior _behavior;
 
     public WebhookCommandService(
         TContext context,
         TimeProvider timeProvider,
         IOptions<WarpConfiguration> configuration,
         IEnumerable<IWebhookRedeliveryEnqueuer> redeliveryEnqueuers)
-        : this((DbContext)context, timeProvider, configuration, redeliveryEnqueuers, signals: null, notificationTransport: null)
+        : this((DbContext)context, timeProvider, configuration, redeliveryEnqueuers, signals: null, notificationTransport: null, behavior: null)
     {
     }
 
@@ -57,7 +58,8 @@ public class WebhookCommandService<TContext> : IWebhookCommandService
         IOptions<WarpConfiguration> configuration,
         IEnumerable<IWebhookRedeliveryEnqueuer> redeliveryEnqueuers,
         ServerTaskSignals<TContext>? signals,
-        IWarpNotificationTransport? notificationTransport)
+        IWarpNotificationTransport? notificationTransport,
+        IOptions<WebhookSendBehavior>? behavior)
     {
         _context = context;
         _timeProvider = timeProvider;
@@ -65,6 +67,7 @@ public class WebhookCommandService<TContext> : IWebhookCommandService
         _redeliveryEnqueuers = redeliveryEnqueuers;
         _signals = signals;
         _notificationTransport = notificationTransport;
+        _behavior = behavior?.Value ?? new WebhookSendBehavior();
     }
 
     public Task<WebhookRedeliveryResult> Redeliver(Guid deliveryId, CancellationToken ct = default)
@@ -142,7 +145,7 @@ public class WebhookCommandService<TContext> : IWebhookCommandService
 
         // One attempt left: on failure the delivery runs out of retries again and, the endpoint still failing, parks.
         var probed = await WebhookParkedRelease.ProbeOldestAsync(_context, groupName, now, now + _configuration.WebhookDeliveryRetention, ct);
-        if (probed is not { } deliveryId)
+        if (probed is not { } delivery)
         {
             await transaction.RollbackAsync(ct);
 
@@ -150,7 +153,7 @@ public class WebhookCommandService<TContext> : IWebhookCommandService
         }
 
         await WebhookParkedRelease.DeferNextProbeAsync(_context, groupName, now + _configuration.WebhookEndpointProbeInterval, ct);
-        var wake = await StageOrEnqueueAsync(enqueuer, deliveryId, now, "endpoint probe", ct);
+        var wake = await StageOrEnqueueAsync(enqueuer, delivery.Id, delivery.Queue, now, "endpoint probe", ct);
         await transaction.CommitAsync(ct);
         await WakeAsync(wake);
 
@@ -177,6 +180,7 @@ public class WebhookCommandService<TContext> : IWebhookCommandService
                 {
                     x.Status,
                     x.SigningMode,
+                    x.Queue,
                 })
             .FirstOrDefaultAsync(ct);
 
@@ -244,7 +248,7 @@ public class WebhookCommandService<TContext> : IWebhookCommandService
 
         // Stages the executor job and commits it in the same transaction as the flip, so the delivery is
         // never left Pending without a live executor job.
-        var wake = await StageOrEnqueueAsync(enqueuer, deliveryId, now, "redelivery", ct);
+        var wake = await StageOrEnqueueAsync(enqueuer, deliveryId, current.Queue, now, "redelivery", ct);
         await transaction.CommitAsync(ct);
         await WakeAsync(wake);
 
@@ -261,11 +265,12 @@ public class WebhookCommandService<TContext> : IWebhookCommandService
     private async Task<IReadOnlyList<Notification>> StageOrEnqueueAsync(
         IWebhookRedeliveryEnqueuer enqueuer,
         Guid deliveryId,
+        string? deliveryQueue,
         DateTime now,
         string createdBy,
         CancellationToken ct)
     {
-        if (_signals is null || enqueuer is not WebhookRedeliveryEnqueuer)
+        if (_signals is null || enqueuer is not WebhookRedeliveryEnqueuer<TContext>)
         {
             await enqueuer.EnqueueAsync(deliveryId, ct);
 
@@ -276,6 +281,7 @@ public class WebhookCommandService<TContext> : IWebhookCommandService
         WebhookExecutorJobs.Stage(
             _context,
             deliveryId,
+            _behavior.ResolveQueue(deliveryQueue, _configuration),
             now,
             now,
             _configuration.ApplicationName,

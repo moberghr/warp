@@ -35,6 +35,7 @@ public sealed class WebhookEndpointMonitor<TContext> : IServerTask
 
     private readonly DbContext _context;
     private readonly WarpServerConfiguration _configuration;
+    private readonly WebhookSendBehavior _webhookBehavior;
     private readonly TimeProvider _time;
     private readonly WarpNotifierDispatcher _notifier;
     private readonly IEnumerable<IWebhookEndpointHealthHandler> _healthHandlers;
@@ -47,6 +48,7 @@ public sealed class WebhookEndpointMonitor<TContext> : IServerTask
     public WebhookEndpointMonitor(
         IWarpServerContext serverContext,
         IOptions<WarpServerConfiguration> configuration,
+        IOptions<WebhookSendBehavior> webhookBehavior,
         [FromKeyedServices(DatabaseClock.Key)] TimeProvider time,
         WarpNotifierDispatcher notifier,
         IEnumerable<IWebhookEndpointHealthHandler> healthHandlers,
@@ -56,6 +58,7 @@ public sealed class WebhookEndpointMonitor<TContext> : IServerTask
     {
         _context = serverContext.Context;
         _configuration = configuration.Value;
+        _webhookBehavior = webhookBehavior.Value;
         _time = time;
         _notifier = notifier;
         _healthHandlers = healthHandlers;
@@ -149,7 +152,8 @@ public sealed class WebhookEndpointMonitor<TContext> : IServerTask
             .OrderBy(x => x.CreatedAt)
             .ThenBy(x => x.Id)
             .Take(ReleaseBatchSize)
-            .Select(x => x.Id)
+            .Select(x =>
+                new ParkedDelivery(x.Id, x.Queue))
             .ToListAsync(ct);
 
         RerunImmediately = parked.Count == ReleaseBatchSize;
@@ -158,13 +162,14 @@ public sealed class WebhookEndpointMonitor<TContext> : IServerTask
         var released = 0;
         for (var i = 0; i < parked.Count; i++)
         {
-            if (!await WebhookParkedRelease.ReleaseAsync(_context, parked[i], attemptCount: 0, now, expireAt, ct))
+            if (!await WebhookParkedRelease.ReleaseAsync(_context, parked[i].Id, attemptCount: 0, now, expireAt, ct))
             {
                 continue;
             }
 
             var scheduleTime = now.AddMilliseconds(i - parked.Count);
-            WebhookExecutorJobs.Stage(_context, parked[i], scheduleTime, now, _configuration.ApplicationName, "endpoint recovery");
+            var queue = _webhookBehavior.ResolveQueue(parked[i].Queue, _configuration);
+            WebhookExecutorJobs.Stage(_context, parked[i].Id, queue, scheduleTime, now, _configuration.ApplicationName, "endpoint recovery");
             released++;
         }
 
@@ -191,9 +196,10 @@ public sealed class WebhookEndpointMonitor<TContext> : IServerTask
 
         foreach (var name in due)
         {
-            if (await WebhookParkedRelease.ProbeOldestAsync(_context, name, now, expireAt, ct) is { } deliveryId)
+            if (await WebhookParkedRelease.ProbeOldestAsync(_context, name, now, expireAt, ct) is { } delivery)
             {
-                WebhookExecutorJobs.Stage(_context, deliveryId, now, now, _configuration.ApplicationName, "endpoint probe");
+                var queue = _webhookBehavior.ResolveQueue(delivery.Queue, _configuration);
+                WebhookExecutorJobs.Stage(_context, delivery.Id, queue, now, now, _configuration.ApplicationName, "endpoint probe");
                 probed++;
             }
 

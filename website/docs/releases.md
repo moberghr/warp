@@ -4,9 +4,38 @@ sidebar_position: 6
 
 # Releases
 
-## 8.2.0
+## 8.2.0 *unreleased*
 
-*Unreleased*
+### Webhook deliveries run on an ordinary queue
+
+A webhook delivery's executor job is now an ordinary job on an ordinary queue: by default your `DefaultQueue`, drained by the workers that already run your jobs. Choose another queue for a process with `opt.AddWebhooks(w => w.Queue = "webhooks")`, or for one send with `WebhookSend.Queue`; the send's queue wins, then the process's, then `DefaultQueue`. The queue is stored on the delivery, so its retries, redeliveries and recoveries stay on it for life.
+
+To keep slow or hanging receivers away from your job workers, put webhooks on their own queue and drain it with a worker group of its own:
+
+```csharp
+services.AddWarpServer<AppDbContext>(opt =>
+{
+    opt.AddWebhooks(w => w.Queue = "webhooks");
+    opt.AddWorkerGroup(g =>
+    {
+        g.Queues = ["webhooks"];
+        g.WorkerCount = 4;
+        g.PrefetchCount = 0; // attempts are slow; do not hold claimed ones behind them
+    });
+});
+```
+
+The group's worker count is also the most attempts that server runs at once. See [Isolating webhook delivery](features/webhooks.md#isolating-webhook-delivery).
+
+**Behaviour change.** Before 8.2 every server ran webhook deliveries whatever its `Queues` listed. Now they are ordinary jobs on `DefaultQueue` (or the queue `w.Queue` names), so a server whose `Queues` leave that queue out no longer runs them, and if no server drains it, deliveries stay `Pending`. **Fix:** include the webhook queue in `Queues` or in an `AddWorkerGroup` group on at least one server.
+
+### Migration
+
+**One migration**, additive: a nullable `Queue` column (string) on the webhook delivery table. Generate it with `dotnet ef migrations add <Name>` and apply it before any 8.2 process starts. Deliveries sent before 8.2 have no queue and run on the webhook queue of the server that enqueues their next attempt.
+
+### Upgrading
+
+Executor jobs waiting on the `warp:webhooks` queue (first attempts not yet run, retries scheduled for later) are moved automatically: every 8.2 server's crash-recovery task moves them to its webhook queue once they are due to run, so nothing is stranded.
 
 ### Dashboard and admin services run on Warp's own context
 
@@ -28,7 +57,7 @@ The public constructors that take your context are unchanged: a service you cons
 
 *2026-11-27*
 
-Outbound webhook hardening and **webhook endpoint health**: endpoints that go down hold their deliveries and catch up by themselves once they are back. **One migration** (additive: five columns on the webhook delivery table, one new table and four indexes, see [Migration](#migration-81)), one binary-breaking API change (`MapWarpHttp()` returns a convention builder, so a library compiled against 8.0 that calls it must be rebuilt; see [Security hardening](#security-hardening)) and otherwise no breaking API change; **four behaviour changes for webhooks** (see below), each marked *Behaviour change* with its one-line way back. Applications can also boot their own test hosts without Warp getting in the way (`RemoveWarpHostedServices()`, `RequireDatabaseAtStartup = false`). Also **security hardening** of the dashboard, `Warp.Http`, adapters and concurrency locks, with several behaviour changes of its own; see [Security hardening](#security-hardening).
+Outbound webhook hardening and **webhook endpoint health**: endpoints that go down hold their deliveries and catch up by themselves once they are back. **One migration** (additive: five columns on the webhook delivery table, one new table and four indexes, see [Migration](#migration-81)), one binary-breaking API change (`MapWarpHttp()` returns a convention builder, so a library compiled against 8.0 that calls it must be rebuilt; see [Security hardening](#security-hardening)) and otherwise no breaking API change; **three behaviour changes for webhooks** (see below), each marked *Behaviour change* with its one-line way back. Applications can also boot their own test hosts without Warp getting in the way (`RemoveWarpHostedServices()`, `RequireDatabaseAtStartup = false`). Also **security hardening** of the dashboard, `Warp.Http`, adapters and concurrency locks, with several behaviour changes of its own; see [Security hardening](#security-hardening).
 
 ### Webhooks: bounded attempts
 
@@ -51,15 +80,9 @@ Outbound webhook hardening and **webhook endpoint health**: endpoints that go do
 
 **To go back:** `opt.AddWebhooks(w => w.PublicAddressesOnly = false)` (local development; in production prefer moving a proxy or certificate into `UseSocketsHttpHandler`).
 
-### Webhooks: their own worker group
-
-**Behaviour change.** Webhook attempts now run on a dedicated worker group with `WebhookWorkerCount` workers (default 4), and the default group no longer polls `warp:webhooks`, so a slow or hanging receiver cannot starve your job workers. It also caps concurrent attempts per server at that count: raise it for high webhook volume, or set `0` to go back to the shared shape. The new group is a worker group like any other: a server's reported worker count includes its workers, and **pausing the default group no longer pauses webhook delivery** — pause the webhook group too, or the server. Routing `warp:webhooks` yourself (in `Queues` or an `AddWorkerGroup` group) still wins. See [Webhook workers](features/webhooks.md#webhook-workers).
-
-**To go back:** `opt.WebhookWorkerCount = 0` (the default group drains `warp:webhooks` again, alongside your jobs).
-
 ### An enqueue wakes only the groups that drain its queue
 
-A newly enqueued job now wakes only the local worker groups whose queues include the job's queue, in-process and on a cross-process push alike. Before, it woke every group, so with the dedicated webhook group every job a handler enqueued also sent the webhook group to claim from its empty queue: in the handler-staged benchmark about one extra statement, command and transaction per job, gone again in this release (fan-out is back at 8.0.0's 10.6 statements per job). A wake that names no queue, such as the push listener's reconnect drain, still wakes every group.
+A newly enqueued job now wakes only the local worker groups whose queues include the job's queue, in-process and on a cross-process push alike. Before, it woke every group, so with a second worker group every job a handler enqueued also sent that group to claim from its empty queue: in the handler-staged benchmark about one extra statement, command and transaction per job (fan-out stays at 8.0.0's 10.6 statements per job). A wake that names no queue, such as the push listener's reconnect drain, still wakes every group.
 
 For code that hooks the wake: `ServerTaskSignals.SignalJobEnqueued(string? queue = null)` takes the queue, `ServerTaskSignals.SubscribeJobEnqueued(queues, wake)` subscribes to some queues only (the existing `Subscribe(ServerTaskSignal.JobEnqueued, ...)` still hears every queue), and `IDispatcherWake` gains `Signal(string? queue)`, a default method that calls `SignalAll()`, so existing implementations still compile.
 

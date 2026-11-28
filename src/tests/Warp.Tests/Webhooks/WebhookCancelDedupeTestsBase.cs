@@ -68,7 +68,7 @@ public abstract class WebhookCancelDedupeTestsBase : IntegrationTestBase
 
         await WarpTestServer.WaitUntil(
             async () => await server.CreateContext().Set<Job>()
-                .Where(x => x.Queue == WebhookConstants.Queue)
+                .Where(x => x.Queue == "default")
                 .Where(x => x.CurrentState == State.Completed)
                 .AnyAsync(Ct),
             timeout: TimeSpan.FromSeconds(8),
@@ -78,7 +78,7 @@ public abstract class WebhookCancelDedupeTestsBase : IntegrationTestBase
         row.Status.ShouldBe(WebhookDeliveryStatus.Cancelled);
         row.LastAttemptAt.ShouldBeNull();
         (await server.CreateContext().Set<Job>()
-            .Where(x => x.Queue == WebhookConstants.Queue)
+            .Where(x => x.Queue == "default")
             .Where(x => x.CurrentState == State.Scheduled)
             .AnyAsync(Ct)).ShouldBeFalse();
     }
@@ -157,7 +157,7 @@ public abstract class WebhookCancelDedupeTestsBase : IntegrationTestBase
 
         second.ShouldBe(first);
         (await Fixture.CreateContext().Set<WebhookDelivery>().CountAsync(Ct)).ShouldBe(1);
-        (await Fixture.CreateContext().Set<Job>().CountAsync(x => x.Queue == WebhookConstants.Queue, Ct)).ShouldBe(1);
+        (await Fixture.CreateContext().Set<Job>().CountAsync(x => x.Queue == "default", Ct)).ShouldBe(1);
         (await GetDeliveryAsync(first)).DedupeKey.ShouldNotBeNull().Length.ShouldBe(64);
     }
 

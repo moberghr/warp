@@ -68,12 +68,6 @@ public static class ServiceConfiguration
 
         WebhookConfigurationValidation.Validate(builder);
 
-        if (builder.WebhookWorkerCount < 0)
-        {
-            throw new InvalidOperationException(
-                $"WebhookWorkerCount must be zero or greater (was {builder.WebhookWorkerCount}); 0 lets the default worker group drain warp:webhooks.");
-        }
-
         // Fail fast on the contradictory "run the worker, but with zero workers" shape. Without
         // this, such a server registers the worker hosts and all job-orchestration tasks (taking
         // distributed locks, routing messages, activating scheduled jobs) yet never fetches a

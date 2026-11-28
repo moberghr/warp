@@ -302,15 +302,20 @@ public static class ServiceConfiguration
             x.GetRequiredService<IOptions<WarpConfiguration>>(),
             x.GetServices<IWebhookRedeliveryEnqueuer>(),
             x.GetRequiredService<ServerTaskSignals<TContext>>(),
-            x.GetRequiredService<IWarpNotificationTransport>()));
+            x.GetRequiredService<IWarpNotificationTransport>(),
+            x.GetRequiredService<IOptions<WebhookSendBehavior>>()));
 
         // Webhook delivery engine (part of Core, §8.20) wired unconditionally: dispatcher, executor job
-        // handler, redelivery enqueuer, and the built-in signer. Always-on so any AddWarpServer drains
-        // warp:webhooks with no per-process opt-in to forget — nothing runs until SendAsync stages a
+        // handler, redelivery enqueuer, and the built-in signer. Always-on: deliveries are ordinary jobs on an
+        // ordinary queue, so any worker that drains that queue runs them — nothing runs until SendAsync stages a
         // delivery. Optional host hooks (custom signer, exhausted handler) come from opt.AddWebhooks(...).
         services.TryAddScoped<IWebhookDispatcher, WebhookDispatcher<TContext>>();
         services.TryAddScoped<IJobHandler<ExecuteWebhookDelivery>, ExecuteWebhookDeliveryHandler<TContext>>();
-        services.TryAddScoped<IWebhookRedeliveryEnqueuer>(x => new WebhookRedeliveryEnqueuer(() => x.GetRequiredService<IPublisher>()));
+        services.TryAddScoped<IWebhookRedeliveryEnqueuer>(x => new WebhookRedeliveryEnqueuer<TContext>(
+            () => x.GetRequiredService<TContext>(),
+            () => x.GetRequiredService<IPublisher>(),
+            x.GetRequiredService<IOptions<WarpConfiguration>>(),
+            x.GetRequiredService<IOptions<WebhookSendBehavior>>()));
         services.TryAddSingleton<StandardWebhooksSigner>();
 
         // The webhook executor resolves IHttpClientFactory (the warp-webhooks named client) — and the handler
@@ -1580,6 +1585,9 @@ public static class ServiceConfiguration
         delivery.Property(p => p.LastAttemptAt);
         delivery.Property(p => p.TrackEndpointHealth);
         delivery.Property(p => p.DedupeKey).HasMaxLength(64);
+
+        // Unbounded like Job.Queue, which it is copied into: a cap here would be a limit the job queue does not have.
+        delivery.Property(p => p.Queue);
 
         // Dedupe (8.1): unique among the rows that carry a key. EF Core's SQL Server provider filters a unique
         // index on a nullable column to non-null values, and PostgreSQL treats nulls as distinct, so deliveries
