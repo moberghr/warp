@@ -4,6 +4,12 @@ sidebar_position: 6
 
 # Releases
 
+## 8.2.0
+
+*unreleased*
+
+- **Adapters: request-body capture is bounded.** With `CaptureRequestBodies` on (or a forced capture), the adapter no longer reads the whole outgoing request body into memory before sending it. It keeps the first `MaxCapturedBodySize` bytes as the transport sends them, so a large upload is not buffered and a streamed request body still streams. In-memory bodies (`StringContent`, `ByteArrayContent`) are captured as before. *Behaviour change:* a streamed body the transport never sent (the call failed before the send) is no longer captured, and a non-seekable streamed body is no longer made retryable by capture's buffering, so it behaves the same with capture on as with capture off. See [Capture and PII](features/adapters.md#capture-and-pii--your-data-your-responsibility) (#365).
+
 ## 8.1.0
 
 *2026-11-27*
