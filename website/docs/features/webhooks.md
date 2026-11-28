@@ -54,7 +54,7 @@ builder.Services.AddWarpServer<AppDbContext>(opt =>
 
 ### Requires a Warp server somewhere
 
-Webhooks **execute jobs**, so a Warp server (worker) must run somewhere in the deployment that drains the webhook queue (`DefaultQueue` unless you [choose another](#isolating-webhook-delivery)). No `AddWebhooks` call is needed on that server. The publisher process that calls `SendAsync` need not be the worker; the delivery row and executor job commit through the outbox and any server in the cluster that drains the queue picks the job up. An `AddWarp`-only publisher/dashboard process stages deliveries and relies on a server elsewhere to run them.
+Webhooks **execute jobs**, so a Warp server (worker) must run somewhere in the deployment that drains the webhook queue (`DefaultQueue` unless you [choose another](#isolating-webhook-delivery)). No `AddWebhooks` call is needed on that server. **Since 8.2** a server runs deliveries only if its `Queues` (or one of its `AddWorkerGroup` groups) include the webhook queue; before, every server ran them whatever its `Queues` listed. The publisher process that calls `SendAsync` need not be the worker; the delivery row and executor job commit through the outbox and any server in the cluster that drains the queue picks the job up. An `AddWarp`-only publisher/dashboard process stages deliveries and relies on a server elsewhere to run them.
 
 ### Isolating webhook delivery
 

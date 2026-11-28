@@ -27,11 +27,13 @@ services.AddWarpServer<AppDbContext>(opt =>
 
 The group's worker count is also the most attempts that server runs at once. See [Isolating webhook delivery](features/webhooks.md#isolating-webhook-delivery).
 
+**Behaviour change.** Before 8.2 every server ran webhook deliveries whatever its `Queues` listed. Now they are ordinary jobs on `DefaultQueue` (or the queue `w.Queue` names), so a server whose `Queues` leave that queue out no longer runs them, and if no server drains it, deliveries stay `Pending`. **Fix:** include the webhook queue in `Queues` or in an `AddWorkerGroup` group on at least one server.
+
 ### Migration
 
 **One migration**, additive: a nullable `Queue` column (string) on the webhook delivery table. Generate it with `dotnet ef migrations add <Name>` and apply it before any 8.2 process starts. Deliveries sent before 8.2 have no queue and run on the webhook queue of the server that enqueues their next attempt.
 
-### Upgrading from 8.1
+### Upgrading
 
 Executor jobs waiting on the `warp:webhooks` queue (first attempts not yet run, retries scheduled for later) are moved automatically: every 8.2 server's crash-recovery task moves them to its webhook queue once they are due to run, so nothing is stranded.
 

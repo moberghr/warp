@@ -589,6 +589,43 @@ public abstract class CrashRecoveryTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task Execute_StuckLegacyDeliveryWithItsExecutorEnqueuedOnTheLegacyQueue_MovesTheExecutorAndStagesNoDuplicate()
+    {
+        // A delivery sent before 8.2 (no queue) whose executor still waits on warp:webhooks. The bridge runs first, so
+        // the stuck sweep finds the moved executor on the webhook queue instead of staging a second one there.
+        var deliveryId = await SeedStuckDeliveryAsync();
+        var executor = await SeedJobAsync("warp:webhooks", State.Enqueued, deliveryId);
+
+        var ctx = _fixture.CreateContext();
+        await using var outerTx = await ctx.Database.BeginTransactionAsync(Xunit.TestContext.Current.CancellationToken);
+        var recovery = TestTasks.CreateStaleJobRecovery(ctx, TimeProvider.System, TimeSpan.FromMinutes(5), webhookQueue: "webhooks");
+        await recovery.ExecuteAsync(CancellationToken.None);
+        await outerTx.CommitAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var jobs = await _fixture.CreateContext().Set<Job>()
+            .Select(x => x.Id)
+            .ToListAsync(Xunit.TestContext.Current.CancellationToken);
+        jobs.ShouldBe([executor]);
+        (await GetQueueAsync(executor)).ShouldBe("webhooks");
+    }
+
+    [TimedFact]
+    public async Task RecoverStuckWebhookDeliveries_LegacyDeliveryWithItsExecutorScheduledOnTheLegacyQueue_StagesNoDuplicate()
+    {
+        // The bridge moves only Enqueued jobs, so a pre-8.2 delivery's not-yet-activated retry is still on
+        // warp:webhooks; the live-job check looks there too.
+        var deliveryId = await SeedStuckDeliveryAsync();
+        await SeedJobAsync("warp:webhooks", State.Scheduled, deliveryId);
+
+        var recovered = await TestTasks
+            .CreateStaleJobRecovery(_fixture.CreateContext(), TimeProvider.System, TimeSpan.FromMinutes(5), webhookQueue: "webhooks")
+            .RecoverStuckWebhookDeliveriesAsync(CancellationToken.None);
+
+        recovered.ShouldBe(0);
+        (await _fixture.CreateContext().Set<Job>().CountAsync(Xunit.TestContext.Current.CancellationToken)).ShouldBe(1);
+    }
+
+    [TimedFact]
     public async Task MoveLegacyWebhookJobs_EnqueuedOnTheLegacyQueue_MovesItAndWakesTheWebhookQueue()
     {
         // Executor jobs 8.1 left on warp:webhooks, which nothing drains any more, move to the server's webhook queue.

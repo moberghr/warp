@@ -38,7 +38,7 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
     private const int StuckDeliveryBatchSize = 100;
 
     // REMOVE in 9.0 (issue #367): the queue 8.1 and earlier put every webhook executor job on. Only the catch-up in
-    // MoveLegacyWebhookJobsAsync reads it.
+    // MoveLegacyWebhookJobsAsync and the stuck sweep's live-job check for pre-8.2 deliveries read it.
     private const string LegacyWebhookQueue = "warp:webhooks";
 
     private readonly DbContext _context;
@@ -91,8 +91,12 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
     public async Task<string?> ExecuteAsync(CancellationToken ct)
     {
         var result = await RecoverStaleJobsAsync(ct);
-        var stuckDeliveries = await RecoverStuckWebhookDeliveriesAsync(ct);
+
+        // Before the stuck sweep: a pre-8.2 delivery's live executor still on warp:webhooks (possibly just requeued
+        // by the sweep above) must already be on the webhook queue when the sweep looks for it there, or the delivery
+        // gets a duplicate executor. Same connection and transaction, so the sweep sees the move.
         var movedLegacy = await MoveLegacyWebhookJobsAsync(ct);
+        var stuckDeliveries = await RecoverStuckWebhookDeliveriesAsync(ct);
 
         if (result.Total == 0 && stuckDeliveries == 0 && movedLegacy == 0)
         {
@@ -304,8 +308,12 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
             // correctness backstop should it ever miss.
             var idText = row.Id.ToString();
             var queue = _webhookBehavior.ResolveQueue(row.Queue, _configuration);
+
+            // A pre-8.2 delivery (no queue) can still have its live executor on warp:webhooks where the bridge does not
+            // move it (Scheduled, not yet activated). REMOVE the legacy arm in 9.0 with the bridge (#367).
+            var legacyQueue = row.Queue == null ? LegacyWebhookQueue : queue;
             var hasLiveJob = await _context.Set<Job>()
-                .Where(x => x.Queue == queue)
+                .Where(x => x.Queue == queue || x.Queue == legacyQueue)
                 .Where(x => liveJobStates.Contains(x.CurrentState))
                 .Where(x => x.Message != null)
                 .Where(x => x.Message!.Contains(idText))
