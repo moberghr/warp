@@ -66,6 +66,8 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
     private readonly WarpNotifierDispatcher _notifier;
     private readonly IEnumerable<IWebhookEndpointHealthHandler> _endpointHealthHandlers;
     private readonly IServiceScopeFactory _scopeFactory;
+    private readonly WarpConfiguration _configuration;
+    private readonly WebhookSendBehavior _behavior;
     private readonly TimeSpan _attemptTimeout;
     private readonly TimeSpan _probeInterval;
     private readonly ILogger<ExecuteWebhookDeliveryHandler<TContext>> _logger;
@@ -84,6 +86,7 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
         IEnumerable<IWebhookEndpointHealthHandler> endpointHealthHandlers,
         IServiceScopeFactory scopeFactory,
         IOptions<WarpConfiguration> configuration,
+        IOptions<WebhookSendBehavior> behavior,
         ILogger<ExecuteWebhookDeliveryHandler<TContext>> logger)
     {
         _context = context;
@@ -98,6 +101,8 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
         _notifier = notifier;
         _endpointHealthHandlers = endpointHealthHandlers;
         _scopeFactory = scopeFactory;
+        _configuration = configuration.Value;
+        _behavior = behavior.Value;
         _attemptTimeout = configuration.Value.WebhookAttemptTimeout;
         _probeInterval = configuration.Value.WebhookEndpointProbeInterval;
         _logger = logger;
@@ -253,7 +258,7 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
                 // Retries left: the schedule column is never mutated — (RetrySchedule, AttemptCount) fully
                 // determines the remaining plan. Attempt N's failure schedules delay schedule[N-1]. NextAttemptAt
                 // is already stamped by the claim; the scheduled job reuses the exact same value.
-                await _publisher.Schedule(new ExecuteWebhookDelivery { DeliveryId = delivery.Id }, nextAttemptAt!.Value, WebhookDefaults.Queue);
+                await _publisher.Schedule(new ExecuteWebhookDelivery { DeliveryId = delivery.Id }, nextAttemptAt!.Value, _behavior.ResolveQueue(delivery.Queue, _configuration));
 
                 if (groupName is not null)
                 {

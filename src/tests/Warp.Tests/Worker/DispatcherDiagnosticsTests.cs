@@ -42,7 +42,6 @@ public abstract class DispatcherDiagnosticsTestsBase : IntegrationTestBase
         {
             config.UseDispatcher = true;
             config.WorkerCount = 1;
-            config.WebhookWorkerCount = 0; // one dispatcher: these assert on THE dispatcher's timings
             config.PrefetchCount = 0;
             config.CompletionFlushInterval = TimeSpan.FromMilliseconds(50);
         });
@@ -97,7 +96,6 @@ public abstract class DispatcherDiagnosticsTestsBase : IntegrationTestBase
         {
             config.UseDispatcher = true;
             config.WorkerCount = 1;
-            config.WebhookWorkerCount = 0; // one dispatcher: these assert on THE dispatcher's timings
             config.CompletionFlushInterval = TimeSpan.FromMilliseconds(50);
         });
         var publisher = server.CreatePublisher();

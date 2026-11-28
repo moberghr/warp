@@ -35,7 +35,7 @@ Warp does **not** model subscriptions or fan-out — that would duplicate every 
 
 ## Setup
 
-There is nothing to enable. `AddWarp` wires the dispatcher, executor, redelivery enqueuer, and built-in signer; `AddWarpServer`'s worker polls the dedicated `warp:webhooks` queue automatically. Just inject `IWebhookDispatcher` and call `SendAsync`:
+There is nothing to enable. `AddWarp` wires the dispatcher, executor, redelivery enqueuer, and built-in signer. Each delivery attempt is an ordinary job on your `DefaultQueue`, so the workers that already run your jobs run it. Just inject `IWebhookDispatcher` and call `SendAsync`:
 
 ```csharp
 builder.Services.AddWarpServer<AppDbContext>(opt =>
@@ -50,24 +50,32 @@ builder.Services.AddWarpServer<AppDbContext>(opt =>
 });
 ```
 
-`AddWebhooks(...)` is **optional configuration only** — a custom `IWebhookSigner`, the `OnDeliveryExhausted` callback, the [public-addresses-only guard](#public-addresses-only), [endpoint health](#endpoint-health) and [deduplication](#deduplication). It is not an enable switch; delivery runs without it. When a delivery exhausts, Warp also emits a `WebhookDeliveryExhausted` [operational notification](./operational-notifications.md) to any registered `IWarpNotifier` — the generic operator-alerting channel, alongside the webhook-specific `OnDeliveryExhausted` callback. `AddAdapters()` is also optional: with it, every attempt is recorded as a `warp-webhooks` `AdapterCallLog` row (response bodies always captured, request bodies never — the payload already lives on the delivery row) and the per-attempt timeline is populated; without it, the delivery state machine, retries, exhaustion, and dashboard still work fully from the `WebhookDelivery` row — only the granular per-attempt HTTP call log is absent (same telemetry-vs-recording split as adapters).
+`AddWebhooks(...)` is **optional configuration only** — a custom `IWebhookSigner`, the `OnDeliveryExhausted` callback, the [webhook queue](#isolating-webhook-delivery), the [public-addresses-only guard](#public-addresses-only), [endpoint health](#endpoint-health) and [deduplication](#deduplication). It is not an enable switch; delivery runs without it. When a delivery exhausts, Warp also emits a `WebhookDeliveryExhausted` [operational notification](./operational-notifications.md) to any registered `IWarpNotifier` — the generic operator-alerting channel, alongside the webhook-specific `OnDeliveryExhausted` callback. `AddAdapters()` is also optional: with it, every attempt is recorded as a `warp-webhooks` `AdapterCallLog` row (response bodies always captured, request bodies never — the payload already lives on the delivery row) and the per-attempt timeline is populated; without it, the delivery state machine, retries, exhaustion, and dashboard still work fully from the `WebhookDelivery` row — only the granular per-attempt HTTP call log is absent (same telemetry-vs-recording split as adapters).
 
 ### Requires a Warp server somewhere
 
-Webhooks **execute jobs**, so a Warp server (worker) must run somewhere in the deployment to drain the `warp:webhooks` queue. Because delivery is a Core feature, **every `AddWarpServer` with a worker drains it** — there is no per-server opt-in to remember. The publisher process that calls `SendAsync` need not be the worker; the delivery row and executor job commit through the outbox and any server in the cluster picks the job up. An `AddWarp`-only publisher/dashboard process stages deliveries and relies on a server elsewhere to run them.
+Webhooks **execute jobs**, so a Warp server (worker) must run somewhere in the deployment that drains the webhook queue (`DefaultQueue` unless you [choose another](#isolating-webhook-delivery)). No `AddWebhooks` call is needed on that server. **Since 8.2** a server runs deliveries only if its `Queues` (or one of its `AddWorkerGroup` groups) include the webhook queue; before, every server ran them whatever its `Queues` listed. The publisher process that calls `SendAsync` need not be the worker; the delivery row and executor job commit through the outbox and any server in the cluster that drains the queue picks the job up. An `AddWarp`-only publisher/dashboard process stages deliveries and relies on a server elsewhere to run them.
 
-### Webhook workers
+### Isolating webhook delivery
 
-Attempts wait on other people's servers, up to `WebhookAttemptTimeout` (30 s) each, so since 8.1 **every server runs them on a dedicated worker group** that polls only `warp:webhooks`, with `WebhookWorkerCount` workers (default **4**), and the default worker group no longer polls `warp:webhooks`. A receiver that hangs can hold at most those workers; your jobs keep their own. It also caps concurrent attempts per server: with 4 workers and receivers that answer in 200 ms, a server sends about 20 deliveries a second, so raise it for high webhook volume (or add servers).
+Attempts wait on other people's servers, up to `WebhookAttemptTimeout` (30 s) each, so a receiver that hangs holds a worker for that long. On `DefaultQueue` it holds one of your job workers. To keep webhooks apart, give them their own queue and a worker group that drains it:
 
 ```csharp
 builder.Services.AddWarpServer<AppDbContext>(opt =>
 {
-    opt.WebhookWorkerCount = 8; // 0 = the pre-8.1 shape: the default group drains warp:webhooks
+    opt.AddWebhooks(w => w.Queue = "webhooks");
+    opt.AddWorkerGroup(g =>
+    {
+        g.Queues = ["webhooks"];
+        g.WorkerCount = 4;
+        g.PrefetchCount = 0; // recommended: attempts are slow, so do not claim ahead of the workers
+    });
 });
 ```
 
-The group takes the top-level polling settings and no prefetch. It shows on the dashboard like any worker group, its workers count in the server's worker total, and it is paused on its own: **pausing the default group no longer stops webhook delivery** (pause the webhook group as well, or the whole server). A group listing `warp:webhooks` with no workers does not count as routing it. If you route `warp:webhooks` yourself (listed in `Queues`, or in an `AddWorkerGroup(...)` group), that wins: no dedicated group is added, and with an explicit group listing it the default group does not poll it either.
+A receiver that hangs can now hold at most that group's workers; your jobs keep theirs. The group's worker count also caps the attempts that server runs at once: with 4 workers and receivers that answer in 200 ms, a server sends about 20 deliveries a second, so size it for your webhook volume (or add servers). The group is a worker group like any other: it shows on the dashboard, and pausing it pauses webhook delivery on that server.
+
+The queue is chosen at `SendAsync`: `WebhookSend.Queue` if set, else the sending process's `AddWebhooks(w => w.Queue)`, else its `DefaultQueue`. It is stored on the delivery, so the delivery's retries, redeliveries and recoveries stay on that queue, whichever process enqueues them. Make sure some server drains every queue your senders use; a delivery on a queue nobody drains stays `Pending`.
 
 ### Sending
 
@@ -343,7 +351,7 @@ Migration tooling for legacy delivery tables is intentionally out of scope — t
 
 ## Coexisting with another job system
 
-Webhooks require a Warp worker, but you do **not** have to move your whole job workload to Warp to adopt them. A common shape is a Warp server that runs *only* the webhooks executor alongside an existing Hangfire/Quartz deployment that keeps running your business jobs. Warp's queue (`warp:webhooks`), its retry scheduling, and its dashboard are self-contained; the two systems share only the database you already run. This lets you adopt durable webhook delivery as a bounded, low-risk slice without a scheduler migration.
+Webhooks require a Warp worker, but you do **not** have to move your whole job workload to Warp to adopt them. A common shape is a Warp server that runs *only* the webhooks executor alongside an existing Hangfire/Quartz deployment that keeps running your business jobs. Warp's webhook queue (choose one with `AddWebhooks(w => w.Queue)`), its retry scheduling, and its dashboard are self-contained; the two systems share only the database you already run. This lets you adopt durable webhook delivery as a bounded, low-risk slice without a scheduler migration.
 
 ## Retention and cleanup
 

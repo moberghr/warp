@@ -3,9 +3,6 @@ namespace Warp.Core.Webhooks;
 /// <summary>Shared identifiers and defaults for the webhooks feature.</summary>
 internal static class WebhookDefaults
 {
-    /// <summary>The dedicated queue the executor jobs run on.</summary>
-    internal const string Queue = WebhookConstants.Queue;
-
     /// <summary>The auto-registered adapter every attempt is recorded under.</summary>
     internal const string AdapterName = WebhookConstants.AdapterName;
 

@@ -51,4 +51,10 @@ public sealed class WebhookSend
 
     /// <summary>Signing secret carried on the row (self-containment); redacted on every read surface.</summary>
     public string? Secret { get; init; }
+
+    /// <summary>
+    /// The queue this delivery's attempts run on (8.2). <c>null</c> uses <c>AddWebhooks(w => w.Queue)</c>, else
+    /// <c>DefaultQueue</c>. Stamped on the delivery, so its retries and redeliveries stay on it.
+    /// </summary>
+    public string? Queue { get; init; }
 }

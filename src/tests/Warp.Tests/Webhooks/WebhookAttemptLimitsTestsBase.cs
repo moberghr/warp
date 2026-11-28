@@ -86,7 +86,7 @@ public abstract class WebhookAttemptLimitsTestsBase : IntegrationTestBase
         // the retry is a Scheduled executor job.
         await WarpTestServer.WaitUntil(
             async () => await server.CreateContext().Set<Job>()
-                .Where(x => x.Queue == WebhookConstants.Queue)
+                .Where(x => x.Queue == "default")
                 .Where(x => x.CurrentState == State.Scheduled)
                 .AnyAsync(Ct),
             timeout: TimeSpan.FromSeconds(8),
@@ -152,7 +152,7 @@ public abstract class WebhookAttemptLimitsTestsBase : IntegrationTestBase
         await ctx.SaveChangesAsync(Ct);
 
         var publisher = server.CreatePublisher();
-        await publisher.Enqueue(new ExecuteWebhookDelivery { DeliveryId = deliveryId }, WebhookConstants.Queue);
+        await publisher.Enqueue(new ExecuteWebhookDelivery { DeliveryId = deliveryId }, "default");
         await publisher.SaveChangesAsync(Ct);
 
         return deliveryId;
