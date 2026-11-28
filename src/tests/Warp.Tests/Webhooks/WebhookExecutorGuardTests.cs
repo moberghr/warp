@@ -36,6 +36,7 @@ public class WebhookExecutorGuardTests
             endpointHealthHandlers: [],
             scopeFactory: null!,
             configuration: Options.Create(new WarpConfiguration()),
+            behavior: Options.Create(new WebhookSendBehavior()),
             logger: NullLogger<ExecuteWebhookDeliveryHandler<FaultingContext>>.Instance);
 
         await Should.NotThrowAsync(async () =>

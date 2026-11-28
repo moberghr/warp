@@ -37,10 +37,15 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
 {
     private const int StuckDeliveryBatchSize = 100;
 
+    // REMOVE in 9.0 (issue #367): the queue 8.1 and earlier put every webhook executor job on. Only the catch-up in
+    // MoveLegacyWebhookJobsAsync reads it.
+    private const string LegacyWebhookQueue = "warp:webhooks";
+
     private readonly DbContext _context;
     private readonly TimeProvider _time;
     private readonly IWarpSqlQueries<TContext> _sqlQueries;
     private readonly WarpServerConfiguration _configuration;
+    private readonly WebhookSendBehavior _webhookBehavior;
     private readonly IWarpNotificationTransport _notificationTransport;
     private readonly ServerTaskSignals<TContext> _signals;
 
@@ -62,6 +67,7 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
         [FromKeyedServices(DatabaseClock.Key)] TimeProvider time,
         IWarpSqlQueries<TContext> sqlQueries,
         IOptions<WarpServerConfiguration> configuration,
+        IOptions<WebhookSendBehavior> webhookBehavior,
         IWarpNotificationTransport notificationTransport,
         ServerTaskSignals<TContext> signals)
     {
@@ -69,6 +75,7 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
         _time = time;
         _sqlQueries = sqlQueries;
         _configuration = configuration.Value;
+        _webhookBehavior = webhookBehavior.Value;
         _notificationTransport = notificationTransport;
         _signals = signals;
     }
@@ -85,15 +92,17 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
     {
         var result = await RecoverStaleJobsAsync(ct);
         var stuckDeliveries = await RecoverStuckWebhookDeliveriesAsync(ct);
+        var movedLegacy = await MoveLegacyWebhookJobsAsync(ct);
 
-        if (result.Total == 0 && stuckDeliveries == 0)
+        if (result.Total == 0 && stuckDeliveries == 0 && movedLegacy == 0)
         {
             return null;
         }
 
         var message = $"Recovered {result.Total} stale jobs ({result.Requeued} requeued, {result.Failed} failed, {result.Deleted} deleted)";
+        message = stuckDeliveries == 0 ? message : $"{message}; re-enqueued {stuckDeliveries} stuck webhook deliveries";
 
-        return stuckDeliveries == 0 ? message : $"{message}; re-enqueued {stuckDeliveries} stuck webhook deliveries";
+        return movedLegacy == 0 ? message : $"{message}; moved {movedLegacy} webhook jobs off {LegacyWebhookQueue}";
     }
 
     internal async Task<StaleJobRecoveryResult> RecoverStaleJobsAsync(CancellationToken ct)
@@ -266,6 +275,7 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
                 {
                     x.Id,
                     x.NextAttemptAt,
+                    x.Queue,
                 })
             .ToListAsync(ct);
 
@@ -293,8 +303,9 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
             // (the serialized job carries the delivery id); the executor's attempt claim remains the
             // correctness backstop should it ever miss.
             var idText = row.Id.ToString();
+            var queue = _webhookBehavior.ResolveQueue(row.Queue, _configuration);
             var hasLiveJob = await _context.Set<Job>()
-                .Where(x => x.Queue == WebhookConstants.Queue)
+                .Where(x => x.Queue == queue)
                 .Where(x => liveJobStates.Contains(x.CurrentState))
                 .Where(x => x.Message != null)
                 .Where(x => x.Message!.Contains(idText))
@@ -320,7 +331,7 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
                 continue;
             }
 
-            StageExecutorJob(row.Id, now);
+            StageExecutorJob(row.Id, queue, now);
             recovered++;
         }
 
@@ -345,6 +356,45 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
         return recovered;
     }
 
+    // REMOVE in 9.0 (issue #367). Until 8.2 every webhook executor job ran on the special warp:webhooks queue, which
+    // every server drained on its own. Nothing drains it now, so the jobs a deployment still has there (first
+    // attempts not yet run, retries scheduled hours out) are moved to this server's webhook queue, where its workers
+    // or the host's AddWorkerGroup pick them up. Idempotent: once a row has moved it no longer matches. An 8.1
+    // process still running in a rolling deploy can put new ones there; the next run moves those too.
+    internal async Task<int> MoveLegacyWebhookJobsAsync(CancellationToken ct)
+    {
+        var queue = _webhookBehavior.ResolveQueue(null, _configuration);
+
+        // CurrentState compared to literals, one statement per state, so each reads its partial index (§6.15).
+        var enqueued = await _context.Set<Job>()
+            .Where(x => x.Kind == JobKind.Job)
+            .Where(x => x.CurrentState == State.Enqueued)
+            .Where(x => x.Queue == LegacyWebhookQueue)
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.Queue, queue), ct);
+
+        var scheduled = await _context.Set<Job>()
+            .Where(x => x.CurrentState == State.Scheduled)
+            .Where(x => x.Queue == LegacyWebhookQueue)
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.Queue, queue), ct);
+
+        if (enqueued == 0)
+        {
+            return scheduled;
+        }
+
+        // ExecuteUpdate modifies rows CapturePending never sees, so the wake is built here (§6.3). Under the task host
+        // it is sent from OnCommittedAsync; a direct caller has no outer transaction and the update is already
+        // committed, so it is sent now.
+        _pendingNotifications.Add(new Notification(NotificationKind.JobEnqueued, queue));
+
+        if (_context.Database.CurrentTransaction == null)
+        {
+            await DispatchPendingNotificationsAsync();
+        }
+
+        return enqueued + scheduled;
+    }
+
     /// <summary>
     /// Writes a <c>stats:</c> lifetime row and its hourly bucket sibling, or nothing when the sweep flipped
     /// no rows for that key. Never one without the other — a lifetime row with no bucket makes the lifetime
@@ -362,8 +412,8 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
     }
 
     // Immediate (not scheduled) so signal-driven pickup applies — mirrors the first attempt in SendAsync.
-    private void StageExecutorJob(Guid deliveryId, DateTime now)
-        => WebhookExecutorJobs.Stage(_context, deliveryId, now, now, _configuration.ApplicationName, "crash recovery for stuck delivery");
+    private void StageExecutorJob(Guid deliveryId, string queue, DateTime now)
+        => WebhookExecutorJobs.Stage(_context, deliveryId, queue, now, now, _configuration.ApplicationName, "crash recovery for stuck delivery");
 
     // A job recovery ends (deleted or failed) is settled work: it can be what completes its batch or
     // message, and a continuation may be waiting on it. The Orchestrator checks what a wake names and

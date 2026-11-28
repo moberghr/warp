@@ -13,13 +13,14 @@ using Warp.Tests.TestData.Handlers;
 namespace Warp.Tests.Webhooks;
 
 /// <summary>
-/// Webhook attempts run on their own bounded worker group (8.1, <c>WebhookWorkerCount</c>): a receiver that hangs holds
-/// webhook workers only, so jobs keep running, and no more attempts run at once than the group has workers.
+/// Webhook deliveries are ordinary jobs on an ordinary queue. A host that puts them on their own queue
+/// (<c>AddWebhooks(w => w.Queue)</c>) and drains it with its own <c>AddWorkerGroup</c> isolates them: a receiver that
+/// hangs holds that group's workers only, so jobs keep running, and no more attempts run at once than it has workers.
 /// </summary>
 [GenerateDatabaseTests]
-public abstract class WebhookWorkerIsolationTestsBase : IntegrationTestBase
+public abstract class WebhookQueueIsolationTestsBase : IntegrationTestBase
 {
-    protected WebhookWorkerIsolationTestsBase(IDatabaseFixture fixture)
+    protected WebhookQueueIsolationTestsBase(IDatabaseFixture fixture)
         : base(fixture)
     {
     }
@@ -27,7 +28,7 @@ public abstract class WebhookWorkerIsolationTestsBase : IntegrationTestBase
     private static CancellationToken Ct => Xunit.TestContext.Current.CancellationToken;
 
     [TimedFact]
-    public async Task HangingReceiver_HoldsOnlyTheWebhookWorkers_JobsKeepRunning()
+    public async Task HangingReceiver_OnAHostWebhookGroup_HoldsOnlyThatGroup_JobsKeepRunning()
     {
         var signal = new BarrierSignal();
         await using var server = await WarpTestServer.StartAsync(
@@ -35,7 +36,13 @@ public abstract class WebhookWorkerIsolationTestsBase : IntegrationTestBase
             configure: cfg =>
             {
                 cfg.Queues = ["default"];
-                cfg.WebhookWorkerCount = 1;
+                cfg.AddWebhooks(w => w.Queue = "webhooks");
+                cfg.AddWorkerGroup(x =>
+                {
+                    x.WorkerCount = 1;
+                    x.Queues = ["webhooks"];
+                    x.PrefetchCount = 0;
+                });
             },
             configureServices: services =>
                 services.AddHttpClient(WebhookConstants.AdapterName)
@@ -47,7 +54,7 @@ public abstract class WebhookWorkerIsolationTestsBase : IntegrationTestBase
         // The single webhook worker is now inside the first attempt, held at the receiver.
         (await signal.Running.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue();
 
-        // A job still runs: the default group never polls warp:webhooks.
+        // A job still runs: the default group does not poll the webhook queue.
         var publisher = server.CreatePublisher();
         await publisher.Enqueue(new CounterRequest());
         await publisher.SaveChangesAsync(Ct);
@@ -62,7 +69,7 @@ public abstract class WebhookWorkerIsolationTestsBase : IntegrationTestBase
         // And the second delivery waits for the one webhook worker instead of taking a job worker.
         (await GetStatusAsync(second)).ShouldBe(WebhookDeliveryStatus.Pending);
         (await server.CreateContext().Set<Job>()
-            .Where(x => x.Queue == WebhookConstants.Queue)
+            .Where(x => x.Queue == "webhooks")
             .Where(x => x.CurrentState == State.Processing)
             .CountAsync(Ct)).ShouldBe(1);
 

@@ -3,7 +3,8 @@ namespace Warp.Core.Webhooks;
 /// <summary>
 /// Entry point for the webhooks feature: hand a fully-described <see cref="WebhookSend"/> and Warp
 /// takes ownership of delivery. <see cref="SendAsync"/> persists a self-contained <c>Pending</c>
-/// delivery row and enqueues the executor job on the <c>warp:webhooks</c> queue — both in the caller's
+/// delivery row and enqueues the executor job on the webhook queue (<see cref="WebhookSend.Queue"/>, else
+/// <c>AddWebhooks(w => w.Queue)</c>, else <c>DefaultQueue</c>) — both in the caller's
 /// transaction (outbox), so the delivery becomes visible atomically with the caller's own writes.
 /// Resolved as a scoped service; inject <c>IWebhookDispatcher</c>.
 /// </summary>

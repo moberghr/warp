@@ -15,9 +15,8 @@ namespace Warp.Tests.Webhooks;
 /// Redelivery coverage for <see cref="IWebhookCommandService"/> (WSC7 + review CRITICAL-1 / RACE / W-6).
 /// Runs the real <c>AddWebhooks</c> DI wiring via <see cref="WarpTestServer"/> so the executor-job enqueue
 /// goes through the addon-registered <see cref="IWebhookRedeliveryEnqueuer"/> seam (not a hand-built
-/// internal — adapters lesson). The server's worker polls only <c>default</c>, so a redelivered executor job
-/// lands on <c>warp:webhooks</c> and stays <c>Enqueued</c> for a deterministic assertion instead of racing a
-/// worker pickup. Each test drives exactly one <c>Redeliver</c> call (§4.8), except the RACE test which
+/// internal — adapters lesson). The server runs no worker, so a redelivered executor job stays <c>Enqueued</c>
+/// on its delivery's queue for a deterministic assertion instead of racing a worker pickup. Each test drives exactly one <c>Redeliver</c> call (§4.8), except the RACE test which
 /// deliberately drives two concurrently.
 /// </summary>
 [GenerateDatabaseTests]
@@ -60,6 +59,19 @@ public abstract class WebhookCommandServiceTestsBase : IntegrationTestBase
         delivery.AttemptCount.ShouldBe(0);
 
         (await WebhookJobCountAsync(server)).ShouldBe(1);
+    }
+
+    [TimedFact]
+    public async Task Redeliver_DeliveryWithAQueue_EnqueuesTheExecutorJobOnThatQueue()
+    {
+        // A delivery stays on the queue it was sent on: a redelivery does not move it to the server's default.
+        await using var server = await StartServerAsync();
+        var deliveryId = await SeedDeliveryAsync(server, WebhookDeliveryStatus.Delivered, attemptCount: 1, queue: "tenant-a");
+
+        (await RedeliverAsync(server, deliveryId)).ShouldBe(WebhookRedeliveryResult.Enqueued);
+
+        (await WebhookJobCountAsync(server, "tenant-a")).ShouldBe(1);
+        (await WebhookJobCountAsync(server)).ShouldBe(0);
     }
 
     [TimedFact]
@@ -236,16 +248,11 @@ public abstract class WebhookCommandServiceTestsBase : IntegrationTestBase
             {
                 cfg.AddWebhooks();
 
-                // These tests assert a redelivered executor job is ENQUEUED on warp:webhooks (and the delivery
-                // row's reset state) — they never execute it. The default worker group force-appends
-                // warp:webhooks to its queue list unconditionally (WarpServerConfiguration, §8.20), so
-                // cfg.Queues cannot exclude it — a running worker WILL drain warp:webhooks and execute the
-                // redelivered job under load (flipping AttemptCount off 0 / the queue count off 1). Disable the
-                // worker entirely: the redelivery enqueuer + command service still stage the job (they're
-                // registered regardless of the worker), and with no worker the job stays Enqueued for a
-                // deterministic assertion. (Before the webhook executor's IHttpClientFactory was registered by
-                // AddWarp, this raced only when the executor happened to fail to construct — now it constructs
-                // and would deterministically drain, so worker isolation must be explicit.)
+                // These tests assert a redelivered executor job is ENQUEUED on the delivery's queue (and the
+                // delivery row's reset state) — they never execute it. A running worker would drain the job under
+                // load (flipping AttemptCount off 0 / the queue count off 1), so the worker is disabled: the
+                // redelivery enqueuer + command service still stage the job (they're registered regardless of the
+                // worker), and with no worker it stays Enqueued for a deterministic assertion.
                 cfg.DisableWorker();
 
                 // These tests hand-seed delivery rows (Redeliver_SettledDelivery_RefreshesExpireAt seeds one
@@ -262,10 +269,12 @@ public abstract class WebhookCommandServiceTestsBase : IntegrationTestBase
         WarpTestServer server,
         WebhookDeliveryStatus status,
         int attemptCount,
-        DateTime? expireAt = null)
+        DateTime? expireAt = null,
+        string? queue = null)
     {
         var ctx = server.CreateContext();
         var delivery = NewDelivery(status, attemptCount, expireAt);
+        delivery.Queue = queue;
 
         ctx.Set<WebhookDelivery>().Add(delivery);
         await ctx.SaveChangesAsync(Ct);
@@ -324,10 +333,11 @@ public abstract class WebhookCommandServiceTestsBase : IntegrationTestBase
             .FirstAsync(Ct);
     }
 
-    private static async Task<int> WebhookJobCountAsync(WarpTestServer server)
+    // A seeded delivery carries no queue (as rows sent before 8.2 do), so its jobs go to the server's DefaultQueue.
+    private static async Task<int> WebhookJobCountAsync(WarpTestServer server, string queue = "default")
     {
         return await server.CreateContext().Set<Job>()
-            .CountAsync(x => x.Queue == "warp:webhooks", Ct);
+            .CountAsync(x => x.Queue == queue, Ct);
     }
 }
 

@@ -487,7 +487,7 @@ public abstract class CrashRecoveryTestsBase : IAsyncLifetime
     {
         // The staged executor job replaced an IPublisher.Enqueue, which announced itself via
         // Publisher.SaveChangesAsync. Staging directly bypasses that, so the sweep has to announce the row
-        // itself or a recovered delivery sits on warp:webhooks until a worker's backoff poll finds it.
+        // itself or a recovered delivery sits on its queue until a worker's backoff poll finds it.
         await SeedStuckDeliveryAsync();
 
         var transport = new RecordingNotificationTransport();
@@ -496,7 +496,7 @@ public abstract class CrashRecoveryTestsBase : IAsyncLifetime
         using var subscription = signals.Subscribe(ServerTaskSignal.JobEnqueued, () => woken++);
 
         var recovered = await TestTasks
-            .CreateStaleJobRecovery(_fixture.CreateContext(), TimeProvider.System, TimeSpan.FromMinutes(5), signals: signals, transport: transport)
+            .CreateStaleJobRecovery(_fixture.CreateContext(), TimeProvider.System, TimeSpan.FromMinutes(5), signals: signals, transport: transport, webhookQueue: "webhooks")
             .RecoverStuckWebhookDeliveriesAsync(CancellationToken.None);
 
         // No outer transaction, so the sweep owns and commits its own — the wake is durable and fires here.
@@ -504,7 +504,7 @@ public abstract class CrashRecoveryTestsBase : IAsyncLifetime
         woken.ShouldBe(1);
         transport.Published.Count.ShouldBe(1);
         transport.Published[0].Kind.ShouldBe(NotificationKind.JobEnqueued);
-        transport.Published[0].Queue.ShouldBe("warp:webhooks");
+        transport.Published[0].Queue.ShouldBe("webhooks");
     }
 
     [TimedFact]
@@ -523,7 +523,7 @@ public abstract class CrashRecoveryTestsBase : IAsyncLifetime
 
         var ctx = _fixture.CreateContext();
         await using var outerTx = await ctx.Database.BeginTransactionAsync(Xunit.TestContext.Current.CancellationToken);
-        var recovery = TestTasks.CreateStaleJobRecovery(ctx, TimeProvider.System, TimeSpan.FromMinutes(5), signals: signals, transport: transport);
+        var recovery = TestTasks.CreateStaleJobRecovery(ctx, TimeProvider.System, TimeSpan.FromMinutes(5), signals: signals, transport: transport, webhookQueue: "webhooks");
         await recovery.ExecuteAsync(CancellationToken.None);
         await outerTx.CommitAsync(Xunit.TestContext.Current.CancellationToken);
 
@@ -532,7 +532,7 @@ public abstract class CrashRecoveryTestsBase : IAsyncLifetime
         woken.ShouldBe(2);
         transport.Published.Count.ShouldBe(2);
         transport.Published.ShouldContain(n => n.Kind == NotificationKind.JobEnqueued && n.Queue == "default");
-        transport.Published.ShouldContain(n => n.Kind == NotificationKind.JobEnqueued && n.Queue == "warp:webhooks");
+        transport.Published.ShouldContain(n => n.Kind == NotificationKind.JobEnqueued && n.Queue == "webhooks");
     }
 
     [TimedFact]
@@ -546,23 +546,160 @@ public abstract class CrashRecoveryTestsBase : IAsyncLifetime
         await SeedStuckDeliveryAsync();
 
         await TestTasks
-            .CreateStaleJobRecovery(_fixture.CreateContext(), TimeProvider.System, TimeSpan.FromMinutes(5), applicationName: "recovery-app")
+            .CreateStaleJobRecovery(_fixture.CreateContext(), TimeProvider.System, TimeSpan.FromMinutes(5), applicationName: "recovery-app", webhookQueue: "webhooks")
             .RecoverStuckWebhookDeliveriesAsync(CancellationToken.None);
 
         var job = await _fixture.CreateContext().Set<Job>()
-            .Where(x => x.Queue == "warp:webhooks")
+            .Where(x => x.Queue == "webhooks")
             .FirstAsync(Xunit.TestContext.Current.CancellationToken);
 
         job.TraceId.ShouldBe(job.Id);
         job.Application.ShouldBe("recovery-app");
     }
 
-    private async Task SeedStuckDeliveryAsync()
+    [TimedFact]
+    public async Task RecoverStuckWebhookDeliveries_DeliveryWithAQueue_StagesTheJobOnThatQueue()
     {
+        // A delivery stays on the queue it was sent on: the server's own webhook queue is only for rows without one.
+        await SeedStuckDeliveryAsync(queue: "tenant-a");
+
+        await TestTasks
+            .CreateStaleJobRecovery(_fixture.CreateContext(), TimeProvider.System, TimeSpan.FromMinutes(5), webhookQueue: "webhooks")
+            .RecoverStuckWebhookDeliveriesAsync(CancellationToken.None);
+
+        var queues = await _fixture.CreateContext().Set<Job>()
+            .Select(x => x.Queue)
+            .ToListAsync(Xunit.TestContext.Current.CancellationToken);
+        queues.ShouldBe(["tenant-a"]);
+    }
+
+    [TimedFact]
+    public async Task RecoverStuckWebhookDeliveries_LiveJobOnTheDeliveryQueue_StagesNoSecondJob()
+    {
+        // The live-job check looks on the delivery's own queue, not the server's webhook queue.
+        var deliveryId = await SeedStuckDeliveryAsync(queue: "tenant-a");
+        await SeedJobAsync("tenant-a", State.Enqueued, deliveryId);
+
+        var recovered = await TestTasks
+            .CreateStaleJobRecovery(_fixture.CreateContext(), TimeProvider.System, TimeSpan.FromMinutes(5), webhookQueue: "webhooks")
+            .RecoverStuckWebhookDeliveriesAsync(CancellationToken.None);
+
+        recovered.ShouldBe(0);
+        (await _fixture.CreateContext().Set<Job>().CountAsync(Xunit.TestContext.Current.CancellationToken)).ShouldBe(1);
+    }
+
+    [TimedFact]
+    public async Task MoveLegacyWebhookJobs_EnqueuedAndScheduledOnTheLegacyQueue_MovesThemAndWakesTheWebhookQueue()
+    {
+        // Executor jobs 8.1 left on warp:webhooks, which nothing drains any more, move to the server's webhook queue.
+        var enqueued = await SeedJobAsync("warp:webhooks", State.Enqueued);
+        var scheduled = await SeedJobAsync("warp:webhooks", State.Scheduled);
+
+        var transport = new RecordingNotificationTransport();
+        var signals = new ServerTaskSignals<TestContext>();
+        var woken = 0;
+        using var subscription = signals.Subscribe(ServerTaskSignal.JobEnqueued, () => woken++);
+
+        var moved = await TestTasks
+            .CreateStaleJobRecovery(_fixture.CreateContext(), TimeProvider.System, TimeSpan.FromMinutes(5), signals: signals, transport: transport, webhookQueue: "webhooks")
+            .MoveLegacyWebhookJobsAsync(CancellationToken.None);
+
+        moved.ShouldBe(2);
+        (await GetQueueAsync(enqueued)).ShouldBe("webhooks");
+        (await GetQueueAsync(scheduled)).ShouldBe("webhooks");
+
+        // No outer transaction: the update is committed, so the wake for the moved Enqueued job fires now.
+        woken.ShouldBe(1);
+        transport.Published.ShouldBe([(NotificationKind.JobEnqueued, "webhooks")]);
+    }
+
+    [TimedFact]
+    public async Task MoveLegacyWebhookJobs_NoWebhookQueueConfigured_MovesThemToTheDefaultQueue()
+    {
+        var enqueued = await SeedJobAsync("warp:webhooks", State.Enqueued);
+
+        await TestTasks
+            .CreateStaleJobRecovery(_fixture.CreateContext(), TimeProvider.System, TimeSpan.FromMinutes(5), defaultQueue: "orders")
+            .MoveLegacyWebhookJobsAsync(CancellationToken.None);
+
+        (await GetQueueAsync(enqueued)).ShouldBe("orders");
+    }
+
+    [TimedFact]
+    public async Task MoveLegacyWebhookJobs_OtherQueuesAndOtherStates_LeftAloneAndASecondRunMovesNothing()
+    {
+        var otherQueue = await SeedJobAsync("default", State.Enqueued);
+        var processing = await SeedJobAsync("warp:webhooks", State.Processing);
+        var completed = await SeedJobAsync("warp:webhooks", State.Completed);
+        await SeedJobAsync("warp:webhooks", State.Enqueued);
+
+        var transport = new RecordingNotificationTransport();
+        var recovery = TestTasks.CreateStaleJobRecovery(_fixture.CreateContext(), TimeProvider.System, TimeSpan.FromMinutes(5), transport: transport, webhookQueue: "webhooks");
+
+        (await recovery.MoveLegacyWebhookJobsAsync(CancellationToken.None)).ShouldBe(1);
+        (await recovery.MoveLegacyWebhookJobsAsync(CancellationToken.None)).ShouldBe(0);
+
+        (await GetQueueAsync(otherQueue)).ShouldBe("default");
+        (await GetQueueAsync(processing)).ShouldBe("warp:webhooks");
+        (await GetQueueAsync(completed)).ShouldBe("warp:webhooks");
+
+        // Only the run that moved an Enqueued job announces one.
+        transport.Published.Count.ShouldBe(1);
+    }
+
+    [TimedFact]
+    public async Task MoveLegacyWebhookJobs_UnderTheTaskHostTransaction_WakesOnlyAfterTheCommit()
+    {
+        await SeedJobAsync("warp:webhooks", State.Enqueued);
+
+        var transport = new RecordingNotificationTransport();
+        var ctx = _fixture.CreateContext();
+        await using var outerTx = await ctx.Database.BeginTransactionAsync(Xunit.TestContext.Current.CancellationToken);
+        var recovery = TestTasks.CreateStaleJobRecovery(ctx, TimeProvider.System, TimeSpan.FromMinutes(5), transport: transport, webhookQueue: "webhooks");
+
+        await recovery.ExecuteAsync(CancellationToken.None);
+        transport.Published.ShouldBeEmpty();
+
+        await outerTx.CommitAsync(Xunit.TestContext.Current.CancellationToken);
+        await recovery.OnCommittedAsync(CancellationToken.None);
+
+        transport.Published.ShouldBe([(NotificationKind.JobEnqueued, "webhooks")]);
+    }
+
+    private async Task<Guid> SeedJobAsync(string queue, State state, Guid? deliveryId = null)
+    {
+        var jobId = Guid.NewGuid();
+        var ctx = _fixture.CreateContext();
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = jobId,
+            Kind = JobKind.Job,
+            Type = typeof(Warp.Core.Webhooks.ExecuteWebhookDelivery).AssemblyQualifiedName!,
+            Message = System.Text.Json.JsonSerializer.Serialize(new Warp.Core.Webhooks.ExecuteWebhookDelivery { DeliveryId = deliveryId ?? Guid.NewGuid() }),
+            CurrentState = state,
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = state == State.Scheduled ? DateTime.UtcNow.AddHours(1) : DateTime.UtcNow,
+            Queue = queue,
+        });
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        return jobId;
+    }
+
+    private async Task<string> GetQueueAsync(Guid jobId)
+        => await _fixture.CreateContext().Set<Job>()
+            .Where(x => x.Id == jobId)
+            .Select(x => x.Queue)
+            .FirstAsync(Xunit.TestContext.Current.CancellationToken);
+
+    private async Task<Guid> SeedStuckDeliveryAsync(string? queue = null)
+    {
+        var id = Guid.NewGuid();
         var ctx = _fixture.CreateContext();
         ctx.Set<WebhookDelivery>().Add(new WebhookDelivery
         {
-            Id = Guid.NewGuid(),
+            Id = id,
+            Queue = queue,
             EventType = "order.created",
             EventId = Guid.NewGuid().ToString(),
             Url = "https://example.test/hook",
@@ -576,6 +713,8 @@ public abstract class CrashRecoveryTestsBase : IAsyncLifetime
         });
 
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        return id;
     }
 
     private async Task<Guid> SeedStaleProcessingJobAsync()

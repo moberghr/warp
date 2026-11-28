@@ -349,9 +349,9 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
     /// reproduces the `ORDER BY Queue, ScheduleTime LIMIT n` the one-statement form used to give:
     /// that ordering drains the lexicographically-first queue completely before the next one is
     /// looked at, so taking as much as possible from each queue in turn yields the same rows.
-    /// That starve-the-later-queue behaviour is PRESERVED deliberately, not fixed here — the
-    /// default group binds `{DefaultQueue, warp:webhooks}`, so webhook deliveries already wait for
-    /// the default queue to drain, and changing it is a separate decision with its own blast radius.
+    /// That starve-the-later-queue behaviour is PRESERVED deliberately, not fixed here — a group
+    /// that lists several queues already relies on it, and changing it is a separate decision with
+    /// its own blast radius.
     /// </para>
     /// <para>
     /// Ordering uses <see cref="StringComparer.Ordinal"/>, where the statement it replaces used the
