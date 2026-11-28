@@ -14,11 +14,17 @@ namespace Warp.Core.Services;
 public sealed class ErrorGroupCommandService<TContext> : IErrorGroupCommandService
     where TContext : DbContext
 {
-    private readonly TContext _context;
+    private readonly DbContext _context;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<ErrorGroupCommandService<TContext>> _logger;
 
     public ErrorGroupCommandService(TContext context, TimeProvider timeProvider, ILogger<ErrorGroupCommandService<TContext>> logger)
+        : this((DbContext)context, timeProvider, logger)
+    {
+    }
+
+    // The Warp context (rule 2.14): AddWarp passes IWarpContext.Context, which is not a TContext.
+    internal ErrorGroupCommandService(DbContext context, TimeProvider timeProvider, ILogger<ErrorGroupCommandService<TContext>> logger)
     {
         _context = context;
         _timeProvider = timeProvider;

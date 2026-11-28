@@ -6,13 +6,13 @@ using Warp.Core.Enums;
 using Warp.Core.Handlers;
 using Warp.Core.Helper;
 using Warp.Core.NoRestart;
-using Warp.Core.Webhooks;
 
-namespace Warp.Worker.Services;
+namespace Warp.Core.Webhooks;
 
-// Stages an ExecuteWebhookDelivery job directly on a server-task context (§2.14, §8.20): server tasks never go
-// through the TContext-bound IPublisher. Used by the stuck-delivery sweep (StaleJobRecovery) and the endpoint
-// monitor. The caller captures the wake (NotificationDispatch.CapturePending) and saves in its own transaction.
+// Stages an ExecuteWebhookDelivery job directly on one of Warp's own contexts (§2.14, §8.20), never through the
+// TContext-bound IPublisher. Used by the stuck-delivery sweep (StaleJobRecovery), the endpoint monitor, and a
+// redelivery or probe from WebhookCommandService on the Warp context, whose transaction the job must commit in.
+// The caller captures the wake (NotificationDispatch.CapturePending) and saves in its own transaction.
 internal static class WebhookExecutorJobs
 {
     // [Restart] on ExecuteWebhookDelivery is applied by NoRestartPublishBehavior, which only runs when the host
@@ -21,7 +21,7 @@ internal static class WebhookExecutorJobs
     // on an addon being registered or on RestartStaleJobsByDefault (§8.20).
     private static readonly string? RestartMetadata = BuildRestartMetadata();
 
-    internal static void Stage(DbContext context, Guid deliveryId, DateTime scheduleTime, DateTime now, string? application, string createdBy)
+    internal static void Stage(DbContext context, Guid deliveryId, DateTime scheduleTime, DateTime now, string? application, string createdBy, Guid? traceId = null)
     {
         var job = JobHelper.CreateJob(
             message: JsonSerializer.Serialize(new ExecuteWebhookDelivery { DeliveryId = deliveryId }),
@@ -35,8 +35,8 @@ internal static class WebhookExecutorJobs
             application: application);
 
         // A server task's work has no caller trace to inherit, so the job roots a fresh trace — the same fallback
-        // Publisher lands on from here (mirrors RecurringJobScheduler).
-        job.TraceId = job.Id;
+        // Publisher lands on from here (mirrors RecurringJobScheduler). A dashboard redelivery passes its caller's.
+        job.TraceId = traceId ?? job.Id;
 
         context.Set<Job>().Add(job);
         context.Set<JobLog>().Add(new JobLog

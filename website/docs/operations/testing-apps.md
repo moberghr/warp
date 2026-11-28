@@ -41,7 +41,7 @@ What that gives you:
   ```
 
   Without the second `RemoveAll`, EF Core fails with "Services for database providers ... have been registered". Compute the database name once, outside the lambda, if several scopes of one test should see the same data: the lambda runs per scope.
-- **Everything else Warp registered stays.** `IMediator` works as in production. Publishing still stages `Job` rows on whatever context the app uses and saves them with it (on in-memory you can read them back with `context.Set<Job>()`), but nothing runs them: no worker, no message routing, no scheduling.
+- **Everything else Warp registered stays.** `IMediator` works as in production. Publishing still stages `Job` rows on whatever context the app uses and saves them with it (on in-memory you can read them back with `context.Set<Job>()`), but nothing runs them: no worker, no message routing, no scheduling. The dashboard's query and command services (`IJobQueryService`, `IJobCommandService` and the rest) and the admin managers normally run on Warp's own context, but on a context whose provider Warp does not support for its own (EF Core in-memory, SQLite) they use yours, so they see the same rows.
 
 ### Or: let Warp start without the database
 

@@ -24,11 +24,15 @@ public static class RateLimitServiceConfiguration
         // WarpModelCustomizer. This opt-in only wires the runtime behavior + admin manager.
         // Process-wide: remembers rejections across jobs and holds this process's leased Wait-mode slots.
         builder.Services.TryAddSingleton<RateLimitGate>();
-        builder.Services.AddScoped<RateLimitManager<TContext>>();
+
+        // The admin manager runs on the Warp context (rule 2.14, #344), in every AddWarp process.
+        builder.Services.AddScoped(x => new RateLimitManager<TContext>(
+            x.GetRequiredService<IWarpContext>().Context,
+            x.GetRequiredService<TimeProvider>()));
         builder.Services.AddScoped<IRateLimitManager, GateInvalidatingRateLimitManager<TContext>>();
 
-        // The pipeline's store and resolver use Warp's own context, opened only for a job with a rate
-        // limit (rule 6.17); the admin manager above stays on TContext for AddWarp-only hosts (#344).
+        // The pipeline's store and resolver use the server context, opened only for a job with a rate
+        // limit (rule 6.17).
         // A host that registered its own IRateLimitManager decides the limit through it, as in 7.x (#349),
         // resolved only when a job with a rate limit asks.
         builder.Services.TryAddScoped<DeferredWarpContext>();

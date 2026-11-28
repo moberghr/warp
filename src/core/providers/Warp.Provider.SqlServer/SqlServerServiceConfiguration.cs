@@ -76,6 +76,12 @@ internal sealed class SqlServerServerContextConfigurator<TContext> : IWarpServer
     // opens a scope per bookkeeping call, once per tick, per server task, so that cost multiplies.
     // The string cannot change at runtime, so resolve it once (under a lock — server startup fires
     // many loops' first scopes concurrently).
+    // EF1001: SqlServerOptionsExtension is the only marker of a context configured with UseSqlServer.
+#pragma warning disable EF1001
+    public bool Supports(DbContextOptions applicationOptions) =>
+        applicationOptions.Extensions.OfType<Microsoft.EntityFrameworkCore.SqlServer.Infrastructure.Internal.SqlServerOptionsExtension>().Any();
+#pragma warning restore EF1001
+
     public void Configure(DbContextOptionsBuilder optionsBuilder, IServiceProvider applicationServices)
     {
         lock (_resolveLock)

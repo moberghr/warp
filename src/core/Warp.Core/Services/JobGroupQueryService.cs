@@ -20,9 +20,15 @@ public interface IJobGroupQueryService
 public class JobGroupQueryService<TContext> : IJobGroupQueryService
     where TContext : DbContext
 {
-    private readonly TContext _context;
+    private readonly DbContext _context;
 
     public JobGroupQueryService(TContext context)
+        : this((DbContext)context)
+    {
+    }
+
+    // The Warp context (rule 2.14): AddWarp passes IWarpContext.Context, which is not a TContext.
+    internal JobGroupQueryService(DbContext context)
     {
         _context = context;
     }

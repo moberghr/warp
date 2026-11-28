@@ -181,14 +181,18 @@ public sealed class WarpWebhookOptions
 /// </summary>
 internal sealed class WebhookRedeliveryEnqueuer : IWebhookRedeliveryEnqueuer
 {
-    private readonly IPublisher _publisher;
+    private readonly Func<IPublisher> _publisher;
 
-    public WebhookRedeliveryEnqueuer(IPublisher publisher) => _publisher = publisher;
+    // Resolved on use: on the Warp context WebhookCommandService stages the job itself and never calls this, and
+    // the publisher would build the application's context for nothing (#344).
+    public WebhookRedeliveryEnqueuer(Func<IPublisher> publisher) => _publisher = publisher;
 
     public async Task EnqueueAsync(Guid deliveryId, CancellationToken ct = default)
     {
+        var publisher = _publisher();
+
         // Immediate (not scheduled) so signal-driven pickup applies — mirrors the first attempt in SendAsync.
-        await _publisher.Enqueue(new ExecuteWebhookDelivery { DeliveryId = deliveryId }, WebhookDefaults.Queue);
-        await _publisher.SaveChangesAsync(ct);
+        await publisher.Enqueue(new ExecuteWebhookDelivery { DeliveryId = deliveryId }, WebhookDefaults.Queue);
+        await publisher.SaveChangesAsync(ct);
     }
 }

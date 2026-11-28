@@ -39,13 +39,19 @@ public class JobLogQueryService<TContext> : IJobLogQueryService
     /// <summary>
     /// The host's context; handler output and progress are read where the dashboard reads everything else.
     /// </summary>
-    private readonly TContext _context;
+    private readonly DbContext _context;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="JobLogQueryService{TContext}"/> class over the host's
     /// <typeparamref name="TContext"/>.
     /// </summary>
     public JobLogQueryService(TContext context)
+        : this((DbContext)context)
+    {
+    }
+
+    // The Warp context (rule 2.14): AddWarp passes IWarpContext.Context, which is not a TContext.
+    internal JobLogQueryService(DbContext context)
     {
         _context = context;
     }

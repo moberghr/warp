@@ -15,9 +15,15 @@ public sealed class ClientEventQueryService<TContext> : IClientEventQueryService
 {
     private const int TopNames = 10;
 
-    private readonly TContext _context;
+    private readonly DbContext _context;
 
-    public ClientEventQueryService(TContext context) => _context = context;
+    public ClientEventQueryService(TContext context)
+        : this((DbContext)context)
+    {
+    }
+
+    // The Warp context (rule 2.14): AddWarp passes IWarpContext.Context, which is not a TContext.
+    internal ClientEventQueryService(DbContext context) => _context = context;
 
     public async Task<ClientObservabilitySummaryModel> GetSummary(string? application, CancellationToken ct)
     {

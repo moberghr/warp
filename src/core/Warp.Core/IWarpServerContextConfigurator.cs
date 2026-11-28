@@ -11,4 +11,14 @@ namespace Warp.Core;
 public interface IWarpServerContextConfigurator
 {
     void Configure(DbContextOptionsBuilder optionsBuilder, IServiceProvider applicationServices);
+
+    /// <summary>
+    /// Whether this provider can open Warp's own context for an application context configured with
+    /// <paramref name="applicationOptions"/>: false when the application's context runs on another provider,
+    /// for example EF Core in-memory in the application's tests. Warp's dashboard and admin services then run
+    /// on the application's context instead. The default is <see langword="true"/>.
+    /// </summary>
+    /// <param name="applicationOptions">The application context's options as the application configured them.</param>
+    /// <returns><see langword="true"/> when Warp's own context can use this provider.</returns>
+    bool Supports(DbContextOptions applicationOptions) => true;
 }

@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Warp.Core;
 
 namespace Warp.Tests.Helpers;
@@ -16,6 +17,10 @@ internal static class WarpTestServiceCollectionExtensions
         where TContext : DbContext
     {
         services.AddScoped<IWarpServerContext>(x => new TestServerContext(x.GetRequiredService<TContext>()));
+
+        // The admin managers' context (rule 2.14). AddWarp registers it; a harness that composes an addon by hand
+        // without AddWarp needs it too.
+        services.TryAddScoped<IWarpContext>(x => new WarpContextHandle(x.GetRequiredService<TContext>()));
 
         return services;
     }

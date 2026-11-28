@@ -75,10 +75,16 @@ public class JobQueryService<TContext> : IJobQueryService
     /// </summary>
     private const string RetriedTimesPattern = "%\"" + WarpTelemetryAttributes.RetryMetadataRetriedTimesKey + "\"%";
 
-    private readonly TContext _context;
+    private readonly DbContext _context;
     private readonly TimeProvider _timeProvider;
 
     public JobQueryService(TContext context, TimeProvider timeProvider)
+        : this((DbContext)context, timeProvider)
+    {
+    }
+
+    // The Warp context (rule 2.14): AddWarp passes IWarpContext.Context, which is not a TContext.
+    internal JobQueryService(DbContext context, TimeProvider timeProvider)
     {
         _context = context;
         _timeProvider = timeProvider;

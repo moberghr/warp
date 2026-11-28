@@ -24,8 +24,8 @@ paths:
 ## Shared shape (applies to every surface below)
 
 - **Telemetry always emits; DB recording is opt-in.** Spans + meters fire unconditionally (null-listener, zero cost); rows are written only where the host opted in.
-- **Entities are always in the schema** (§2.11, `WarpModelCustomizer`) and mirrored by `WarpServerContext` (§2.14); builder methods gate runtime behaviour only. Entities live in `Warp.Core.Data.Entities` (§8.13). Migrations are additive.
-- **Read services are registered by `AddWarp` itself** so dashboard-only / publisher-only processes resolve them. Query services read on `TContext`; server tasks write on the server context (§2.14).
+- **Entities are always in the schema** (§2.11, `WarpModelCustomizer`) and mirrored by Warp's own contexts (§2.14); builder methods gate runtime behaviour only. Entities live in `Warp.Core.Data.Entities` (§8.13). Migrations are additive.
+- **Read services are registered by `AddWarp` itself** so dashboard-only / publisher-only processes resolve them. Query services read on the Warp context (`IWarpContext`); server tasks write on the server context (§2.14).
 - **Recording pipelines are lossy by design** (`DrainQueue`/`DrainService`, §2.19): a full channel drops the record and counts it (§8.32); user calls/requests are never blocked or failed.
 - **Durable metrics go `Counter` → `CounterAggregator` → `Statistic`** (worker path: `WarpCounterBuffer`, §6.2) so counts/error-rate/latency survive raw-row cleanup. Never write `Statistic` from a hot path.
 - **Counter-key namespaces are disjoint by first segment** (`adapter-app`, `endpoint-app`, `jobstat`/`jobstat-app`, `qwait`/`qwait-app`, `qbacklog`, `clientevent`/`clientevent-app`, `errorgroup`/`errorgroup-app`, `warpsys`, `deadline`): add new slices under a NEW prefix, never change an existing key.

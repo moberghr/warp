@@ -1,6 +1,6 @@
 # A Warp-owned context in every `AddWarp` process (#344)
 
-Status: design, awaiting approval. Target: 8.2 (minor).
+Status: approved 2026-11-28 (D1–D4 as recommended; D4: every listed service moves, the limit managers included, behaviour changes in the 8.2.0 release notes). Implemented. Target: 8.2 (minor).
 
 ## Problem
 
@@ -181,6 +181,16 @@ dashboard wake a worker.
   **(recommended)**. Or keep dashboard-only processes on the application's pool.
 - **D4 — behaviour notes 1–3 above** are acceptable for a minor release, documented in the 8.2 release notes and
   §2.14, with `TContext`'s command timeout copied.
+
+## Implementation notes
+
+- Webhook redelivery and endpoint probes: on the Warp context, Warp's own `IWebhookRedeliveryEnqueuer` (which publishes through the
+  `TContext`-bound `IPublisher`, another connection) would commit the executor job outside the reset's transaction. The command
+  service stages the job itself with `WebhookExecutorJobs` (moved from `Warp.Worker` to Core) on the same context and dispatches
+  its wake after the commit. A host-registered enqueuer is still called.
+- `ConcurrencyLimitManager` is now a factory registration; `ReplacedRegistration` recognises Warp's own by the factory instance (§8.8.1).
+- Command logging: the internal `WarpCommandLogging` (registered by `AddWarpServer` from `EnableServerCommandLogging`) drives the
+  Warp context's Debug demotion; an `AddWarp`-only process always demotes.
 
 ## Rules and docs (Phase 2)
 

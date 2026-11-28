@@ -70,7 +70,7 @@ public interface IMetricBoardCommandService
 public sealed class MetricBoardCommandService<TContext> : IMetricBoardCommandService
     where TContext : DbContext
 {
-    private readonly TContext _context;
+    private readonly DbContext _context;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<MetricBoardCommandService<TContext>> _logger;
     private readonly IWarpSqlQueries<TContext>? _sqlQueries;
@@ -78,6 +78,12 @@ public sealed class MetricBoardCommandService<TContext> : IMetricBoardCommandSer
     // sqlQueries: the provider's queries, for the board lock; absent in a host without a provider (the writes then run
     // unguarded, as before).
     public MetricBoardCommandService(TContext context, TimeProvider timeProvider, ILogger<MetricBoardCommandService<TContext>> logger, IWarpSqlQueries<TContext>? sqlQueries = null)
+        : this((DbContext)context, timeProvider, logger, sqlQueries)
+    {
+    }
+
+    // The Warp context (rule 2.14): AddWarp passes IWarpContext.Context, which is not a TContext.
+    internal MetricBoardCommandService(DbContext context, TimeProvider timeProvider, ILogger<MetricBoardCommandService<TContext>> logger, IWarpSqlQueries<TContext>? sqlQueries = null)
     {
         _context = context;
         _timeProvider = timeProvider;

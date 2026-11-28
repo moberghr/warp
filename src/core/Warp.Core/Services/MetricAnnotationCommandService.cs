@@ -32,11 +32,17 @@ public interface IMetricAnnotationCommandService
 public sealed class MetricAnnotationCommandService<TContext> : IMetricAnnotationCommandService
     where TContext : DbContext
 {
-    private readonly TContext _context;
+    private readonly DbContext _context;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<MetricAnnotationCommandService<TContext>> _logger;
 
     public MetricAnnotationCommandService(TContext context, TimeProvider timeProvider, ILogger<MetricAnnotationCommandService<TContext>> logger)
+        : this((DbContext)context, timeProvider, logger)
+    {
+    }
+
+    // The Warp context (rule 2.14): AddWarp passes IWarpContext.Context, which is not a TContext.
+    internal MetricAnnotationCommandService(DbContext context, TimeProvider timeProvider, ILogger<MetricAnnotationCommandService<TContext>> logger)
     {
         _context = context;
         _timeProvider = timeProvider;

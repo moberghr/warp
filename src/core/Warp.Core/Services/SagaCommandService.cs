@@ -43,7 +43,7 @@ internal static class SagaCommandServiceConstants
 public class SagaCommandService<TContext> : ISagaCommandService
     where TContext : DbContext
 {
-    private readonly TContext _context;
+    private readonly DbContext _context;
     private readonly IWarpLockProvider _lockProvider;
     private readonly WarpNotifierDispatcher _notifier;
     private readonly ILogger<SagaCommandService<TContext>> _logger;
@@ -53,6 +53,12 @@ public class SagaCommandService<TContext> : ISagaCommandService
         IWarpLockProvider lockProvider,
         WarpNotifierDispatcher notifier,
         ILogger<SagaCommandService<TContext>> logger)
+        : this((DbContext)context, lockProvider, notifier, logger)
+    {
+    }
+
+    // The Warp context (rule 2.14): AddWarp passes IWarpContext.Context, which is not a TContext.
+    internal SagaCommandService(DbContext context, IWarpLockProvider lockProvider, WarpNotifierDispatcher notifier, ILogger<SagaCommandService<TContext>> logger)
     {
         _context = context;
         _lockProvider = lockProvider;

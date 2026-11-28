@@ -22,9 +22,15 @@ public class EndpointQueryService<TContext> : IEndpointQueryService
 
     private const int RelatedJobsLimit = 100;
 
-    private readonly TContext _context;
+    private readonly DbContext _context;
 
     public EndpointQueryService(TContext context)
+        : this((DbContext)context)
+    {
+    }
+
+    // The Warp context (rule 2.14): AddWarp passes IWarpContext.Context, which is not a TContext.
+    internal EndpointQueryService(DbContext context)
     {
         _context = context;
     }
