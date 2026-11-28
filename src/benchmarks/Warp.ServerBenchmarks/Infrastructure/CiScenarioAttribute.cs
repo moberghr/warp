@@ -31,10 +31,16 @@ public sealed class CiScenarioAttribute : Attribute
 
     /// <summary>
     /// False while the scenario's gates have not been calibrated by comparing a commit with itself on CI: its
-    /// gates are then shown and fail nothing (a missing measurement still fails). New scenarios start false;
-    /// performance.md lists the ones to switch back on.
+    /// gates are then shown and fail nothing (a missing measurement still fails). A new scenario starts false
+    /// until three no-op runs have measured its noise (performance-worker.md §6.24).
     /// </summary>
     public bool Calibrated { get; set; } = true;
+
+    /// <summary>
+    /// The scenario's own statements-per-job line in percent, for a scenario whose statements move more than
+    /// the default line allows between identical builds. 0 (the default) means <c>PerfGates.StatementTolerancePct</c>.
+    /// </summary>
+    public double StatementTolerancePct { get; set; }
 
     /// <summary>
     /// True when a clock sets the scenario's duration (a rate-limit window, a scheduler tick, a job that waits

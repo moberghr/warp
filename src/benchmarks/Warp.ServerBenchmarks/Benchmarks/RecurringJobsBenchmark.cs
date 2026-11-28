@@ -31,7 +31,6 @@ namespace Warp.ServerBenchmarks.Benchmarks;
     "500 recurring definitions fall due on the same tick; the scheduler (every 1 s) fires them all and 10 workers run the 500 jobs.",
     "The recurring scheduler visits every due definition in one server-task pass, so its cost grows with the number due at once. No other scenario reaches it.",
     Order = 82,
-    Calibrated = false,
     ClockBound = true)]
 [CaseLabel(nameof(Provider), "PostgreSql", "PostgreSQL")]
 [CaseLabel(nameof(Provider), "SqlServer", "SQL Server")]

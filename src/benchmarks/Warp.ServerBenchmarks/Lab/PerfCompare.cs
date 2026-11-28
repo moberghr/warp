@@ -52,54 +52,7 @@ public static partial class PerfCompare
         Converters = { new UndefinedAsNullConverter() },
     };
 
-    /// <summary>
-    /// What a regression has to exceed before it FAILS a build rather than merely being reported.
-    /// <para>
-    /// Deliberately loose, and the looseness is the point. A gate that fires on drift gets ignored,
-    /// then switched off, and leaves the project worse off than no gate — it has spent its credibility.
-    /// Nothing this suite exists to catch lives near these numbers: the claim predicate it was built
-    /// after was 615x on EXPLAIN and +48.6% in statements, the lock pool was -51%. A 3% move is not
-    /// the shape of a real regression, it is the shape of a runner having a bad afternoon.
-    /// </para>
-    /// <para>
-    /// Everything smaller is still printed, with its direction and size, so a human can look. The
-    /// gate's job is to stop a catastrophe reaching main unnoticed, not to adjudicate every percent.
-    /// </para>
-    /// </summary>
-    private const double StatementTolerancePct = 5.0;
-
-    // WAL bytes per job, PostgreSQL only. Calibrated the same way as statements: across three no-op
-    // comparisons (42 cases, the same commit on both sides) statements moved at most 1.8% and WAL at
-    // most 2.5%, so each gate sits at roughly three to four times the worst noise measured.
-    private const double WalTolerancePct = 10.0;
-
-    // Only a collapse fails: head must be this many times slower than base. A no-op comparison — the
-    // same commit on both sides — measured anywhere from 0.70x to 1.43x, so halving (2x) sat too close
-    // to noise. Both real regressions found so far were far past 3x: the dispatcher sat out its backoff
-    // at 10x, and the over-claiming claim walked the table.
-    private const double ThroughputCollapseFactor = 3.0;
-
-    // Pages read per job. Not gated on a percentage: between identical builds it moves by half again
-    // with cache state and vacuum timing. But every large jump seen so far was a real defect and none
-    // was noise: a query the planner could serve from the wrong index (10,004 pages a call against 6,
-    // rule 6.11) and a per-row check that should have been per-parent (2,948 buffers a job against
-    // 165), both of which statements, WAL and throughput let through. So a blow-up fails, like a
-    // throughput collapse does. Those two were 18x and more; 5x is far from both them and the noise.
-    //
-    // A plan flip can be intermittent. If this fires on a change that cannot have caused it, the
-    // finding is still real: some query in that scenario has a plan that depends on statistics.
-    private const double BuffersBlowUpFactor = 5.0;
-
-    // Database time per job (PostgreSQL: pg_stat_statements execution + planning time; SQL Server: Query Store
-    // CPU time) is REPORTED, not gated. It is a timing, so it carries the runner's noise where statements and WAL
-    // are counts, and it has not been calibrated by comparing a commit with itself on CI the way the lines above
-    // were. A provisional +25% gate failed the message-routing scenario on a swing it shows between identical
-    // builds (its buffers per job read ~330 or ~600 on either side, the base side too). Gate it once no-op runs
-    // have measured its band (performance.md).
-
-    // Two-server scenarios: the server that completed fewer jobs must have done at least this share, or the
-    // case did not measure two servers (one sat the drain out) and fails as an invalid measurement.
-    private const double MinServerShare = 0.2;
+    // Where each gate sits, and which rows are report-only: PerfGates (rule 6.24 in performance-worker.md).
 
     /// <summary>
     /// The database versions the run measured (<c>--database=pg17+mssql2022</c>), shown in each section's heading
@@ -322,11 +275,6 @@ public static partial class PerfCompare
         var rows = new StringBuilder();
         var notes = new StringBuilder();
 
-        // Gates on a measurement not yet calibrated by comparing a commit with itself are shown, never failed
-        // (performance.md lists what to re-enable once no-op runs have measured them): a whole scenario that is
-        // new or was reworked, and SQL Server's per-job rows, recounted from Query Store.
-        var calibrated = scenario?.Calibrated ?? true;
-
         // A parameter with one value is the same on every row: it belongs to the scenario, not the case.
         var varying = cases
             .SelectMany(x => x.Parameters)
@@ -426,6 +374,10 @@ public static partial class PerfCompare
             {
                 unmeasured = "WAL measured on one side only";
             }
+            else if (!perSecond && !IsSqlServer(benchmark) && (b.RoundTripsPerJob is null) != (h.RoundTripsPerJob is null))
+            {
+                unmeasured = "commands measured on one side only";
+            }
             else if (b.PerSecond != h.PerSecond)
             {
                 unmeasured = "per-job figures on one side, per-second on the other";
@@ -442,28 +394,17 @@ public static partial class PerfCompare
                 continue;
             }
 
-            double? stmtChange = b.StatementsPerJob is null or 0 || h.StatementsPerJob is null
-                ? null
-                : (h.StatementsPerJob.Value - b.StatementsPerJob.Value) / b.StatementsPerJob.Value * 100;
+            var gateCase = new GateCase(
+                SqlServer: IsSqlServer(benchmark),
+                PerSecond: perSecond,
+                Calibrated: scenario?.Calibrated ?? true,
+                ClockBound: scenario?.ClockBound == true,
+                StatementTolerancePct: scenario?.StatementTolerancePct ?? 0);
             var baseRate = RateOf(b, benchmark);
             var headRate = RateOf(h, benchmark);
             double? rateChange = baseRate is null || headRate is null ? null : (headRate.Value - baseRate.Value) / baseRate.Value * 100;
-            var reportOnly = !calibrated || (IsSqlServer(benchmark) && !perSecond);
-
-            // Statements and WAL per job are the gates; see StatementTolerancePct and WalTolerancePct
-            // for where the lines sit. Allocations are REPORTED, not gated: across the same no-op runs
-            // they moved up to 4.9%, too close to any threshold worth having. Buffers moved up to 55%
-            // with cache state and vacuum timing, so only a blow-up fails (BuffersBlowUpFactor, below).
-            // Per-second counters (an idle server) are gated on statements too, on PostgreSQL: comparing
-            // a commit with itself they moved 0.0%, 0.0%, 0.8% and 1.5% once the window was 60 s after a
-            // 60 s settle (before that a once-a-minute task, and start-up work on whichever side ran
-            // first, moved them 14%). SQL Server's still move about 4% between identical builds, by a
-            // cause not found, and stay reported. Pages and WAL per second are reported on both: a
-            // single background tick is a large share of an idle second.
-            if (perSecond && IsSqlServer(benchmark))
-            {
-                stmtChange = null;
-            }
+            var reportOnly = PerfGates.IsReportOnly(gateCase);
+            var stmtChange = PerfGates.PercentChange(b.StatementsPerJob, h.StatementsPerJob);
 
             var gate = perSecond ? "reported" : "✅";
             if (stmtChange is not null)
@@ -472,75 +413,42 @@ public static partial class PerfCompare
             }
 
             // A line crossed: fails the case, or on a report-only row is shown with ⚠️ and fails nothing.
-            void Breach(string cell, string failure)
+            var breaches = PerfGates.Breaches(
+                gateCase,
+                new GateSide(b.StatementsPerJob, b.RoundTripsPerJob, b.WalBytesPerJob, b.BuffersPerJob, baseRate),
+                new GateSide(h.StatementsPerJob, h.RoundTripsPerJob, h.WalBytesPerJob, h.BuffersPerJob, headRate));
+            foreach (var breach in breaches)
             {
+                var (cell, failure) = Describe(breach, benchmark, b, h, rateChange);
                 if (!reportOnly)
                 {
                     gate = "❌ " + cell;
                     failures.Add(failure);
-
-                    return;
                 }
-
-                if (!gate.StartsWith('❌'))
+                else if (!gate.StartsWith('❌'))
                 {
                     gate = "⚠️ " + cell + " (report-only)";
                 }
             }
 
-            if (stmtChange > StatementTolerancePct)
-            {
-                Breach(
-                    string.Create(CultureInfo.InvariantCulture, $"stmt {stmtChange:+0.0;−0.0;0.0}% (limit +{StatementTolerancePct:0}%)"),
-                    string.Create(CultureInfo.InvariantCulture, $"{benchmark.Short}: statements/job {b.StatementsPerJob:N2} -> {h.StatementsPerJob:N2} ({stmtChange:+0.0;-0.0;0.0}%)"));
-            }
-
-            double? walChange = perSecond || b.WalBytesPerJob is null or 0 || h.WalBytesPerJob is null
-                ? null
-                : (h.WalBytesPerJob.Value - b.WalBytesPerJob.Value) / b.WalBytesPerJob.Value * 100;
-            if (walChange > WalTolerancePct)
-            {
-                Breach(
-                    string.Create(CultureInfo.InvariantCulture, $"WAL {walChange:+0.0;−0.0;0.0}% (limit +{WalTolerancePct:0}%)"),
-                    string.Create(CultureInfo.InvariantCulture, $"{benchmark.Short}: WAL/job {b.WalBytesPerJob:N0} -> {h.WalBytesPerJob:N0} bytes ({walChange:+0.0;-0.0;0.0}%)"));
-            }
-
-            // Throughput is far too noisy on a shared runner to gate a small change, but a collapse is
-            // not noise. See ThroughputCollapseFactor for where the line sits and why. Not on a scenario whose
-            // duration a clock sets (a rate-limit window, a scheduler tick, a job that sleeps a second): its
-            // rate says how long the clock ran, and a change in it is not Warp's.
-            if (scenario?.ClockBound != true && baseRate is not null && headRate is not null && headRate.Value * ThroughputCollapseFactor < baseRate.Value)
-            {
-                Breach(
-                    string.Create(CultureInfo.InvariantCulture, $"jobs/s {baseRate.Value / headRate.Value:0.0}× slower (limit {ThroughputCollapseFactor:0}×)"),
-                    string.Create(CultureInfo.InvariantCulture, $"{benchmark.Short}: jobs/s {baseRate:N0} -> {headRate:N0} ({rateChange:+0.0;-0.0;0.0}%)"));
-            }
-
-            // Pages read are too noisy to gate a small change, but a blow-up is a query plan gone wrong.
-            // See BuffersBlowUpFactor.
-            if (!perSecond && b.BuffersPerJob is > 0 && h.BuffersPerJob is not null && h.BuffersPerJob.Value > b.BuffersPerJob.Value * BuffersBlowUpFactor)
-            {
-                Breach(
-                    string.Create(CultureInfo.InvariantCulture, $"buffers {h.BuffersPerJob.Value / b.BuffersPerJob.Value:0.0}× more (limit {BuffersBlowUpFactor:0}×)"),
-                    string.Create(CultureInfo.InvariantCulture, $"{benchmark.Short}: buffers/job {b.BuffersPerJob:N1} -> {h.BuffersPerJob:N1} ({h.BuffersPerJob.Value / b.BuffersPerJob.Value:0.0}x); a query in this scenario changed plan"));
-            }
-
-            // Not a regression gate but a validity check, so it fails whatever the calibration: a two-server case
-            // in which one server completed almost nothing measured one server.
+            // Not a regression gate but a validity check, so it fails whatever the calibration on PostgreSQL: a
+            // two-server case in which one server completed almost nothing measured one server. On SQL Server the
+            // split is that uneven between identical builds, so there it is a warning (PerfGates.LopsidedFails).
             if (b.SmallestServerShare is not null || h.SmallestServerShare is not null)
             {
                 notes.AppendLine(CultureInfo.InvariantCulture, $"<sub>{prefix.TrimEnd(' ', '|').Replace(" | ", ", ", StringComparison.Ordinal)}: the server that completed fewer jobs did {Share(b)} (base) and {Share(h)} (head).</sub>");
                 notes.AppendLine();
-                var lopsided = new[] { (Side: "base", Result: b), (Side: "head", Result: h) }
-                    .Where(x => x.Result.SmallestServerShare < MinServerShare)
-                    .Select(x => x.Side)
-                    .ToList();
-                if (lopsided.Count > 0)
+                var lopsided = PerfGates.LopsidedSides(b.SmallestServerShare, h.SmallestServerShare);
+                if (lopsided.Count > 0 && PerfGates.LopsidedFails(gateCase.SqlServer))
                 {
-                    gate = string.Create(CultureInfo.InvariantCulture, $"❌ one server did under {MinServerShare * 100:0}% of the jobs ({string.Join(", ", lopsided)})");
+                    gate = string.Create(CultureInfo.InvariantCulture, $"❌ one server did under {PerfGates.MinServerShare * 100:0}% of the jobs ({string.Join(", ", lopsided)})");
                     failures.Add(string.Create(
                         CultureInfo.InvariantCulture,
-                        $"{benchmark.Short}: one server completed under {MinServerShare * 100:0}% of the jobs on {string.Join(" and ", lopsided)}, so two servers were not measured"));
+                        $"{benchmark.Short}: one server completed under {PerfGates.MinServerShare * 100:0}% of the jobs on {string.Join(" and ", lopsided)}, so two servers were not measured"));
+                }
+                else if (lopsided.Count > 0 && !gate.StartsWith('❌'))
+                {
+                    gate += string.Create(CultureInfo.InvariantCulture, $" · ⚠️ one server did under {PerfGates.MinServerShare * 100:0}% of the jobs ({string.Join(", ", lopsided)}; warning on SQL Server)");
                 }
             }
 
@@ -640,6 +548,27 @@ public static partial class PerfCompare
 
         return section.ToString();
     }
+
+    /// <summary>The Gate cell and the failure line for one crossed line.</summary>
+    private static (string Cell, string Failure) Describe(GateBreach breach, BdnCase benchmark, BdnResult b, BdnResult h, double? rateChange) =>
+        breach.Metric switch
+        {
+            GateMetric.Statements => (
+                string.Create(CultureInfo.InvariantCulture, $"stmt {breach.Change:+0.0;−0.0;0.0}% (limit +{breach.Limit:0}%)"),
+                string.Create(CultureInfo.InvariantCulture, $"{benchmark.Short}: statements/job {b.StatementsPerJob:N2} -> {h.StatementsPerJob:N2} ({breach.Change:+0.0;-0.0;0.0}%)")),
+            GateMetric.Commands => (
+                string.Create(CultureInfo.InvariantCulture, $"cmd {breach.Change:+0.0;−0.0;0.0}% (limit +{breach.Limit:0}%)"),
+                string.Create(CultureInfo.InvariantCulture, $"{benchmark.Short}: commands/job {b.RoundTripsPerJob:N2} -> {h.RoundTripsPerJob:N2} ({breach.Change:+0.0;-0.0;0.0}%)")),
+            GateMetric.Wal => (
+                string.Create(CultureInfo.InvariantCulture, $"WAL {breach.Change:+0.0;−0.0;0.0}% (limit +{breach.Limit:0}%)"),
+                string.Create(CultureInfo.InvariantCulture, $"{benchmark.Short}: WAL/job {b.WalBytesPerJob:N0} -> {h.WalBytesPerJob:N0} bytes ({breach.Change:+0.0;-0.0;0.0}%)")),
+            GateMetric.Throughput => (
+                string.Create(CultureInfo.InvariantCulture, $"jobs/s {breach.Change:0.0}× slower (limit {breach.Limit:0}×)"),
+                string.Create(CultureInfo.InvariantCulture, $"{benchmark.Short}: jobs/s {RateOf(b, benchmark):N0} -> {RateOf(h, benchmark):N0} ({rateChange:+0.0;-0.0;0.0}%)")),
+            _ => (
+                string.Create(CultureInfo.InvariantCulture, $"buffers {breach.Change:0.0}× more (limit {breach.Limit:0}×)"),
+                string.Create(CultureInfo.InvariantCulture, $"{benchmark.Short}: buffers/job {b.BuffersPerJob:N1} -> {h.BuffersPerJob:N1} ({breach.Change:0.0}x); a query in this scenario changed plan")),
+        };
 
     /// <summary>Mean, Error, StdDev — in BenchmarkDotNet's own time format.</summary>
     private static string Row(BdnResult result) =>
