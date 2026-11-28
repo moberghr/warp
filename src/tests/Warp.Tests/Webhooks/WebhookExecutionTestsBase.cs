@@ -70,9 +70,9 @@ public abstract class WebhookExecutionTestsBase : IntegrationTestBase
     [TimedFact]
     public async Task Send_ServerWithoutAddWebhooks_StillDrainsAndDelivers()
     {
-        // The whole point of webhooks-in-Core (§8.20): a server that NEVER called AddWebhooks still polls
-        // warp:webhooks and executes the delivery. The two-process footgun (a server that silently doesn't
-        // drain because it lacked the opt-in) is gone — there is nothing to forget.
+        // The whole point of webhooks-in-Core (§8.20): a server that NEVER called AddWebhooks still runs the
+        // delivery. It is an ordinary job on DefaultQueue, which the default worker group drains — there is
+        // nothing to opt into and nothing to forget.
         await using var server = await WarpTestServer.StartAsync(
             Fixture,
             configure: cfg => cfg.Queues = ["default"],
@@ -151,19 +151,61 @@ public abstract class WebhookExecutionTestsBase : IntegrationTestBase
         // inline — AttemptCount commits in the claim transaction, the retry job in the next one (§8.20).
         await WarpTestServer.WaitUntil(
             async () => await server.CreateContext().Set<Job>()
-                .Where(x => x.Queue == "warp:webhooks")
+                .Where(x => x.Queue == "default")
                 .Where(x => x.CurrentState == State.Scheduled)
                 .AnyAsync(Ct),
             timeout: TimeSpan.FromSeconds(5),
             ct: Ct);
 
         var scheduled = await server.CreateContext().Set<Job>()
-            .Where(x => x.Queue == "warp:webhooks")
+            .Where(x => x.Queue == "default")
             .Where(x => x.CurrentState == State.Scheduled)
             .ToListAsync(Ct);
 
         scheduled.ShouldHaveSingleItem().ScheduleTime.ShouldBe(delivery.NextAttemptAt!.Value);
 
+        await AssertNoFailedJobsAsync(server);
+    }
+
+    [TimedFact]
+    public async Task Send_OnAHostWebhookGroupQueue_RunsThereAndTheRetryStaysOnThatQueue()
+    {
+        // Isolation is the host's own worker group on the webhook queue; the default group never sees a delivery.
+        await using var server = await WarpTestServer.StartAsync(
+            Fixture,
+            configure: cfg =>
+            {
+                cfg.Queues = ["default"];
+                cfg.AddWebhooks(w => w.Queue = "webhooks");
+                cfg.AddWorkerGroup(x =>
+                {
+                    x.WorkerCount = 1;
+                    x.Queues = ["webhooks"];
+                    x.PrefetchCount = 0;
+                });
+            },
+            configureServices: services =>
+                services.AddHttpClient("warp-webhooks")
+                    .ConfigurePrimaryHttpMessageHandler(() => new StubWebhookHandler(HttpStatusCode.InternalServerError)));
+
+        var deliveryId = await SendAsync(server, new WebhookSend
+        {
+            Url = "https://example.test/hook",
+            EventType = "order.created",
+            RetrySchedule = [TimeSpan.FromHours(1)],
+        });
+
+        await WaitForAttemptAsync(server, deliveryId, 1);
+        await WarpTestServer.WaitUntil(
+            async () => await server.CreateContext().Set<Job>()
+                .Where(x => x.Queue == "webhooks")
+                .Where(x => x.CurrentState == State.Scheduled)
+                .AnyAsync(Ct),
+            timeout: TimeSpan.FromSeconds(5),
+            ct: Ct);
+
+        (await GetDeliveryAsync(server, deliveryId)).Queue.ShouldBe("webhooks");
+        (await server.CreateContext().Set<Job>().CountAsync(x => x.Queue != "webhooks", Ct)).ShouldBe(0);
         await AssertNoFailedJobsAsync(server);
     }
 
@@ -256,7 +298,7 @@ public abstract class WebhookExecutionTestsBase : IntegrationTestBase
 
         // No scheduled retry job was published.
         var scheduled = await server.CreateContext().Set<Job>()
-            .Where(x => x.Queue == "warp:webhooks")
+            .Where(x => x.Queue == "default")
             .CountAsync(x => x.CurrentState == State.Scheduled, Ct);
         scheduled.ShouldBe(0);
 
@@ -584,7 +626,7 @@ public abstract class WebhookExecutionTestsBase : IntegrationTestBase
         await ctx.SaveChangesAsync(Ct);
 
         var publisher = server.CreatePublisher();
-        await publisher.Enqueue(new ExecuteWebhookDelivery { DeliveryId = deliveryId }, "warp:webhooks");
+        await publisher.Enqueue(new ExecuteWebhookDelivery { DeliveryId = deliveryId }, "default");
         await publisher.SaveChangesAsync(Ct);
 
         return deliveryId;
@@ -598,7 +640,7 @@ public abstract class WebhookExecutionTestsBase : IntegrationTestBase
 
     private Task<WarpTestServer> StartServerAsync(HttpStatusCode responseStatus)
     {
-        // No manual warp:webhooks queue wiring: the default worker group polls warp:webhooks unconditionally
+        // No webhook queue wiring: deliveries land on DefaultQueue, which the default worker group drains
         // (webhooks are Core, §8.20), so the default wiring is what these end-to-end tests prove. AddAdapters
         // turns on per-attempt AdapterCallLog recording — the tests that assert the attempt timeline need it
         // (delivery itself works without it; the inline-cfg tests prove that path).
@@ -753,7 +795,7 @@ public abstract class WebhookExecutionTestsBase : IntegrationTestBase
 
         // Enqueue the executor job for the already-settled delivery — mirrors the crash re-run.
         var publisher = server.CreatePublisher();
-        await publisher.Enqueue(new ExecuteWebhookDelivery { DeliveryId = deliveryId }, "warp:webhooks");
+        await publisher.Enqueue(new ExecuteWebhookDelivery { DeliveryId = deliveryId }, "default");
         await publisher.SaveChangesAsync(Ct);
 
         await WarpTestServer.WaitUntil(
@@ -816,7 +858,7 @@ public abstract class WebhookExecutionTestsBase : IntegrationTestBase
 
         // The executor job a crash-recovery re-run would pick up for the already-settled, callback-pending row.
         var publisher = server.CreatePublisher();
-        await publisher.Enqueue(new ExecuteWebhookDelivery { DeliveryId = deliveryId }, "warp:webhooks");
+        await publisher.Enqueue(new ExecuteWebhookDelivery { DeliveryId = deliveryId }, "default");
         await publisher.SaveChangesAsync(Ct);
 
         await WarpTestServer.WaitUntil(
@@ -860,7 +902,7 @@ public abstract class WebhookExecutionTestsBase : IntegrationTestBase
 
         // The executor job a Redeliver would have enqueued alongside the settled→Pending flip.
         var publisher = server.CreatePublisher();
-        await publisher.Enqueue(new ExecuteWebhookDelivery { DeliveryId = deliveryId }, "warp:webhooks");
+        await publisher.Enqueue(new ExecuteWebhookDelivery { DeliveryId = deliveryId }, "default");
         await publisher.SaveChangesAsync(Ct);
 
         await WaitForDeliveryStatusAsync(server, deliveryId, WebhookDeliveryStatus.Delivered);
@@ -920,7 +962,7 @@ public abstract class WebhookExecutionTestsBase : IntegrationTestBase
         await ctx.SaveChangesAsync(Ct);
 
         var publisher = server.CreatePublisher();
-        await publisher.Enqueue(new ExecuteWebhookDelivery { DeliveryId = deliveryId }, "warp:webhooks");
+        await publisher.Enqueue(new ExecuteWebhookDelivery { DeliveryId = deliveryId }, "default");
         await publisher.SaveChangesAsync(Ct);
 
         await WaitForDeliveryStatusAsync(server, deliveryId, WebhookDeliveryStatus.Delivered);
@@ -1049,6 +1091,7 @@ public abstract class WebhookExecutionTestsBase : IntegrationTestBase
             [],
             scope.ServiceProvider.GetRequiredService<IServiceScopeFactory>(),
             scope.ServiceProvider.GetRequiredService<IOptions<WarpConfiguration>>(),
+            scope.ServiceProvider.GetRequiredService<IOptions<WebhookSendBehavior>>(),
             NullLogger<ExecuteWebhookDeliveryHandler<TestContext>>.Instance);
 
         // The executor still completes (no-failed-jobs invariant) even though the outcome commit faulted.

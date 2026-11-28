@@ -59,6 +59,23 @@ public class RefitAdapterTests
     }
 
     [TimedFact]
+    public async Task RefitPostWithBody_RequestCaptureOn_SendsWholeBody_AndCapturesIt()
+    {
+        // Refit serializes [Body] arguments as a streamed JsonContent, which the adapter wraps rather than
+        // buffers (#365): the transport still receives the whole body and the capture records it.
+        var transport = new RefitBodyEchoHandler();
+        var (provider, recorder) = BuildAdapter(transport, a => a.Recording.CaptureRequestBodies = CaptureMode.Always);
+        var api = provider.GetRequiredService<IProbeApi>();
+
+        await api.SendThing(new ProbeThing("widget", 3));
+
+        transport.ReceivedBody.ShouldBe("{\"name\":\"widget\",\"count\":3}");
+        var record = recorder.Records.ShouldHaveSingleItem();
+        record.Operation.ShouldBe(nameof(IProbeApi.SendThing));
+        record.RequestBody.ShouldBe(transport.ReceivedBody);
+    }
+
+    [TimedFact]
     public void AddAdapter_DuplicateNameThroughRefitEntryPoint_Throws()
     {
         // The Refit sugar wraps AddRefitClient THEN AddAdapter — the name/duplicate validation lives in
@@ -113,6 +130,9 @@ public class RefitAdapterTests
     }
 
     private static (ServiceProvider Provider, CapturingRecorder Recorder) BuildAdapter()
+        => BuildAdapter(new RefitStubHandler(), _ => { });
+
+    private static (ServiceProvider Provider, CapturingRecorder Recorder) BuildAdapter(HttpMessageHandler primary, Action<WarpAdapterHttpOptions> configure)
     {
         // Reuse the real WarpAdapters over a capturing recorder so we can assert the recorded operation
         // name; register it as IWarpAdapters so the resolved WarpAdapterHandler drives it.
@@ -126,7 +146,8 @@ public class RefitAdapterTests
         builder.AddAdapter<IProbeApi>("probe", a =>
         {
             a.BaseUrl = new Uri("https://api.probe.test");
-            a.ConfigureHttpClientBuilder(b => b.ConfigurePrimaryHttpMessageHandler(() => new RefitStubHandler()));
+            a.ConfigureHttpClientBuilder(b => b.ConfigurePrimaryHttpMessageHandler(() => primary));
+            configure(a);
         });
 
         return (services.BuildServiceProvider(), recorder);
@@ -141,11 +162,32 @@ public interface IProbeApi
 
     [Post("/things")]
     Task<string> CreateThing();
+
+    [Post("/things/body")]
+    Task<string> SendThing([Body] ProbeThing thing);
 }
+
+/// <summary>A request body for the Refit capture test.</summary>
+public sealed record ProbeThing(string Name, int Count);
 
 /// <summary>Returns a fresh success response with a JSON string body for every request (no network).</summary>
 internal sealed class RefitStubHandler : HttpMessageHandler
 {
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("\"ok\"") });
+}
+
+/// <summary>Reads the request body the way a transport does and keeps it, then answers like <see cref="RefitStubHandler"/>.</summary>
+internal sealed class RefitBodyEchoHandler : HttpMessageHandler
+{
+    public string? ReceivedBody { get; private set; }
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        await using var sink = new MemoryStream();
+        await request.Content!.CopyToAsync(sink, cancellationToken);
+        ReceivedBody = System.Text.Encoding.UTF8.GetString(sink.ToArray());
+
+        return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("\"ok\"") };
+    }
 }

@@ -121,7 +121,7 @@ public class WebhookCommandService<TContext> : IWebhookCommandService
 
         // One attempt left: on failure the delivery runs out of retries again and, the endpoint still failing, parks.
         var probed = await WebhookParkedRelease.ProbeOldestAsync(_context, groupName, now, now + _configuration.WebhookDeliveryRetention, ct);
-        if (probed is not { } deliveryId)
+        if (probed is not { } delivery)
         {
             await transaction.RollbackAsync(ct);
 
@@ -129,7 +129,7 @@ public class WebhookCommandService<TContext> : IWebhookCommandService
         }
 
         await WebhookParkedRelease.DeferNextProbeAsync(_context, groupName, now + _configuration.WebhookEndpointProbeInterval, ct);
-        await enqueuer.EnqueueAsync(deliveryId, ct);
+        await enqueuer.EnqueueAsync(delivery.Id, ct);
         await transaction.CommitAsync(ct);
 
         return WebhookProbeResult.Probing;

@@ -30,6 +30,8 @@ namespace Warp.Tests.Webhooks;
 [GenerateDatabaseTests]
 public abstract class WebhookStuckRecoveryTestsBase : IntegrationTestBase
 {
+    private const string IdleWebhookQueue = "webhooks";
+
     protected WebhookStuckRecoveryTestsBase(IDatabaseFixture fixture)
         : base(fixture)
     {
@@ -69,7 +71,7 @@ public abstract class WebhookStuckRecoveryTestsBase : IntegrationTestBase
 
         var job = await server.CreateContext().Set<Job>()
             .AsNoTracking()
-            .Where(x => x.Queue == "warp:webhooks")
+            .Where(x => x.Queue == IdleWebhookQueue)
             .FirstAsync(Ct);
 
         var metadata = MetadataFactory.Create<ICanBeRestartedMetadata>(MetadataSerializer.Deserialize(job.Metadata));
@@ -121,7 +123,7 @@ public abstract class WebhookStuckRecoveryTestsBase : IntegrationTestBase
 
         // The delivery's own (delayed) executor job, still sitting on the webhooks queue.
         var publisher = server.CreatePublisher();
-        await publisher.Enqueue(new ExecuteWebhookDelivery { DeliveryId = deliveryId }, "warp:webhooks");
+        await publisher.Enqueue(new ExecuteWebhookDelivery { DeliveryId = deliveryId }, IdleWebhookQueue);
         await publisher.SaveChangesAsync(Ct);
 
         using var scope = server.GetService<IServiceScopeFactory>().CreateScope();
@@ -223,29 +225,17 @@ public abstract class WebhookStuckRecoveryTestsBase : IntegrationTestBase
 
     private Task<WarpTestServer> StartIdleServerAsync()
     {
-        // Webhook delivery is now always-on (§8.20): the implicit default worker group polls warp:webhooks
-        // unconditionally and there is deliberately no config to opt a server out. To keep the seeded and
-        // recovered executor jobs off a live worker deterministically (no pause-timing race), the implicit
-        // default group is given zero workers so registration skips it and its webhooks subscription is never
-        // polled, while the sole worker runs in an explicit group bound to the default queue only (explicit
-        // groups get no webhooks subscription). The stale-recovery task is still wired because worker mode is
-        // on, so the test resolves it and invokes recovery manually. A null recovery interval keeps the
-        // server's own background sweep off, leaving the manual call as the sole recoverer (the deterministic
-        // timing pattern of section 4.6).
+        // Webhook deliveries go to the "webhooks" queue, which no worker group drains, so the seeded and recovered
+        // executor jobs stay where the test put them (no pause-timing race). A null recovery interval keeps the
+        // server's own background sweep off, leaving the manual call as the sole recoverer (§4.6). Seeded rows carry
+        // no queue (as rows written before 8.2 do), so they resolve to this server's webhook queue.
         return WarpTestServer.StartAsync(
             Fixture,
             configure: cfg =>
             {
-                cfg.WorkerCount = 0;
-
-                // And no dedicated webhook group (8.1): it would poll warp:webhooks and run the seeded jobs.
-                cfg.WebhookWorkerCount = 0;
+                cfg.Queues = ["default"];
+                cfg.AddWebhooks(w => w.Queue = IdleWebhookQueue);
                 cfg.StaleJobRecoveryInterval = null;
-                cfg.AddWorkerGroup(g =>
-                {
-                    g.WorkerCount = 1;
-                    g.Queues = ["default"];
-                });
             });
     }
 
@@ -294,7 +284,7 @@ public abstract class WebhookStuckRecoveryTestsBase : IntegrationTestBase
             Id = Guid.NewGuid(),
             Type = typeof(ExecuteWebhookDelivery).AssemblyQualifiedName!,
             Message = JsonSerializer.Serialize(new ExecuteWebhookDelivery { DeliveryId = deliveryId }),
-            Queue = "warp:webhooks",
+            Queue = IdleWebhookQueue,
             CurrentState = State.Processing,
             CreateTime = DateTime.UtcNow.AddHours(-1),
             ScheduleTime = DateTime.UtcNow.AddHours(-1),
@@ -319,6 +309,6 @@ public abstract class WebhookStuckRecoveryTestsBase : IntegrationTestBase
     private static async Task<int> WebhookJobCountAsync(WarpTestServer server)
     {
         return await server.CreateContext().Set<Job>()
-            .CountAsync(x => x.Queue == "warp:webhooks", Ct);
+            .CountAsync(x => x.Queue == IdleWebhookQueue, Ct);
     }
 }

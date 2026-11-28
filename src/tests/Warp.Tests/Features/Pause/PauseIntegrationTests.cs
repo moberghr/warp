@@ -53,14 +53,7 @@ public abstract class PauseIntegrationTestsBase : IntegrationTestBase
         using var loops = new WorkerLoopPauseTracker();
         await using var server = await WarpTestServer.StartAsync(
             Fixture,
-            configure: cfg =>
-            {
-                cfg.HealthCheckInterval = null;
-
-                // One group: the tracker waits for EVERY worker loop to see the pause, and the dedicated webhook
-                // group's loops (8.1) belong to a group this test does not pause.
-                cfg.WebhookWorkerCount = 0;
-            },
+            configure: cfg => cfg.HealthCheckInterval = null,
             configureServices: services => services.AddSingleton<PauseStateHolder>(loops));
         var groupId = await GetFirstGroupId(server);
         var svc = server.CreateServerCommandService();
@@ -152,14 +145,7 @@ public abstract class PauseIntegrationTestsBase : IntegrationTestBase
         using var loops = new WorkerLoopPauseTracker();
         await using var server = await WarpTestServer.StartAsync(
             Fixture,
-            configure: cfg =>
-            {
-                cfg.HealthCheckInterval = null;
-
-                // One group: the tracker waits for EVERY worker loop to see the pause, and the dedicated webhook
-                // group's loops (8.1) belong to a group this test does not pause.
-                cfg.WebhookWorkerCount = 0;
-            },
+            configure: cfg => cfg.HealthCheckInterval = null,
             configureServices: services => services.AddSingleton<PauseStateHolder>(loops));
         var groupId = await GetFirstGroupId(server);
         var svc = server.CreateServerCommandService();

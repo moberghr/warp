@@ -320,31 +320,6 @@ public class CaptureRedactionTests
     }
 
     [TimedFact]
-    public async Task RequestBodyBuffering_CancelledDuringBuffering_RecordsFailedOutcome_ThenRethrows()
-    {
-        // Cancellation while buffering the request body (before the transport is ever reached) must record
-        // the call as Failed — not let the OCE unwind past the scope so Dispose() defaults it to Success.
-        // A call that never executed must never be dashboarded as a successful one.
-        var (adapters, recorder) = Harness();
-        var options = new WarpAdapterHttpOptions();
-        options.Recording.CaptureRequestBodies = CaptureMode.Always;
-
-        var request = new HttpRequestMessage(HttpMethod.Post, "https://api.vendor.com/orders")
-        {
-            Content = new CancelledDuringReadContent(),
-        };
-        var handler = new WarpAdapterHandler("vendor", options, adapters, Resolver()) { InnerHandler = new StubHandler(Ok("never-reached")) };
-        using var invoker = new HttpMessageInvoker(handler);
-
-        await Should.ThrowAsync<OperationCanceledException>(async () =>
-            await invoker.SendAsync(request, Xunit.TestContext.Current.CancellationToken));
-
-        var record = recorder.Records.ShouldHaveSingleItem();
-        record.Outcome.ShouldBe(AdapterCallOutcome.Failed);
-        record.ExceptionType.ShouldNotBeNull();
-    }
-
-    [TimedFact]
     public async Task Transport_TaskCanceledDuringSend_RecordsFailedOutcome_ThenRethrows()
     {
         // HttpClient.Timeout expiry and caller cancellation both surface as TaskCanceledException from the
@@ -720,8 +695,8 @@ internal sealed class TaskCanceledHandler : HttpMessageHandler
 }
 
 /// <summary>
-/// Request content that simulates cancellation firing while the body is being buffered for capture —
-/// the OCE must be mapped to a Failed outcome by the handler, never left to Dispose-as-Success.
+/// Request content that simulates cancellation firing while the transport reads the body — the OCE must
+/// be mapped to a Failed outcome by the handler, never left to Dispose-as-Success.
 /// </summary>
 internal sealed class CancelledDuringReadContent : HttpContent
 {
