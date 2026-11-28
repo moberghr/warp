@@ -163,6 +163,46 @@ public abstract class WebhookDispatcherValidationTestsBase : IAsyncLifetime
             await CreateDispatcher().SendAsync(new WebhookSend { Url = "https://example.test/hook", EventType = "   " }, Ct));
     }
 
+    [TimedTheory]
+    [InlineData("per-send", "per-process", "per-send")]
+    [InlineData(null, "per-process", "per-process")]
+    [InlineData(null, null, "orders")]
+    public async Task SendAsync_Queue_SendWinsOverTheProcessQueueWhichWinsOverDefaultQueue(string? sendQueue, string? processQueue, string expected)
+    {
+        // The resolved queue is stamped on the delivery (every later enqueue of it reads the row) and the first
+        // attempt goes there.
+        var ctx = _fixture.CreateContext();
+        var publisher = new Mock<IPublisher>();
+        var dispatcher = new WebhookDispatcher<TestContext>(
+            ctx,
+            publisher.Object,
+            TimeProvider.System,
+            Options.Create(new WarpConfiguration { DefaultQueue = "orders" }),
+            Options.Create(new WebhookSendBehavior { Queue = processQueue }),
+            Options.Create(new WebhookAddressPolicy()));
+
+        var id = await dispatcher.SendAsync(
+            new WebhookSend { Url = "https://example.test/hook", EventType = "order.created", Queue = sendQueue },
+            Ct);
+        await ctx.SaveChangesAsync(Ct);
+
+        var row = await _fixture.CreateContext().Set<WebhookDelivery>()
+            .AsNoTracking()
+            .Where(x => x.Id == id)
+            .FirstAsync(Ct);
+        row.Queue.ShouldBe(expected);
+        publisher.Verify(x => x.Enqueue(It.Is<ExecuteWebhookDelivery>(y => y.DeliveryId == id), expected), Times.Once);
+    }
+
+    [TimedTheory]
+    [InlineData("")]
+    [InlineData("  ")]
+    public async Task SendAsync_BlankQueue_Throws(string queue)
+    {
+        await Should.ThrowAsync<ArgumentException>(async () =>
+            await CreateDispatcher().SendAsync(new WebhookSend { Url = "https://example.test/hook", EventType = "order.created", Queue = queue }, Ct));
+    }
+
     [TimedFact]
     public async Task SendAsync_WhitespaceEventId_ReplacedWithGeneratedId()
     {

@@ -29,6 +29,7 @@ namespace Warp.Tests.Webhooks;
 public abstract class WebhookEndpointHealthTestsBase : IntegrationTestBase
 {
     private const string Group = "acme";
+    private const string OtherGroup = "globex";
     private const string Url = "https://example.test/hook";
 
     protected WebhookEndpointHealthTestsBase(IDatabaseFixture fixture)
@@ -229,7 +230,7 @@ public abstract class WebhookEndpointHealthTestsBase : IntegrationTestBase
         result.ShouldNotBeNull().ShouldStartWith("Released 3 ");
         var jobs = await Fixture.CreateContext().Set<Job>()
             .AsNoTracking()
-            .Where(x => x.Queue == WebhookConstants.Queue)
+            .Where(x => x.Queue == "default")
             .OrderBy(x => x.ScheduleTime)
             .Select(x => x.Message)
             .ToListAsync(Ct);
@@ -241,6 +242,34 @@ public abstract class WebhookEndpointHealthTestsBase : IntegrationTestBase
 
         var rows = await Fixture.CreateContext().Set<WebhookDelivery>().AsNoTracking().ToListAsync(Ct);
         rows.ShouldAllBe(x => x.Status == WebhookDeliveryStatus.Pending && x.AttemptCount == 0);
+    }
+
+    [TimedFact]
+    public async Task Monitor_ReleaseAndProbe_StageEachJobOnItsDeliveryQueue()
+    {
+        // A delivery stays on the queue it was sent on; one from before 8.2 (no queue) takes the server's webhook
+        // queue, here DefaultQueue. Group A is Healthy (release), group B Failing and due (probe).
+        await SeedEndpointAsync(WebhookEndpointState.Healthy, failingSince: null, nextProbeAt: null);
+        await SeedEndpointAsync(WebhookEndpointState.Failing, DateTime.UtcNow.AddMinutes(-10), DateTime.UtcNow.AddMinutes(-1), OtherGroup);
+        var released = await SeedDeliveryAsync(WebhookDeliveryStatus.Parked, DateTime.UtcNow.AddMinutes(-3), attemptCount: 3, queue: "tenant-a");
+        var legacy = await SeedDeliveryAsync(WebhookDeliveryStatus.Parked, DateTime.UtcNow.AddMinutes(-2), attemptCount: 3);
+        var probed = await SeedDeliveryAsync(WebhookDeliveryStatus.Parked, DateTime.UtcNow.AddMinutes(-1), attemptCount: 3, queue: "tenant-b", group: OtherGroup);
+
+        await CreateMonitor().ExecuteAsync(Ct);
+
+        var jobs = await Fixture.CreateContext().Set<Job>()
+            .AsNoTracking()
+            .Select(x =>
+                new
+                {
+                    x.Queue,
+                    x.Message,
+                })
+            .ToListAsync(Ct);
+        jobs.Count.ShouldBe(3);
+        jobs.Single(x => x.Message!.Contains(released.ToString(), StringComparison.Ordinal)).Queue.ShouldBe("tenant-a");
+        jobs.Single(x => x.Message!.Contains(legacy.ToString(), StringComparison.Ordinal)).Queue.ShouldBe("default");
+        jobs.Single(x => x.Message!.Contains(probed.ToString(), StringComparison.Ordinal)).Queue.ShouldBe("tenant-b");
     }
 
     [TimedFact]
@@ -279,6 +308,7 @@ public abstract class WebhookEndpointHealthTestsBase : IntegrationTestBase
         => new(
             new TestServerContext(Fixture.CreateContext()),
             Options.Create(new WarpServerConfiguration()),
+            Options.Create(new WebhookSendBehavior()),
             TimeProvider.System,
             spy is null ? TestNotifiers.EmptyDispatcher() : TestNotifiers.SpyDispatcher(spy),
             health is null ? [] : [new RecordingEndpointHealthHandler(health)],
@@ -345,12 +375,12 @@ public abstract class WebhookEndpointHealthTestsBase : IntegrationTestBase
             .Where(x => x.Name == Group)
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.NextProbeAt, DateTime.UtcNow.AddMinutes(-1)), Ct);
 
-    private async Task SeedEndpointAsync(WebhookEndpointState state, DateTime? failingSince, DateTime? nextProbeAt)
+    private async Task SeedEndpointAsync(WebhookEndpointState state, DateTime? failingSince, DateTime? nextProbeAt, string name = Group)
     {
         var ctx = Fixture.CreateContext();
         ctx.Set<WebhookEndpoint>().Add(new WebhookEndpoint
         {
-            Name = Group,
+            Name = name,
             State = state,
             FailingSince = failingSince,
             NextProbeAt = nextProbeAt,
@@ -359,15 +389,16 @@ public abstract class WebhookEndpointHealthTestsBase : IntegrationTestBase
         await ctx.SaveChangesAsync(Ct);
     }
 
-    private async Task<Guid> SeedDeliveryAsync(WebhookDeliveryStatus status, DateTime createdAt, int attemptCount)
+    private async Task<Guid> SeedDeliveryAsync(WebhookDeliveryStatus status, DateTime createdAt, int attemptCount, string? queue = null, string group = Group)
     {
         var delivery = new WebhookDelivery
         {
             Id = Guid.NewGuid(),
+            Queue = queue,
             EventType = "order.created",
             EventId = Guid.NewGuid().ToString(),
             Url = Url,
-            GroupName = Group,
+            GroupName = group,
             PayloadJson = "{}",
             SigningMode = WebhookSigning.None,
             RetrySchedule = [TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(10)],

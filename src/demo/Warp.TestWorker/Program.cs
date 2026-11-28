@@ -52,11 +52,10 @@ builder.Services.AddWarpServer<TestContext>(options =>
     // queue anything in the cluster publishes to — otherwise those jobs never run. Coverage:
     //   a-critical / b-default / c-low  — the /seed workload and the mutex jobs
     //   default                         — DefaultQueue: unqueued jobs, messages, sagas, the
-    //                                      ProcessOrder flow, continuations, and recurring jobs
+    //                                      ProcessOrder flow, continuations, recurring jobs, and the
+    //                                      durable webhook deliveries TestApp stages via SendAsync
     //   high                            — ScheduleCustomerSignup's handler enqueues here
     //   fulfillment                     — shop order jobs that drive the adapters + webhooks
-    // The implicit default group also ALWAYS polls warp:webhooks (a Core feature, §8.20), so the
-    // durable webhook deliveries TestApp stages via SendAsync are drained here without listing it.
     // The reports/analytics group below rounds out the set.
     options.Queues = ["a-critical", "b-default", "c-low", "default", "high", ShopQueues.Fulfillment];
 
@@ -151,8 +150,8 @@ builder.Services.AddWarpServer<TestContext>(options =>
     }
 
     // === Durable outbound webhooks — order.paid / order.shipped delivered to subscribers, tracked to done ===
-    // Webhook delivery/exhaustion executes on the worker (it drains warp:webhooks), so the host's
-    // exhausted-delivery callback is registered here.
+    // Webhook delivery/exhaustion executes on the worker (deliveries are ordinary jobs on DefaultQueue), so the
+    // host's exhausted-delivery callback is registered here.
     // PublicAddressesOnly is on by default since 8.1; the demo's subscriber (Warp.Demo.PartnerApi) runs on localhost,
     // so the demo turns the guard off. Leave it on in production.
     options.AddWebhooks(w =>

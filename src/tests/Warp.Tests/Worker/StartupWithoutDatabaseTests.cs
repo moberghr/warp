@@ -64,8 +64,8 @@ public sealed class StartupWithoutDatabaseTests
         await server.Gate.WaitUntilOpenAsync(Xunit.TestContext.Current.CancellationToken);
         await server.Claimed.Task.WaitAsync(Xunit.TestContext.Current.CancellationToken);
 
-        // Registered: the worker groups are populated (how many is the server's topology: 8.1 adds the webhook group).
-        server.Host.Services.GetRequiredService<ServerRegistrationState>().Groups.ShouldNotBeEmpty();
+        // Registered: the worker groups are populated.
+        server.Host.Services.GetRequiredService<ServerRegistrationState>().Groups.Count.ShouldBe(1);
         await using (var scope = server.Host.Services.CreateAsyncScope())
         {
             var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;

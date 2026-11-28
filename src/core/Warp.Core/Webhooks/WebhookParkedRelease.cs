@@ -27,9 +27,9 @@ internal static class WebhookParkedRelease
     }
 
     // One probe of a failing group: its oldest parked delivery back to Pending with exactly one attempt left. Returns
-    // the delivery id to stage a job for, or null when the group has nothing parked (or it moved meanwhile). Shared by
+    // the delivery to stage a job for (with its queue), or null when the group has nothing parked (or it moved meanwhile). Shared by
     // the monitor's scheduled probes and "Retry now", so both probe the same way.
-    internal static async Task<Guid?> ProbeOldestAsync(DbContext context, string groupName, DateTime now, DateTime expireAt, CancellationToken ct)
+    internal static async Task<ParkedDelivery?> ProbeOldestAsync(DbContext context, string groupName, DateTime now, DateTime expireAt, CancellationToken ct)
     {
         var oldest = await context.Set<WebhookDelivery>()
             .AsNoTracking()
@@ -42,6 +42,7 @@ internal static class WebhookParkedRelease
                 {
                     x.Id,
                     x.RetrySchedule,
+                    x.Queue,
                 })
             .FirstOrDefaultAsync(ct);
 
@@ -50,7 +51,7 @@ internal static class WebhookParkedRelease
             return null;
         }
 
-        return await ReleaseAsync(context, oldest.Id, oldest.RetrySchedule.Count, now, expireAt, ct) ? oldest.Id : null;
+        return await ReleaseAsync(context, oldest.Id, oldest.RetrySchedule.Count, now, expireAt, ct) ? new ParkedDelivery(oldest.Id, oldest.Queue) : null;
     }
 
     // Pushes a failing group's next scheduled probe one interval out.
@@ -60,3 +61,5 @@ internal static class WebhookParkedRelease
             .Where(x => x.State == WebhookEndpointState.Failing)
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.NextProbeAt, nextProbeAt), ct);
 }
+
+internal readonly record struct ParkedDelivery(Guid Id, string? Queue);
