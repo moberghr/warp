@@ -51,6 +51,19 @@ public class RetryAttributeWithDelaysCommand : IJobHandler<RetryAttributeWithDel
 
 public class RetryAttributeWithDelaysRequest : IJob;
 
+// [Retry(5)] with no wait between attempts: the six attempts of a span test run back to back instead of
+// spending five seconds of a ten-second budget on retry delays (#364).
+[Retry(5, Delays = [0])]
+public class ImmediateRetryAttributeCommand : IJobHandler<ImmediateRetryAttributeRequest>
+{
+    public Task HandleAsync(ImmediateRetryAttributeRequest message, CancellationToken cancellationToken)
+    {
+        throw new InvalidOperationException("Always fails");
+    }
+}
+
+public class ImmediateRetryAttributeRequest : IJob;
+
 // #236 regression: job class carrying [Retry(3)], published through the REAL publisher (no explicit
 // metadata). Global default is 1 retry; the attribute must win (3 retries). Kept at 3 so the retry
 // chain matches the timing of the proven GivenFailingJobWithThreeRetries integration test.

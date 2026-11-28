@@ -54,6 +54,7 @@ public class PostgreSqlClassFixture : IAsyncLifetime, IDatabaseFixture
 
     public async Task ResetAsync()
     {
+        await RunningTestServers.WaitForAllStoppedAsync(this);
         await using var conn = new NpgsqlConnection(_connectionString);
         await conn.OpenAsync(Xunit.TestContext.Current.CancellationToken);
         await _respawner.ResetAsync(conn);
@@ -70,6 +71,9 @@ public class PostgreSqlClassFixture : IAsyncLifetime, IDatabaseFixture
 
     public async ValueTask DisposeAsync()
     {
+        // The class's last test may have timed out with its server still stopping (#364).
+        await RunningTestServers.WaitForAllStoppedAsync(this);
+
         // Two-step cleanup. Both are necessary:
         //
         // 1. ClearPool drains the legacy Npgsql connection-string-keyed pool used by the
