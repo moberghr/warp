@@ -38,15 +38,14 @@ namespace Warp.ServerBenchmarks.Benchmarks;
 /// on the same side (<see cref="BackgroundCostAttribute"/>): that is the figure to read for "did the
 /// dashboard or the folds get more expensive". The dashboard tabs' queries are the workload here, so they are
 /// counted like Warp's own; only the harness's polling and cleanup are left out (<see cref="Harness"/>).
-/// Its gates are report-only until calibrated (performance.md).
+/// Its PostgreSQL gates were calibrated by no-op runs (statements under 3%; performance-worker.md §6.24).
 /// </para>
 /// </summary>
 [CiScenario(
     "Background load",
     "10 workers drain 2,000 empty jobs alone, while 10 dashboard tabs poll status and the job list every second, or while the counter, statistic, metric and error-group folds run every second.",
     "Dashboard reads and the aggregation tasks share the job and counter tables with the drain. Each draining scenario runs without them, and the idle scenarios run them with nothing to read or fold.",
-    Order = 92,
-    Calibrated = false)]
+    Order = 92)]
 [BackgroundCost(nameof(Load), nameof(BackgroundLoad.None))]
 [CaseLabel(nameof(Load), "None", "drain alone")]
 [CaseLabel(nameof(Load), "Dashboard", "10 dashboard tabs")]

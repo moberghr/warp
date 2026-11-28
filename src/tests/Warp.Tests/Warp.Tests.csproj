@@ -33,6 +33,12 @@
 	</ItemGroup>
 
 	<ItemGroup>
+		<!-- The perf-CI gate decision (PerfGates), compiled in rather than referenced: Warp.ServerBenchmarks is a
+		     BenchmarkDotNet executable with its own Testcontainers pins. The file has no dependencies. -->
+		<Compile Include="..\..\benchmarks\Warp.ServerBenchmarks\Lab\PerfGates.cs" Link="Benchmarks\PerfGates.cs" />
+	</ItemGroup>
+
+	<ItemGroup>
 		<FrameworkReference Include="Microsoft.AspNetCore.App" />
 	</ItemGroup>
 
