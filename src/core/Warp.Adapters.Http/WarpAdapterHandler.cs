@@ -87,16 +87,22 @@ internal sealed class WarpAdapterHandler : DelegatingHandler
         }
 
         HttpResponseMessage response;
-        string? requestBody = null;
+        RequestBodyCapture? requestCapture = null;
         try
         {
-            // Buffer the request body up front (only when a request-body tier is active or capture is
-            // forced): the transport consumes the content, so it cannot be read after the send. Buffering
-            // lives INSIDE the outcome-owning try — a cancellation here must record Failed, not unwind past
-            // the scope and let Dispose() default the never-sent call to Success.
-            requestBody = await BufferRequestBodyAsync(request, forceCapture, cancellationToken);
+            // Request-body capture (a request-body tier or forced capture) copies a bounded prefix as the
+            // transport writes the body; nothing is read ahead of the send. Set up INSIDE the outcome-owning
+            // try so nothing here can unwind past the scope and let Dispose() default the call to Success.
+            requestCapture = BeginRequestBodyCapture(request, forceCapture);
 
-            response = await base.SendAsync(request, cancellationToken);
+            try
+            {
+                response = await base.SendAsync(request, cancellationToken);
+            }
+            finally
+            {
+                requestCapture?.Restore(request);
+            }
         }
         catch (AdapterRateLimitedException ex) when (_respondWith429)
         {
@@ -110,21 +116,21 @@ internal sealed class WarpAdapterHandler : DelegatingHandler
             // limiter and sample it into its circuit breaker. Thrown, it passes those handlers untouched
             // (it is not an HttpRequestException), so Respond429 behaves exactly like Wait in the pipeline.
             var throttled = WarpThrottledResponse.Create(request, ex);
-            await CaptureAsync(scope, request, throttled, requestBody, isFailure: true, forceCapture, cancellationToken);
+            await CaptureAsync(scope, request, throttled, requestCapture, isFailure: true, forceCapture, cancellationToken);
             CompleteOutcome(scope, throttled, isFailure: true);
 
             return throttled;
         }
         catch (Exception ex)
         {
-            await CaptureAsync(scope, request, response: null, requestBody, isFailure: true, forceCapture, cancellationToken);
+            await CaptureAsync(scope, request, response: null, requestCapture, isFailure: true, forceCapture, cancellationToken);
             scope.Fail(ex);
 
             throw;
         }
 
         var isFailure = !response.IsSuccessStatusCode;
-        await CaptureAsync(scope, request, response, requestBody, isFailure, forceCapture, cancellationToken);
+        await CaptureAsync(scope, request, response, requestCapture, isFailure, forceCapture, cancellationToken);
         CompleteOutcome(scope, response, isFailure);
 
         return response;
@@ -218,7 +224,7 @@ internal sealed class WarpAdapterHandler : DelegatingHandler
         AdapterCallScope scope,
         HttpRequestMessage request,
         HttpResponseMessage? response,
-        string? requestBody,
+        RequestBodyCapture? requestCapture,
         bool isFailure,
         bool forceCapture,
         CancellationToken cancellationToken)
@@ -247,9 +253,13 @@ internal sealed class WarpAdapterHandler : DelegatingHandler
             }
         }
 
-        if (requestBody is not null && ShouldCapture(_recording.CaptureRequestBodies, isFailure, forceCapture))
+        if (requestCapture is not null && ShouldCapture(_recording.CaptureRequestBodies, isFailure, forceCapture))
         {
-            scope.SetRequestBody(TruncateToBytes(requestBody, _recording.MaxCapturedBodySize));
+            var requestBody = await ReadRequestCaptureAsync(requestCapture);
+            if (requestBody is not null)
+            {
+                scope.SetRequestBody(TruncateToBytes(requestBody, _recording.MaxCapturedBodySize));
+            }
         }
 
         if (response?.Content is not null && ShouldCapture(_recording.CaptureResponseBodies, isFailure, forceCapture))
@@ -296,46 +306,25 @@ internal sealed class WarpAdapterHandler : DelegatingHandler
         || _recording.CaptureRequestBodies != CaptureMode.None
         || _recording.CaptureResponseBodies != CaptureMode.None;
 
-    private async Task<string?> BufferRequestBodyAsync(HttpRequestMessage request, bool forceCapture, CancellationToken cancellationToken)
+    private RequestBodyCapture? BeginRequestBodyCapture(HttpRequestMessage request, bool forceCapture)
     {
         if ((_recording.CaptureRequestBodies == CaptureMode.None && !forceCapture) || request.Content is null)
         {
             return null;
         }
 
-        return await ReadBufferedAsync(request.Content, _recording.MaxCapturedBodySize, cancellationToken);
+        return RequestBodyCapture.Begin(request, Math.Max(0, _recording.MaxCapturedBodySize));
     }
 
-    private static async Task<string?> ReadBufferedAsync(HttpContent content, int maxBytes, CancellationToken cancellationToken)
+    private static async Task<string?> ReadRequestCaptureAsync(RequestBodyCapture capture)
     {
         try
         {
-            // Buffer so the request content stays readable for the transport. (Responses are peeked instead; see
-            // PeekResponseBodyAsync.)
-            await content.LoadIntoBufferAsync(cancellationToken);
-
-            if (maxBytes <= 0)
-            {
-                return string.Empty;
-            }
-
-            await using var stream = await content.ReadAsStreamAsync(cancellationToken);
-            if (stream.CanSeek)
-            {
-                stream.Seek(0, SeekOrigin.Begin);
-            }
-
-            // Read only a bounded prefix rather than materialising the whole body into a string just to
-            // truncate it to maxBytes elsewhere. One extra byte so an over-cap body still trips the caller's
-            // TruncateToBytes marker; TruncateToBytes does the boundary-safe cut.
-            var buffer = new byte[maxBytes + 1];
-            var read = await ReadPrefixAsync(stream, buffer, null, cancellationToken);
-
-            return read == 0 ? string.Empty : Encoding.UTF8.GetString(buffer, 0, read);
+            return await capture.ReadAsync();
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            // Capture is best-effort and must never break the call (e.g. a non-buffering stream content).
+            // Capture is best-effort and must never break the call (e.g. a content the caller already disposed).
             return null;
         }
     }

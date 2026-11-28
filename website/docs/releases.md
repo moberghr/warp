@@ -37,6 +37,12 @@ The group's worker count is also the most attempts that server runs at once. See
 
 Executor jobs waiting on the `warp:webhooks` queue (first attempts not yet run, retries scheduled for later) are moved automatically: every 8.2 server's crash-recovery task moves them to its webhook queue once they are due to run, so nothing is stranded.
 
+### Adapters: request-body capture is bounded
+
+With `CaptureRequestBodies` on (or a forced capture), the adapter no longer reads the whole outgoing request body into memory before sending it. It keeps the first `MaxCapturedBodySize` bytes as the transport sends them, so a large upload is not buffered and a streamed request body still streams. In-memory bodies (`StringContent`, `ByteArrayContent`) are captured as before. See [Capture and PII](features/adapters.md#capture-and-pii--your-data-your-responsibility) (#365).
+
+**Behaviour change.** A streamed body the transport never sent (the call failed before the send) is no longer captured, and a non-seekable streamed body is no longer made retryable by capture's buffering, so it behaves the same with capture on as with capture off.
+
 ### Dashboard and admin services run on Warp's own context
 
 The dashboard's query and command services and the admin managers no longer use your `DbContext`. `AddWarp` now registers Warp's own context in every process (dashboard-only and publisher-only hosts included), the same runtime-only mirror of Warp's tables the server already uses, and these services run on it: `IJobQueryService`, `IJobLogQueryService`, `IJobGroupQueryService`, `IDashboardStatsService`, `IBackgroundServiceQueryService`, `IAdapterQueryService`, `IApplicationQueryService`, `IApplicationDeployQueryService`, `IEndpointQueryService`, `IClientEventQueryService`, `ITraceQueryService`, `IErrorGroupQueryService`, `ISloQueryService`, `IMetricQueryService`, `IMetricBoardQueryService`, `IMetricAnnotationQueryService`, `IWebhookQueryService`, `ISagaQueryService`, `IJobCommandService`, `IRecurringJobService`, `IServerCommandService`, `IErrorGroupCommandService`, `ISloCommandService`, `IMetricBoardCommandService`, `IMetricAnnotationCommandService`, `IWebhookCommandService`, `ISagaCommandService`, `IConcurrencyLimitManager` and `IRateLimitManager`. `IPublisher`, `IBatchPublisher`, `IRecurringJobPublisher` and `IWebhookDispatcher` stay on your context: staging rows in your transaction is their point. No API change and no migration. Table and column names are read from your context's model, so naming conventions keep working.
