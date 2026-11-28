@@ -4,7 +4,11 @@ sidebar_position: 6
 
 # Releases
 
-## 8.2.0 *unreleased*
+## 8.2.0
+
+*2026-11-28*
+
+Webhook deliveries are now **ordinary jobs on an ordinary queue** (your `DefaultQueue` unless `w.Queue` or `WebhookSend.Queue` names another), so you isolate them with your own `AddWorkerGroup`; executor jobs waiting on the old queue are moved automatically. The **dashboard and admin services run on Warp's own context** instead of yours. Adapter **request-body capture is bounded** and no longer buffers the request. **One migration** (additive: a nullable column on the webhook delivery table, see [Migration](#migration-82)) and no breaking API change; **behaviour changes** for webhook routing, for application code that calls the dashboard and admin services inside its own transaction, and for streamed adapter request bodies, each marked *Behaviour change* below.
 
 ### Webhook deliveries run on an ordinary queue
 
@@ -29,7 +33,7 @@ The group's worker count is also the most attempts that server runs at once. See
 
 **Behaviour change.** Before 8.2 every server ran webhook deliveries whatever its `Queues` listed. Now they are ordinary jobs on `DefaultQueue` (or the queue `w.Queue` names), so a server whose `Queues` leave that queue out no longer runs them, and if no server drains it, deliveries stay `Pending`. **Fix:** include the webhook queue in `Queues` or in an `AddWorkerGroup` group on at least one server.
 
-### Migration
+### Migration (8.2)
 
 **One migration**, additive: a nullable `Queue` column (string) on the webhook delivery table. Generate it with `dotnet ef migrations add <Name>` and apply it before any 8.2 process starts. Deliveries sent before 8.2 have no queue and run on the webhook queue of the server that enqueues their next attempt.
 
