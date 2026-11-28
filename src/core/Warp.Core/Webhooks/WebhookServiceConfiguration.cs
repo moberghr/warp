@@ -205,12 +205,14 @@ public sealed class WarpWebhookOptions
 internal sealed class WebhookRedeliveryEnqueuer<TContext> : IWebhookRedeliveryEnqueuer
     where TContext : DbContext
 {
-    private readonly TContext _context;
-    private readonly IPublisher _publisher;
+    private readonly Func<TContext> _context;
+    private readonly Func<IPublisher> _publisher;
     private readonly WarpConfiguration _configuration;
     private readonly WebhookSendBehavior _behavior;
 
-    public WebhookRedeliveryEnqueuer(TContext context, IPublisher publisher, IOptions<WarpConfiguration> configuration, IOptions<WebhookSendBehavior> behavior)
+    // The context and publisher are resolved on use: on the Warp context WebhookCommandService stages the job itself
+    // and never calls this, and they would build the application's context for nothing (#344).
+    public WebhookRedeliveryEnqueuer(Func<TContext> context, Func<IPublisher> publisher, IOptions<WarpConfiguration> configuration, IOptions<WebhookSendBehavior> behavior)
     {
         _context = context;
         _publisher = publisher;
@@ -221,14 +223,15 @@ internal sealed class WebhookRedeliveryEnqueuer<TContext> : IWebhookRedeliveryEn
     public async Task EnqueueAsync(Guid deliveryId, CancellationToken ct = default)
     {
         // The delivery stays on the queue it was sent on; a row from before 8.2 has none and takes this process's.
-        var deliveryQueue = await _context.Set<WebhookDelivery>()
+        var deliveryQueue = await _context().Set<WebhookDelivery>()
             .AsNoTracking()
             .Where(x => x.Id == deliveryId)
             .Select(x => x.Queue)
             .FirstOrDefaultAsync(ct);
 
         // Immediate (not scheduled) so signal-driven pickup applies — mirrors the first attempt in SendAsync.
-        await _publisher.Enqueue(new ExecuteWebhookDelivery { DeliveryId = deliveryId }, _behavior.ResolveQueue(deliveryQueue, _configuration));
-        await _publisher.SaveChangesAsync(ct);
+        var publisher = _publisher();
+        await publisher.Enqueue(new ExecuteWebhookDelivery { DeliveryId = deliveryId }, _behavior.ResolveQueue(deliveryQueue, _configuration));
+        await publisher.SaveChangesAsync(ct);
     }
 }

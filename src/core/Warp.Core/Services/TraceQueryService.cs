@@ -26,9 +26,15 @@ public sealed class TraceQueryService<TContext> : ITraceQueryService
     // cap via IsTruncated (the sagas/endpoint-recent-calls pattern) rather than silently dropping.
     private const int MaxSpansPerSource = 500;
 
-    private readonly TContext _context;
+    private readonly DbContext _context;
 
-    public TraceQueryService(TContext context) => _context = context;
+    public TraceQueryService(TContext context)
+        : this((DbContext)context)
+    {
+    }
+
+    // The Warp context (rule 2.14): AddWarp passes IWarpContext.Context, which is not a TContext.
+    internal TraceQueryService(DbContext context) => _context = context;
 
     public async Task<TraceOverviewModel?> GetTrace(Guid traceId, CancellationToken ct)
     {

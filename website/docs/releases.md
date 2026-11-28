@@ -43,6 +43,22 @@ With `CaptureRequestBodies` on (or a forced capture), the adapter no longer read
 
 **Behaviour change.** A streamed body the transport never sent (the call failed before the send) is no longer captured, and a non-seekable streamed body is no longer made retryable by capture's buffering, so it behaves the same with capture on as with capture off.
 
+### Dashboard and admin services run on Warp's own context
+
+The dashboard's query and command services and the admin managers no longer use your `DbContext`. `AddWarp` now registers Warp's own context in every process (dashboard-only and publisher-only hosts included), the same runtime-only mirror of Warp's tables the server already uses, and these services run on it: `IJobQueryService`, `IJobLogQueryService`, `IJobGroupQueryService`, `IDashboardStatsService`, `IBackgroundServiceQueryService`, `IAdapterQueryService`, `IApplicationQueryService`, `IApplicationDeployQueryService`, `IEndpointQueryService`, `IClientEventQueryService`, `ITraceQueryService`, `IErrorGroupQueryService`, `ISloQueryService`, `IMetricQueryService`, `IMetricBoardQueryService`, `IMetricAnnotationQueryService`, `IWebhookQueryService`, `ISagaQueryService`, `IJobCommandService`, `IRecurringJobService`, `IServerCommandService`, `IErrorGroupCommandService`, `ISloCommandService`, `IMetricBoardCommandService`, `IMetricAnnotationCommandService`, `IWebhookCommandService`, `ISagaCommandService`, `IConcurrencyLimitManager` and `IRateLimitManager`. `IPublisher`, `IBatchPublisher`, `IRecurringJobPublisher` and `IWebhookDispatcher` stay on your context: staging rows in your transaction is their point. No API change and no migration. Table and column names are read from your context's model, so naming conventions keep working.
+
+**Behaviour changes** for application code that calls these services itself:
+
+- **They no longer take part in your transaction.** They open their own connection, so a call made inside your `BeginTransaction` neither commits nor rolls back with it, and does not see rows you have saved but not committed. On SQL Server without read-committed snapshot, a read of rows your open transaction has locked waits for that transaction. Commit first, then call the service.
+- **Inside a `TransactionScope`** the second connection enlists in the scope, which escalates it to a distributed transaction. That fails on Linux and needs MSDTC on Windows. Call these services outside the scope.
+- **Your context's configuration no longer applies to them:** its interceptors, its logging, its execution strategy (`EnableRetryOnFailure`) and its query-splitting setting. Their SQL logs at `Debug`, like the server's, unless `EnableServerCommandLogging` is set. Your context's **command timeout is carried over**.
+- **PostgreSQL with a connection string:** a dashboard-only or publisher-only process now also opens Warp's own pool (`Application Name` ending in `:warp-server`), when one of these services is first used. It holds no idle connections at rest, and the dashboard's connections leave your pool rather than adding to it. A host that configures its context with an `NpgsqlDataSource`, and SQL Server, keep a single pool. See [Connection pooling](operations/connection-pooling.md).
+- **Webhook redelivery and endpoint probes** stage the executor job on Warp's context, in the same transaction as the delivery's reset, instead of through `IPublisher`. A host that registers its own `IWebhookRedeliveryEnqueuer` is still called, but its job no longer commits in that transaction.
+
+Your tests are not affected: when your context runs on a provider Warp does not support for its own context (EF Core in-memory or SQLite, as in [Testing apps that use Warp](operations/testing-apps.md)), these services keep using your context, so a test still reads back what it published.
+
+The public constructors that take your context are unchanged: a service you construct yourself runs on the context you pass.
+
 ## 8.1.0
 
 *2026-11-27*

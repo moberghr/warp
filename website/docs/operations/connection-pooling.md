@@ -92,11 +92,17 @@ Acquiring a lock can still fail; releasing one cannot. Swallowing does not chang
 Session mode gives no multiplexing while a connection is open, so a pool sized for transaction-mode traffic will starve. Warp holds several long-lived connections per process:
 
 - the worker pool (`WorkerCount`, default `min(ProcessorCount * 5, 20)`)
-- the Warp server context, used by the server tasks
+- Warp's own contexts: the server context, used by the worker and the server tasks, and the Warp context, used by the dashboard and the admin services in every process
 - the lock connections
 - the `LISTEN` connection, under `UseDatabasePush()`
 
 Size `default_pool_size` for that, or point Warp at a direct connection and leave the pooler to your request traffic. Under-sizing shows up as client-login timeouts, not as a lock error.
+
+### Warp's own contexts use a separate Npgsql pool
+
+On PostgreSQL with a connection string, Warp's own work opens on a pool of its own: your DbContext's connection string with `Application Name` suffixed `:warp-server`, `No Reset On Close` and `MinPoolSize = 0`. That covers the server context (the worker and the server tasks) and, since 8.2, the Warp context, which the dashboard's query and command services and the admin managers use in every process that calls `AddWarp`. In a server process both share the one pool. In a dashboard-only or publisher-only process the pool opens when one of those services is first used and keeps no idle connections at rest. The dashboard's connections move out of your pool rather than adding to it. A host that registers an `NpgsqlDataSource` keeps a single pool (Warp cannot fork one, see below), as does SQL Server.
+
+`SELECT application_name, count(*) FROM pg_stat_activity WHERE datname = current_database() GROUP BY 1` shows Warp's own traffic under the `:warp-server` suffix.
 
 ### The lock sessions use a separate Npgsql pool
 

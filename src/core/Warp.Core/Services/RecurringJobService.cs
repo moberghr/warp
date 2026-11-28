@@ -36,12 +36,18 @@ public interface IRecurringJobService
 public class RecurringJobService<TContext> : IRecurringJobService
     where TContext : DbContext
 {
-    private readonly TContext _context;
+    private readonly DbContext _context;
     private readonly TimeProvider _timeProvider;
     private readonly IWarpNotificationTransport _notificationTransport;
     private readonly ServerTaskSignals<TContext> _signals;
 
     public RecurringJobService(TContext context, TimeProvider timeProvider, IWarpNotificationTransport notificationTransport, ServerTaskSignals<TContext> signals)
+        : this((DbContext)context, timeProvider, notificationTransport, signals)
+    {
+    }
+
+    // The Warp context (rule 2.14): AddWarp passes IWarpContext.Context, which is not a TContext.
+    internal RecurringJobService(DbContext context, TimeProvider timeProvider, IWarpNotificationTransport notificationTransport, ServerTaskSignals<TContext> signals)
     {
         _context = context;
         _timeProvider = timeProvider;

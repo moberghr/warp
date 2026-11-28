@@ -51,13 +51,19 @@ public interface IMetricBoardQueryService
 public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService, IMetricBoardVerdictReader
     where TContext : DbContext
 {
-    private readonly TContext _context;
+    private readonly DbContext _context;
     private readonly IOptions<WarpConfiguration> _options;
     private readonly TimeProvider _timeProvider;
     private readonly ISloQueryService _objectives;
 
     // The objective read is optional for direct construction (tests); AddWarp registers ISloQueryService, so DI passes it.
     public MetricBoardQueryService(TContext context, IOptions<WarpConfiguration> options, TimeProvider timeProvider, ISloQueryService? objectives = null)
+        : this((DbContext)context, options, timeProvider, objectives)
+    {
+    }
+
+    // The Warp context (rule 2.14): AddWarp passes IWarpContext.Context, which is not a TContext.
+    internal MetricBoardQueryService(DbContext context, IOptions<WarpConfiguration> options, TimeProvider timeProvider, ISloQueryService? objectives = null)
     {
         _context = context;
         _options = options;

@@ -49,8 +49,15 @@ public static class SagaServiceConfiguration
         // Dashboard query/command services. Registered as part of the addon so they're available
         // when the user calls AddSagas — the dashboard endpoints probe for them and return 404
         // when they're not registered.
-        builder.Services.TryAddScoped<Services.ISagaQueryService, Services.SagaQueryService<TContext>>();
-        builder.Services.TryAddScoped<Services.ISagaCommandService, Services.SagaCommandService<TContext>>();
+        // Both run on the Warp context (rule 2.14, #344).
+        builder.Services.TryAddScoped<Services.ISagaQueryService>(x => new Services.SagaQueryService<TContext>(
+            x.GetRequiredService<IWarpContext>().Context,
+            x.GetRequiredService<TimeProvider>()));
+        builder.Services.TryAddScoped<Services.ISagaCommandService>(x => new Services.SagaCommandService<TContext>(
+            x.GetRequiredService<IWarpContext>().Context,
+            x.GetRequiredService<IWarpLockProvider>(),
+            x.GetRequiredService<Notifiers.WarpNotifierDispatcher>(),
+            x.GetRequiredService<Microsoft.Extensions.Logging.ILogger<Services.SagaCommandService<TContext>>>()));
 
         return builder;
     }

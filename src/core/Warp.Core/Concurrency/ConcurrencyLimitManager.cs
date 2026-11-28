@@ -6,10 +6,16 @@ namespace Warp.Core.Concurrency;
 public class ConcurrencyLimitManager<TContext> : IConcurrencyLimitManager
     where TContext : DbContext
 {
-    private readonly TContext _context;
+    private readonly DbContext _context;
     private readonly TimeProvider _timeProvider;
 
     public ConcurrencyLimitManager(TContext context, TimeProvider timeProvider)
+        : this((DbContext)context, timeProvider)
+    {
+    }
+
+    // The Warp context (rule 2.14): AddWarp passes IWarpContext.Context, which is not a TContext.
+    internal ConcurrencyLimitManager(DbContext context, TimeProvider timeProvider)
     {
         _context = context;
         _timeProvider = timeProvider;

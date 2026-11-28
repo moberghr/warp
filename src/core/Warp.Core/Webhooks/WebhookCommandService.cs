@@ -1,13 +1,17 @@
+using System.Diagnostics;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Events;
 using Warp.Core.Logging;
+using Warp.Core.Notifications;
 
 namespace Warp.Core.Webhooks;
 
 /// <summary>
-/// <see cref="IWebhookCommandService"/> over the user's <typeparamref name="TContext"/>. Applies the status
+/// <see cref="IWebhookCommandService"/> over Warp's own context (registered by <c>AddWarp</c>; the
+/// <typeparamref name="TContext"/> constructor runs it on the given application context). Applies the status
 /// guard, then flips the settled delivery back to <c>Pending</c> (fresh attempt budget, immediate
 /// <c>NextAttemptAt</c>, refreshed <c>ExpireAt</c>) and enqueues the executor job through the
 /// <see cref="IWebhookRedeliveryEnqueuer"/> seam. The executor job type lives in the webhooks addon (which
@@ -29,21 +33,41 @@ namespace Warp.Core.Webhooks;
 public class WebhookCommandService<TContext> : IWebhookCommandService
     where TContext : DbContext
 {
-    private readonly TContext _context;
+    private readonly DbContext _context;
     private readonly TimeProvider _timeProvider;
     private readonly WarpConfiguration _configuration;
     private readonly IEnumerable<IWebhookRedeliveryEnqueuer> _redeliveryEnqueuers;
+    private readonly ServerTaskSignals<TContext>? _signals;
+    private readonly IWarpNotificationTransport? _notificationTransport;
+    private readonly WebhookSendBehavior _behavior;
 
     public WebhookCommandService(
         TContext context,
         TimeProvider timeProvider,
         IOptions<WarpConfiguration> configuration,
         IEnumerable<IWebhookRedeliveryEnqueuer> redeliveryEnqueuers)
+        : this((DbContext)context, timeProvider, configuration, redeliveryEnqueuers, signals: null, notificationTransport: null, behavior: null)
+    {
+    }
+
+    // The Warp context (rule 2.14): AddWarp passes IWarpContext.Context, which is not a TContext. With the signals
+    // and the transport, Warp's own enqueuer stages the executor job on this context instead (StageOrEnqueueAsync).
+    internal WebhookCommandService(
+        DbContext context,
+        TimeProvider timeProvider,
+        IOptions<WarpConfiguration> configuration,
+        IEnumerable<IWebhookRedeliveryEnqueuer> redeliveryEnqueuers,
+        ServerTaskSignals<TContext>? signals,
+        IWarpNotificationTransport? notificationTransport,
+        IOptions<WebhookSendBehavior>? behavior)
     {
         _context = context;
         _timeProvider = timeProvider;
         _configuration = configuration.Value;
         _redeliveryEnqueuers = redeliveryEnqueuers;
+        _signals = signals;
+        _notificationTransport = notificationTransport;
+        _behavior = behavior?.Value ?? new WebhookSendBehavior();
     }
 
     public Task<WebhookRedeliveryResult> Redeliver(Guid deliveryId, CancellationToken ct = default)
@@ -129,8 +153,9 @@ public class WebhookCommandService<TContext> : IWebhookCommandService
         }
 
         await WebhookParkedRelease.DeferNextProbeAsync(_context, groupName, now + _configuration.WebhookEndpointProbeInterval, ct);
-        await enqueuer.EnqueueAsync(delivery.Id, ct);
+        var wake = await StageOrEnqueueAsync(enqueuer, delivery.Id, delivery.Queue, now, "endpoint probe", ct);
         await transaction.CommitAsync(ct);
+        await WakeAsync(wake);
 
         return WebhookProbeResult.Probing;
     }
@@ -155,6 +180,7 @@ public class WebhookCommandService<TContext> : IWebhookCommandService
                 {
                     x.Status,
                     x.SigningMode,
+                    x.Queue,
                 })
             .FirstOrDefaultAsync(ct);
 
@@ -222,12 +248,61 @@ public class WebhookCommandService<TContext> : IWebhookCommandService
 
         // Stages the executor job and commits it in the same transaction as the flip, so the delivery is
         // never left Pending without a live executor job.
-        await enqueuer.EnqueueAsync(deliveryId, ct);
+        var wake = await StageOrEnqueueAsync(enqueuer, deliveryId, current.Queue, now, "redelivery", ct);
         await transaction.CommitAsync(ct);
+        await WakeAsync(wake);
 
         WarpTelemetry.WebhookRedeliveries.Add(1);
 
         return WebhookRedeliveryResult.Enqueued;
+    }
+
+    // The enqueue must commit in the caller's transaction (see the class remarks). Warp's own enqueuer publishes on
+    // TContext, which is another connection when this service runs on the Warp context (#344): the job could commit
+    // without the flip, or run before it. So on the Warp context Warp's enqueuer is bypassed and the executor job is
+    // staged here, on this context, like the server tasks do; its wake is returned to fire after the commit (§6.3).
+    // A host's own enqueuer is still called: it decides where its job is staged.
+    private async Task<IReadOnlyList<Notification>> StageOrEnqueueAsync(
+        IWebhookRedeliveryEnqueuer enqueuer,
+        Guid deliveryId,
+        string? deliveryQueue,
+        DateTime now,
+        string createdBy,
+        CancellationToken ct)
+    {
+        if (_signals is null || enqueuer is not WebhookRedeliveryEnqueuer<TContext>)
+        {
+            await enqueuer.EnqueueAsync(deliveryId, ct);
+
+            return [];
+        }
+
+        var callerTrace = Activity.Current?.TraceId;
+        WebhookExecutorJobs.Stage(
+            _context,
+            deliveryId,
+            _behavior.ResolveQueue(deliveryQueue, _configuration),
+            now,
+            now,
+            _configuration.ApplicationName,
+            createdBy,
+            callerTrace is { } trace ? new Guid(trace.ToHexString()) : null);
+
+        var wake = NotificationDispatch.CapturePending(_context);
+        await _context.SaveChangesAsync(ct);
+
+        return wake;
+    }
+
+    // After the commit, never with the caller's token: the job is committed and must not wait out a backoff.
+    private async Task WakeAsync(IReadOnlyList<Notification> wake)
+    {
+        if (wake.Count == 0 || _signals is null || _notificationTransport is null)
+        {
+            return;
+        }
+
+        await NotificationDispatch.DispatchAsync(wake, _signals, _notificationTransport, CancellationToken.None);
     }
 
     // Validated before anything is written: the attempt reads the secret only at send time, so a bad value

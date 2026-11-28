@@ -6,10 +6,16 @@ namespace Warp.Core.RateLimit;
 public class RateLimitManager<TContext> : IRateLimitManager
     where TContext : DbContext
 {
-    private readonly TContext _context;
+    private readonly DbContext _context;
     private readonly TimeProvider _timeProvider;
 
     public RateLimitManager(TContext context, TimeProvider timeProvider)
+        : this((DbContext)context, timeProvider)
+    {
+    }
+
+    // The Warp context (rule 2.14): AddWarp passes IWarpContext.Context, which is not a TContext.
+    internal RateLimitManager(DbContext context, TimeProvider timeProvider)
     {
         _context = context;
         _timeProvider = timeProvider;

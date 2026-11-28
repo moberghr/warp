@@ -12,9 +12,15 @@ namespace Warp.Core.BackgroundServices;
 public class BackgroundServiceQueryService<TContext> : IBackgroundServiceQueryService
     where TContext : DbContext
 {
-    private readonly TContext _context;
+    private readonly DbContext _context;
 
     public BackgroundServiceQueryService(TContext context)
+        : this((DbContext)context)
+    {
+    }
+
+    // The Warp context (rule 2.14): AddWarp passes IWarpContext.Context, which is not a TContext.
+    internal BackgroundServiceQueryService(DbContext context)
     {
         _context = context;
     }

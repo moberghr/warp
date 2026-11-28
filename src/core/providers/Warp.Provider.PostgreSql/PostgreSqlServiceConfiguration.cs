@@ -318,6 +318,12 @@ internal sealed class PostgresServerContextConfigurator<TContext> : IWarpServerC
     // opens a scope per bookkeeping call, once per tick, per server task, so that cost multiplies.
     // The source cannot change at runtime, so resolve it once (under a lock — server startup fires
     // many loops' first scopes concurrently, and a null data-source probe must cache too).
+    // EF1001: NpgsqlOptionsExtension is the only marker of a context configured with UseNpgsql (see ResolveDataSource).
+#pragma warning disable EF1001
+    public bool Supports(DbContextOptions applicationOptions) =>
+        applicationOptions.Extensions.OfType<NpgsqlOptionsExtension>().Any();
+#pragma warning restore EF1001
+
     public void Configure(DbContextOptionsBuilder optionsBuilder, IServiceProvider applicationServices)
     {
         lock (_resolveLock)

@@ -21,11 +21,17 @@ public class ApplicationQueryService<TContext> : IApplicationQueryService, IAppl
     // the retention window until swept.
     private const int RecentEventsLimit = 50;
 
-    private readonly TContext _context;
+    private readonly DbContext _context;
     private readonly TimeProvider _timeProvider;
     private readonly TimeSpan _liveThreshold;
 
     public ApplicationQueryService(TContext context, TimeProvider timeProvider, IOptions<WarpConfiguration> configuration)
+        : this((DbContext)context, timeProvider, configuration)
+    {
+    }
+
+    // The Warp context (rule 2.14): AddWarp passes IWarpContext.Context, which is not a TContext.
+    internal ApplicationQueryService(DbContext context, TimeProvider timeProvider, IOptions<WarpConfiguration> configuration)
     {
         _context = context;
         _timeProvider = timeProvider;

@@ -47,10 +47,16 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
     /// </summary>
     private const int MaxDayPatterns = 14;
 
-    private readonly TContext _context;
+    private readonly DbContext _context;
     private readonly TimeProvider _timeProvider;
 
     public DashboardStatsService(TContext context, TimeProvider timeProvider)
+        : this((DbContext)context, timeProvider)
+    {
+    }
+
+    // The Warp context (rule 2.14): AddWarp passes IWarpContext.Context, which is not a TContext.
+    internal DashboardStatsService(DbContext context, TimeProvider timeProvider)
     {
         _context = context;
         _timeProvider = timeProvider;

@@ -24,9 +24,15 @@ public interface IMetricAnnotationQueryService
 public sealed class MetricAnnotationQueryService<TContext> : IMetricAnnotationQueryService
     where TContext : DbContext
 {
-    private readonly TContext _context;
+    private readonly DbContext _context;
 
     public MetricAnnotationQueryService(TContext context)
+        : this((DbContext)context)
+    {
+    }
+
+    // The Warp context (rule 2.14): AddWarp passes IWarpContext.Context, which is not a TContext.
+    internal MetricAnnotationQueryService(DbContext context)
     {
         _context = context;
     }

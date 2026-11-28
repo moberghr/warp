@@ -14,17 +14,20 @@ public static class ConcurrencyServiceConfiguration
     {
         // ConcurrencyLimit entity is registered unconditionally by WarpModelCustomizer.
         // This opt-in only wires the runtime behavior + admin manager service.
-        builder.Services.AddScoped<IConcurrencyLimitManager, ConcurrencyLimitManager<TContext>>();
+        // The admin manager runs on the Warp context (rule 2.14, #344), in every AddWarp process.
+        object WarpManager(IServiceProvider x) => new ConcurrencyLimitManager<TContext>(
+            x.GetRequiredService<IWarpContext>().Context,
+            x.GetRequiredService<TimeProvider>());
+        builder.Services.AddScoped(typeof(IConcurrencyLimitManager), WarpManager);
 
-        // The pipeline's resolver uses Warp's own context, opened only for a job with a concurrency key
-        // (rule 6.17); the admin manager above stays on TContext for AddWarp-only hosts (#344).
+        // The pipeline's resolver uses the server context, opened only for a job with a concurrency key (rule 6.17).
         // A host that registered its own IConcurrencyLimitManager decides the limit through it, as in 7.x
         // (#349), resolved only when a job with a concurrency key asks.
         builder.Services.TryAddScoped<DeferredWarpContext>();
         var manager = new ReplacedRegistration(
             builder.Services,
             typeof(IConcurrencyLimitManager),
-            typeof(ConcurrencyLimitManager<TContext>));
+            WarpManager);
         builder.Services.AddScoped(x => manager.IsReplaced
             ? new ConcurrencyLimitResolver(async (name, ct) =>
                 (await x.GetRequiredService<IConcurrencyLimitManager>().GetLimit(name, ct))?.Limit)

@@ -35,7 +35,7 @@ public class JobCommandService<TContext> : IJobCommandService
     private const string StatsRequeued = "stats:requeued";
     private const string StatsDeleted = "stats:deleted";
 
-    private readonly TContext _context;
+    private readonly DbContext _context;
     private readonly TimeProvider _timeProvider;
     private readonly WarpConfiguration _configuration;
     private readonly IWarpNotificationTransport _notificationTransport;
@@ -43,6 +43,12 @@ public class JobCommandService<TContext> : IJobCommandService
     private readonly ServerTaskSignals<TContext> _signals;
 
     public JobCommandService(TContext context, TimeProvider timeProvider, IOptions<WarpConfiguration> configuration, IWarpNotificationTransport notificationTransport, IWarpSqlQueries<TContext> sqlQueries, ServerTaskSignals<TContext> signals)
+        : this((DbContext)context, timeProvider, configuration, notificationTransport, sqlQueries, signals)
+    {
+    }
+
+    // The Warp context (rule 2.14): AddWarp passes IWarpContext.Context, which is not a TContext.
+    internal JobCommandService(DbContext context, TimeProvider timeProvider, IOptions<WarpConfiguration> configuration, IWarpNotificationTransport notificationTransport, IWarpSqlQueries<TContext> sqlQueries, ServerTaskSignals<TContext> signals)
     {
         _context = context;
         _timeProvider = timeProvider;

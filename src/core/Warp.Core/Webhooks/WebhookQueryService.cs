@@ -22,7 +22,7 @@ public class WebhookQueryService<TContext> : IWebhookQueryService
     private const int StatsWindowHours = 24;
     private const int MaxStatsRows = 50_000;
 
-    private readonly TContext _context;
+    private readonly DbContext _context;
     private readonly TimeProvider _timeProvider;
 
     public WebhookQueryService(TContext context)
@@ -31,6 +31,12 @@ public class WebhookQueryService<TContext> : IWebhookQueryService
     }
 
     public WebhookQueryService(TContext context, TimeProvider timeProvider)
+        : this((DbContext)context, timeProvider)
+    {
+    }
+
+    // The Warp context (rule 2.14): AddWarp passes IWarpContext.Context, which is not a TContext.
+    internal WebhookQueryService(DbContext context, TimeProvider timeProvider)
     {
         _context = context;
         _timeProvider = timeProvider;

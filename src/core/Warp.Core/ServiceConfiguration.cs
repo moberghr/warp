@@ -127,6 +127,8 @@ public static class ServiceConfiguration
         WarpGeneratedHandlerRegistry.ApplyAll(services);
         RemoveExcludedHandlerRegistrations(services);
 
+        AddWarpContext<TContext>(services);
+
         services.AddScoped<IPublisher>(x => new Publisher<TContext>(
             x.GetRequiredService<TContext>(),
             x.GetRequiredService<IOptions<WarpConfiguration>>(),
@@ -144,13 +146,13 @@ public static class ServiceConfiguration
 
         services.AddScoped<IRecurringJobPublisher>(x =>
             new RecurringJobPublisher<TContext>(x.GetRequiredService<TContext>(), x.GetRequiredService<TimeProvider>(), x.GetRequiredService<IWarpLockProvider>()));
-        services.AddScoped<IJobQueryService>(x => new JobQueryService<TContext>(x.GetRequiredService<TContext>(), x.GetRequiredService<TimeProvider>()));
-        services.AddScoped<IJobLogQueryService>(x => new JobLogQueryService<TContext>(x.GetRequiredService<TContext>()));
-        services.AddScoped<IJobCommandService>(x => new JobCommandService<TContext>(x.GetRequiredService<TContext>(), x.GetRequiredService<TimeProvider>(), x.GetRequiredService<IOptions<WarpConfiguration>>(), x.GetRequiredService<IWarpNotificationTransport>(), x.GetRequiredService<IWarpSqlQueries<TContext>>(), x.GetRequiredService<ServerTaskSignals<TContext>>()));
-        services.AddScoped<IJobGroupQueryService>(x => new JobGroupQueryService<TContext>(x.GetRequiredService<TContext>()));
-        services.AddScoped<IRecurringJobService>(x => new RecurringJobService<TContext>(x.GetRequiredService<TContext>(), x.GetRequiredService<TimeProvider>(), x.GetRequiredService<IWarpNotificationTransport>(), x.GetRequiredService<ServerTaskSignals<TContext>>()));
-        services.AddScoped<IDashboardStatsService>(x => new DashboardStatsService<TContext>(x.GetRequiredService<TContext>(), x.GetRequiredService<TimeProvider>()));
-        services.AddScoped<IServerCommandService>(x => new ServerCommandService<TContext>(x.GetRequiredService<TContext>(), x.GetRequiredService<TimeProvider>()));
+        services.AddScoped<IJobQueryService>(x => new JobQueryService<TContext>(x.GetRequiredService<IWarpContext>().Context, x.GetRequiredService<TimeProvider>()));
+        services.AddScoped<IJobLogQueryService>(x => new JobLogQueryService<TContext>(x.GetRequiredService<IWarpContext>().Context));
+        services.AddScoped<IJobCommandService>(x => new JobCommandService<TContext>(x.GetRequiredService<IWarpContext>().Context, x.GetRequiredService<TimeProvider>(), x.GetRequiredService<IOptions<WarpConfiguration>>(), x.GetRequiredService<IWarpNotificationTransport>(), x.GetRequiredService<IWarpSqlQueries<TContext>>(), x.GetRequiredService<ServerTaskSignals<TContext>>()));
+        services.AddScoped<IJobGroupQueryService>(x => new JobGroupQueryService<TContext>(x.GetRequiredService<IWarpContext>().Context));
+        services.AddScoped<IRecurringJobService>(x => new RecurringJobService<TContext>(x.GetRequiredService<IWarpContext>().Context, x.GetRequiredService<TimeProvider>(), x.GetRequiredService<IWarpNotificationTransport>(), x.GetRequiredService<ServerTaskSignals<TContext>>()));
+        services.AddScoped<IDashboardStatsService>(x => new DashboardStatsService<TContext>(x.GetRequiredService<IWarpContext>().Context, x.GetRequiredService<TimeProvider>()));
+        services.AddScoped<IServerCommandService>(x => new ServerCommandService<TContext>(x.GetRequiredService<IWarpContext>().Context, x.GetRequiredService<TimeProvider>()));
         services.AddScoped<IBatchPublisher>(x => new BatchPublisher<TContext>(
             x.GetRequiredService<TContext>(),
             x.GetRequiredService<IOptions<WarpConfiguration>>(),
@@ -183,28 +185,28 @@ public static class ServiceConfiguration
 
         // Background-services dashboard read service. Registered in AddWarp (not AddWarpServer)
         // so dashboard-only / publisher-only processes that call AddWarp without AddWarpServer
-        // can still serve the /api/services endpoints. Only depends on TContext.
-        services.TryAddScoped<IBackgroundServiceQueryService, BackgroundServiceQueryService<TContext>>();
+        // can still serve the /api/services endpoints. Runs on the Warp context (§2.14).
+        services.TryAddScoped<IBackgroundServiceQueryService>(x => new BackgroundServiceQueryService<TContext>(x.GetRequiredService<IWarpContext>().Context));
 
         // Adapters dashboard read service. Registered in AddWarp (not AddAdapters) so dashboard-only /
         // publisher-only processes that never call AddAdapters() can still serve the /api/adapters
-        // endpoints (§2.14 stays-on-TContext). Only depends on TContext. The adapter tables are always
+        // endpoints (on the Warp context, §2.14). The adapter tables are always
         // in the schema (§2.11); AddAdapters() gates recording services + the addons flag only.
-        services.TryAddScoped<IAdapterQueryService, AdapterQueryService<TContext>>();
+        services.TryAddScoped<IAdapterQueryService>(x => new AdapterQueryService<TContext>(x.GetRequiredService<IWarpContext>().Context));
 
         // Applications dashboard read service (§8.19 multi-app observability). Registered in AddWarp (not
         // gated on ApplicationName) so dashboard-only / publisher-only processes serve /api/applications
         // without running a server — it unifies the Server + ApplicationInstance tables (both always in the
-        // schema §2.11) into one roster and resolves on TContext (§2.14 stays-on-TContext).
+        // schema §2.11) into one roster and runs on the Warp context (§2.14).
         services.TryAddScoped<IApplicationQueryService>(x => new ApplicationQueryService<TContext>(
-            x.GetRequiredService<TContext>(),
+            x.GetRequiredService<IWarpContext>().Context,
             x.GetRequiredService<TimeProvider>(),
             x.GetRequiredService<IOptions<WarpConfiguration>>()));
 
         // Deploy history (#325) on its own interface: a host that registered its own IApplicationQueryService before
         // AddWarp (the TryAdd seam) keeps compiling, and still gets Warp's DB-backed deploy reads here.
         services.TryAddScoped<IApplicationDeployQueryService>(x => new ApplicationQueryService<TContext>(
-            x.GetRequiredService<TContext>(),
+            x.GetRequiredService<IWarpContext>().Context,
             x.GetRequiredService<TimeProvider>(),
             x.GetRequiredService<IOptions<WarpConfiguration>>()));
 
@@ -221,38 +223,45 @@ public static class ServiceConfiguration
         // AddEndpointObservability) so dashboard-only / publisher-only processes can serve /api/endpoints
         // without running the middleware. The EndpointCallLog table is always in the schema (§2.11), so
         // AddEndpointObservability() gates only the recorder/flusher/middleware plus the addons flag.
-        services.TryAddScoped<IEndpointQueryService, EndpointQueryService<TContext>>();
+        services.TryAddScoped<IEndpointQueryService>(x => new EndpointQueryService<TContext>(x.GetRequiredService<IWarpContext>().Context));
 
         // Client (browser) observability read service — registered by AddWarp (like IEndpointQueryService) so
         // dashboard-only / publisher-only processes serve /api/client without running the ingest endpoint. The
         // ClientEventLog table is always in the schema (§2.11); AddClientObservability() gates only the
         // recorder/flusher/ingest endpoint plus the addons flag (§8.27).
-        services.TryAddScoped<IClientEventQueryService, ClientEventQueryService<TContext>>();
+        services.TryAddScoped<IClientEventQueryService>(x => new ClientEventQueryService<TContext>(x.GetRequiredService<IWarpContext>().Context));
 
         // Unified trace view (§8.28) — one screen for a trace id, unioned from the rows Warp already persists
         // (client request + endpoint call + jobs + adapter calls). Registered by AddWarp so dashboard-only
         // processes resolve it; no new storage or span collector.
-        services.TryAddScoped<ITraceQueryService, TraceQueryService<TContext>>();
+        services.TryAddScoped<ITraceQueryService>(x => new TraceQueryService<TContext>(x.GetRequiredService<IWarpContext>().Context));
 
         // Error grouping / Issues read + command services (§8.29). Registered by AddWarp (like the other
         // observability read services) so dashboard-only / publisher-only processes serve /api/issues without
         // running a server. The ErrorGroup table is always in the schema (§2.11); the aggregator server task
         // (which does the folding) runs only on a server.
         services.TryAddScoped<IErrorGroupQueryService>(x => new ErrorGroupQueryService<TContext>(
-            x.GetRequiredService<TContext>(),
+            x.GetRequiredService<IWarpContext>().Context,
             x.GetRequiredService<TimeProvider>()));
-        services.TryAddScoped<IErrorGroupCommandService, ErrorGroupCommandService<TContext>>();
+        services.TryAddScoped<IErrorGroupCommandService>(x => new ErrorGroupCommandService<TContext>(
+            x.GetRequiredService<IWarpContext>().Context,
+            x.GetRequiredService<TimeProvider>(),
+            x.GetRequiredService<ILogger<ErrorGroupCommandService<TContext>>>()));
 
         // SLO objectives read/command (§8.31). Registered in AddWarp so dashboard-only hosts resolve them; the
         // SloDefinition/SloEvaluation tables are always in the schema (§2.11), the evaluator runs on a server.
-        services.TryAddScoped<ISloQueryService>(x => new SloQueryService<TContext>(x.GetRequiredService<TContext>()));
-        services.TryAddScoped<ISloCommandService, SloCommandService<TContext>>();
+        services.TryAddScoped<ISloQueryService>(x => new SloQueryService<TContext>(x.GetRequiredService<IWarpContext>().Context));
+        services.TryAddScoped<ISloCommandService>(x => new SloCommandService<TContext>(
+            x.GetRequiredService<IWarpContext>().Context,
+            x.GetRequiredService<TimeProvider>(),
+            x.GetRequiredService<ILogger<SloCommandService<TContext>>>(),
+            x.GetService<IWarpSqlQueries<TContext>>()));
 
         // Collected application metrics read service. Registered in AddWarp (not AddMetrics) so dashboard-only
         // hosts resolve it; the metric_point/metric_instrument tables are always in the schema (§2.11), and
         // AddMetrics() gates only the collector, the flusher and the addons flag.
         services.TryAddScoped<IMetricQueryService>(x => new MetricQueryService<TContext>(
-            x.GetRequiredService<TContext>(),
+            x.GetRequiredService<IWarpContext>().Context,
             x.GetRequiredService<IOptions<WarpConfiguration>>(),
             x.GetRequiredService<TimeProvider>()));
 
@@ -260,11 +269,15 @@ public static class ServiceConfiguration
         // dashboard-only host serves the board without the collector; the metric_board_tile table is always in the
         // schema (§2.11), AddMetricBoard() only seeds tiles from code.
         services.TryAddScoped<IMetricBoardQueryService>(x => new MetricBoardQueryService<TContext>(
-            x.GetRequiredService<TContext>(),
+            x.GetRequiredService<IWarpContext>().Context,
             x.GetRequiredService<IOptions<WarpConfiguration>>(),
             x.GetRequiredService<TimeProvider>(),
             x.GetRequiredService<ISloQueryService>()));
-        services.TryAddScoped<IMetricBoardCommandService, MetricBoardCommandService<TContext>>();
+        services.TryAddScoped<IMetricBoardCommandService>(x => new MetricBoardCommandService<TContext>(
+            x.GetRequiredService<IWarpContext>().Context,
+            x.GetRequiredService<TimeProvider>(),
+            x.GetRequiredService<ILogger<MetricBoardCommandService<TContext>>>(),
+            x.GetService<IWarpSqlQueries<TContext>>()));
 
         // Post-deploy verdict: composes the deploy history, the board and the SLOs above (no query of its own). Registered in
         // AddWarp beside them so a dashboard-only host (or a CI-facing one) serves /api/applications/verdict.
@@ -272,15 +285,25 @@ public static class ServiceConfiguration
 
         // Metric annotations (#333): known-issue notes on instruments and SLOs. Registered in AddWarp for the same reason
         // as the board: a dashboard-only host edits and shows them; the metric_annotation table is always in the schema.
-        services.TryAddScoped<IMetricAnnotationQueryService, MetricAnnotationQueryService<TContext>>();
-        services.TryAddScoped<IMetricAnnotationCommandService, MetricAnnotationCommandService<TContext>>();
+        services.TryAddScoped<IMetricAnnotationQueryService>(x => new MetricAnnotationQueryService<TContext>(x.GetRequiredService<IWarpContext>().Context));
+        services.TryAddScoped<IMetricAnnotationCommandService>(x => new MetricAnnotationCommandService<TContext>(
+            x.GetRequiredService<IWarpContext>().Context,
+            x.GetRequiredService<TimeProvider>(),
+            x.GetRequiredService<ILogger<MetricAnnotationCommandService<TContext>>>()));
 
         // Webhooks dashboard read + redeliver command services. Registered in AddWarp (not AddWebhooks) so
         // dashboard-only / publisher-only processes that never call AddWebhooks() can still serve the
-        // /api/webhooks endpoints (§2.14 stays-on-TContext). The WebhookDelivery table is always in the
+        // /api/webhooks endpoints (on the Warp context, §2.14). The WebhookDelivery table is always in the
         // schema (§2.11); AddWebhooks() gates the executor/dispatcher + the addons flag only.
-        services.TryAddScoped<IWebhookQueryService, WebhookQueryService<TContext>>();
-        services.TryAddScoped<IWebhookCommandService, WebhookCommandService<TContext>>();
+        services.TryAddScoped<IWebhookQueryService>(x => new WebhookQueryService<TContext>(x.GetRequiredService<IWarpContext>().Context, x.GetRequiredService<TimeProvider>()));
+        services.TryAddScoped<IWebhookCommandService>(x => new WebhookCommandService<TContext>(
+            x.GetRequiredService<IWarpContext>().Context,
+            x.GetRequiredService<TimeProvider>(),
+            x.GetRequiredService<IOptions<WarpConfiguration>>(),
+            x.GetServices<IWebhookRedeliveryEnqueuer>(),
+            x.GetRequiredService<ServerTaskSignals<TContext>>(),
+            x.GetRequiredService<IWarpNotificationTransport>(),
+            x.GetRequiredService<IOptions<WebhookSendBehavior>>()));
 
         // Webhook delivery engine (part of Core, §8.20) wired unconditionally: dispatcher, executor job
         // handler, redelivery enqueuer, and the built-in signer. Always-on: deliveries are ordinary jobs on an
@@ -288,7 +311,11 @@ public static class ServiceConfiguration
         // delivery. Optional host hooks (custom signer, exhausted handler) come from opt.AddWebhooks(...).
         services.TryAddScoped<IWebhookDispatcher, WebhookDispatcher<TContext>>();
         services.TryAddScoped<IJobHandler<ExecuteWebhookDelivery>, ExecuteWebhookDeliveryHandler<TContext>>();
-        services.TryAddScoped<IWebhookRedeliveryEnqueuer, WebhookRedeliveryEnqueuer<TContext>>();
+        services.TryAddScoped<IWebhookRedeliveryEnqueuer>(x => new WebhookRedeliveryEnqueuer<TContext>(
+            () => x.GetRequiredService<TContext>(),
+            () => x.GetRequiredService<IPublisher>(),
+            x.GetRequiredService<IOptions<WarpConfiguration>>(),
+            x.GetRequiredService<IOptions<WebhookSendBehavior>>()));
         services.TryAddSingleton<StandardWebhooksSigner>();
 
         // The webhook executor resolves IHttpClientFactory (the warp-webhooks named client) — and the handler
@@ -364,6 +391,37 @@ public static class ServiceConfiguration
         // IWarpSqlQueries<TContext> is registered by the provider package (Warp.PostgreSql /
         // Warp.SqlServer) via their UsePostgreSql / UseSqlServer builder extensions.
         return services;
+    }
+
+    // The Warp context (#344, rule 2.14): the dashboard query, command and admin services run on Warp's own
+    // context in every AddWarp process, never on the application's TContext (whose interceptors, logging, retry
+    // strategy and pool are the application's). IWarpContext falls back to the scoped TContext when no provider
+    // supports TContext's options — an application's tests on EF in-memory or SQLite (#359) — which is how these
+    // services behaved before. Nothing connects or builds a model until a service is first used.
+    private static void AddWarpContext<TContext>(IServiceCollection services)
+        where TContext : DbContext
+    {
+        // Resolved physical names for Warp's own contexts. Default impl reads TContext's model once (the single
+        // place TContext is touched); the contexts consume the abstraction.
+        services.TryAddSingleton<IWarpServerModelNames>(sp =>
+            new WarpServerModelNames<TContext>(sp.GetRequiredService<IServiceScopeFactory>()));
+
+        WarpContextOptions.Register<WarpContext<TContext>>(
+            services,
+            (sp, options) =>
+            {
+                // Only resolved when WarpContextSelection found a configurator, so it is there.
+                var configurator = sp.GetRequiredService<IWarpServerContextConfigurator>();
+                var logging = sp.GetService<WarpCommandLogging>();
+                WarpContextOptions.Configure(options, sp, configurator, demoteCommandLogging: logging is null || !logging.Enabled);
+                WarpContextOptions.CopyCommandTimeout(options, sp.GetRequiredService<WarpDatabaseConnection<TContext>>().Options);
+            });
+
+        services.TryAddSingleton<WarpContextSelection<TContext>>();
+        services.TryAddScoped<IWarpContext>(x =>
+            new WarpContextHandle(x.GetRequiredService<WarpContextSelection<TContext>>().UseWarpContext
+                ? x.GetRequiredService<WarpContext<TContext>>()
+                : x.GetRequiredService<TContext>()));
     }
 
     // Fails fast when TContext isn't registered as Scoped. The common cause is the user

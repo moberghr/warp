@@ -19,9 +19,15 @@ public class AdapterQueryService<TContext> : IAdapterQueryService
     // reachable via retention windows / OTel, not this list.
     private const int RecentCallsLimit = 100;
 
-    private readonly TContext _context;
+    private readonly DbContext _context;
 
     public AdapterQueryService(TContext context)
+        : this((DbContext)context)
+    {
+    }
+
+    // The Warp context (rule 2.14): AddWarp passes IWarpContext.Context, which is not a TContext.
+    internal AdapterQueryService(DbContext context)
     {
         _context = context;
     }

@@ -23,7 +23,7 @@ namespace Warp.Core.Services;
 public sealed class MetricQueryService<TContext> : IMetricQueryService
     where TContext : DbContext
 {
-    private readonly TContext _context;
+    private readonly DbContext _context;
     private readonly IOptions<WarpConfiguration> _options;
     private readonly TimeProvider _timeProvider;
 
@@ -33,6 +33,12 @@ public sealed class MetricQueryService<TContext> : IMetricQueryService
     }
 
     public MetricQueryService(TContext context, IOptions<WarpConfiguration> options, TimeProvider timeProvider)
+        : this((DbContext)context, options, timeProvider)
+    {
+    }
+
+    // The Warp context (rule 2.14): AddWarp passes IWarpContext.Context, which is not a TContext.
+    internal MetricQueryService(DbContext context, IOptions<WarpConfiguration> options, TimeProvider timeProvider)
     {
         _context = context;
         _options = options;

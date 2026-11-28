@@ -1,7 +1,5 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
-using Warp.Core.Data;
-using Warp.Core.Data.Converters;
 using Warp.Core.Entities;
 
 namespace Warp.Core;
@@ -34,24 +32,9 @@ internal sealed class WarpServerContext<TContext> : DbContext, IWarpServerContex
     {
         base.OnModelCreating(modelBuilder);
 
-        // Mirror TContext's full model build (ApplyWarpModel + external EntityConfigurators, under the
-        // configured schema), then pin the resolved physical names so the server context maps to the
-        // same tables.
-        var schema = _configuration.Schema;
-        modelBuilder.ApplyWarpModel(schema);
-        foreach (var configurator in _configuration.EntityConfigurators)
-        {
-            configurator(modelBuilder, schema);
-        }
-
-        // Same re-pin as WarpModelCustomizer: a configurator-added property on a Warp-owned entity
-        // must store identically on both contexts.
-        modelBuilder.PinWarpStorageTypes();
-
-        WarpServerModel.MirrorNames(modelBuilder, _modelNames);
-
-        // Like WarpModelCustomizer: the filters name columns, so they follow the names just pinned.
-        WarpPartialIndexes.Apply(modelBuilder);
+        // Mirror TContext's full model build, then pin the resolved physical names so the server context maps
+        // to the same tables.
+        WarpMirrorModel.Apply(modelBuilder, _configuration, _modelNames);
 
         // The run id guards single-worker finalization, which saves the claimed row through this context
         // (#347): a job taken back and claimed again carries another run id, so the save updates nothing.

@@ -246,83 +246,24 @@ public static class ServiceConfiguration
         // server-internal DB work (worker fetch/complete, server tasks, background-service host), with
         // its own logger so server polling doesn't pollute the user's command logs. The connection is
         // supplied by the provider (UsePostgreSql/UseSqlServer) from TContext's options; the model
-        // (names + ExcludeFromMigrations) is built in WarpServerContext.OnModelCreating.
-        // Resolved physical names for the server context's model. Default impl reads TContext's model
-        // once (the single place TContext is touched); the server context consumes the abstraction.
-        services.TryAddSingleton<IWarpServerModelNames>(sp =>
-            new WarpServerModelNames<TContext>(sp.GetRequiredService<IServiceScopeFactory>()));
-
-        // Snapshot the non-generic DbContextOptions forwarders present before we register the server
-        // context, so we can identify (by reference) the one AddDbContext is about to append and remove
-        // exactly that — see the rationale below.
-        var forwardersBefore = services
-            .Where(x => x.ServiceType == typeof(DbContextOptions))
-            .ToList();
-
-        // The options are built ONCE (optionsLifetime Singleton), not for every server context: claims,
-        // completion flushes, the job monitor and every server-task pass each create one, and rebuilding the
-        // options each time (the configurator, the interceptor, ConfigureWarnings cloning EF's options
-        // extensions) cost several KB per context, about a seventh of what the worker allocated per job.
-        // Nothing in them varies by scope: the configurator caches its connection source and opens its own
-        // scope to read it, and the interceptor and the server configuration are process-wide.
-        services.AddDbContext<WarpServerContext<TContext>>(
+        // (names + ExcludeFromMigrations) is built in WarpServerContext.OnModelCreating. Its names come from
+        // IWarpServerModelNames, registered by AddWarp (the Warp context uses them too).
+        WarpContextOptions.Register<WarpServerContext<TContext>>(
+            services,
             (sp, options) =>
-        {
-            var configurator = sp.GetService<IWarpServerContextConfigurator>()
-                ?? throw new InvalidOperationException(
-                    "AddWarpServer requires a Warp provider — call opt.UsePostgreSql() or "
-                    + "opt.UseSqlServer() so the server context can open against the same database "
-                    + "as your DbContext.");
-
-            configurator.Configure(options, sp);
-            options.AddWarpInterceptors();
-
-            // One ConfigureWarnings call rather than one per setting: each call clones EF's options extensions.
-            var serverConfig = sp.GetService<IOptions<WarpServerConfiguration>>()?.Value;
-            var demoteCommandLogging = serverConfig is null || !serverConfig.EnableServerCommandLogging;
-            options.ConfigureWarnings(w =>
             {
-                // Keep the autonomous server loops' SQL out of the application's command logs: demote
-                // the server context's command-executed event to Debug (app stays at Information). The
-                // user's own DbContext is unaffected. Opt back in with opt.EnableServerCommandLogging.
-                if (demoteCommandLogging)
-                {
-                    w.Log((RelationalEventId.CommandExecuted, LogLevel.Debug));
-                }
+                var configurator = sp.GetService<IWarpServerContextConfigurator>()
+                    ?? throw new InvalidOperationException(
+                        "AddWarpServer requires a Warp provider — call opt.UsePostgreSql() or "
+                        + "opt.UseSqlServer() so the server context can open against the same database "
+                        + "as your DbContext.");
 
-                // The server's sweeps take a bounded slice with Take(batchSize) and no OrderBy, which
-                // EF warns about on every execution — ExpirationCleanup alone runs nine of them per
-                // tick, so an idle server fills the application's log with a warning about its own
-                // internals.
-                //
-                // Unordered is CORRECT for these, not an oversight: "delete any N expired rows" has no
-                // meaningful order, the sweep repeats until the table drains, and imposing one would buy
-                // a sort for nothing. EF offers no per-query suppression, so the suppression is scoped to
-                // this context instead — the one the autonomous server loops run on (rule 2.14).
-                // Anything on the user's own TContext, including every dashboard query that pages with
-                // Skip/Take, still warns, which is where the warning earns its keep.
-                w.Ignore(CoreEventId.RowLimitingOperationWithoutOrderByWarning);
+                var serverConfig = sp.GetService<IOptions<WarpServerConfiguration>>()?.Value;
+                WarpContextOptions.Configure(options, sp, configurator, demoteCommandLogging: serverConfig is null || !serverConfig.EnableServerCommandLogging);
             });
-        },
-            contextLifetime: ServiceLifetime.Scoped,
-            optionsLifetime: ServiceLifetime.Singleton);
 
-        // AddDbContext also appends a non-generic DbContextOptions forwarder (plain Add, not TryAdd)
-        // carrying WarpServerContext<TContext> as its ContextType. That enumeration —
-        // GetServices<DbContextOptions>().Select(o => o.ContextType) — is the only vector EF's
-        // design-time tooling uses to discover this context (it's internal, open-generic, and outside
-        // the user's startup assembly, so the IDesignTimeDbContextFactory and assembly scans miss it).
-        // Left in, `dotnet ef` counts the runtime-only server context and demands --context. Warp only
-        // ever resolves DbContextOptions<WarpServerContext<TContext>>, so dropping the forwarder we just
-        // added leaves runtime untouched; the user's own AddDbContext keeps its separate forwarder
-        // (→ TContext), the correct design-time target. No property identifies a forwarder by its target
-        // context (the factory closure is opaque), so we remove it by identity: the one descriptor
-        // AddDbContext appended that wasn't present before.
-        var addedForwarder = services
-            .Where(x => x.ServiceType == typeof(DbContextOptions))
-            .Except(forwardersBefore)
-            .Single();
-        services.Remove(addedForwarder);
+        // The Warp context (AddWarp) logs its commands the same way as the server context.
+        services.TryAddSingleton(sp => new WarpCommandLogging(sp.GetService<IOptions<WarpServerConfiguration>>()?.Value.EnableServerCommandLogging == true));
 
         // Server-internal components depend on IWarpServerContext (not the concrete generic type),
         // resolving the scoped WarpServerContext<TContext>.

@@ -40,7 +40,7 @@ public interface ISloCommandService
 public sealed class SloCommandService<TContext> : ISloCommandService
     where TContext : DbContext
 {
-    private readonly TContext _context;
+    private readonly DbContext _context;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<SloCommandService<TContext>> _logger;
     private readonly IWarpSqlQueries<TContext>? _sqlQueries;
@@ -48,6 +48,12 @@ public sealed class SloCommandService<TContext> : ISloCommandService
     // sqlQueries: the provider's queries, for the board lock Delete takes; absent in a host without a provider (the delete
     // then runs unguarded, like the board commands).
     public SloCommandService(TContext context, TimeProvider timeProvider, ILogger<SloCommandService<TContext>> logger, IWarpSqlQueries<TContext>? sqlQueries = null)
+        : this((DbContext)context, timeProvider, logger, sqlQueries)
+    {
+    }
+
+    // The Warp context (rule 2.14): AddWarp passes IWarpContext.Context, which is not a TContext.
+    internal SloCommandService(DbContext context, TimeProvider timeProvider, ILogger<SloCommandService<TContext>> logger, IWarpSqlQueries<TContext>? sqlQueries = null)
     {
         _context = context;
         _timeProvider = timeProvider;

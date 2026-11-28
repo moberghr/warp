@@ -21,9 +21,15 @@ public interface ISloQueryService
 public sealed class SloQueryService<TContext> : ISloQueryService
     where TContext : DbContext
 {
-    private readonly TContext _context;
+    private readonly DbContext _context;
 
-    public SloQueryService(TContext context) => _context = context;
+    public SloQueryService(TContext context)
+        : this((DbContext)context)
+    {
+    }
+
+    // The Warp context (rule 2.14): AddWarp passes IWarpContext.Context, which is not a TContext.
+    internal SloQueryService(DbContext context) => _context = context;
 
     public async Task<SloListModel> GetObjectives(CancellationToken ct)
     {
