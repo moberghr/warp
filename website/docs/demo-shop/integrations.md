@@ -224,8 +224,8 @@ destination. `OrderShipped` gets the same handler with `order.shipped`.
 
 Pitfalls:
 
-- Webhooks are executed by a Warp worker. `shop-worker` drains the `warp:webhooks` queue
-  automatically; if no process runs `AddWarpServer` with a worker, deliveries stay `Pending`.
+- Webhooks are executed by a Warp worker. Deliveries are jobs on `default`, which `shop-worker`
+  drains; if no process drains that queue, deliveries stay `Pending`.
 - Retry timing is a backoff, not a precise timer: each retry fires up to about 10 seconds after its
   delay.
 - Do not put an HTTP retry handler on the `warp-webhooks` client. Its inner retries hide inside one

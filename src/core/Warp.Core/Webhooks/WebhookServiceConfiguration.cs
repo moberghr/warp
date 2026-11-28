@@ -1,5 +1,8 @@
 using System.Net.Http;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
+using Warp.Core.Data.Entities;
 
 namespace Warp.Core.Webhooks;
 
@@ -12,9 +15,9 @@ namespace Warp.Core.Webhooks;
 /// <em>optional</em> host hooks — a custom <see cref="IWebhookSigner"/> and the
 /// <see cref="IWebhookDeliveryExhaustedHandler"/> — and validates custom-signing intent at startup.
 /// <para>
-/// There is deliberately no "enable webhooks" gate: a server drains the <c>warp:webhooks</c> queue whether
-/// or not <c>AddWebhooks</c> was called, so a delivery staged by any process is executed by any Warp server
-/// in the deployment — no per-process opt-in to forget.
+/// There is deliberately no "enable webhooks" gate: an executor job is an ordinary job on an ordinary queue
+/// (<see cref="WarpWebhookOptions.Queue"/>, by default <c>DefaultQueue</c>), so any Warp server whose workers
+/// drain that queue runs it, whether or not <c>AddWebhooks</c> was called there.
 /// </para>
 /// </summary>
 public static class WebhookServiceConfiguration
@@ -53,6 +56,17 @@ public static class WebhookServiceConfiguration
             builder.Services.AddScoped(typeof(IWebhookEndpointHealthHandler), options.EndpointHealthHandlerType);
         }
 
+        if (options.Queue is not null && string.IsNullOrWhiteSpace(options.Queue))
+        {
+            throw new InvalidOperationException("AddWebhooks(w => w.Queue = ...) must not be empty; leave it null to use DefaultQueue.");
+        }
+
+        // Only an explicit queue is applied, so a later AddWebhooks call that does not set one keeps the earlier one.
+        if (options.Queue is { } queue)
+        {
+            builder.Services.Configure<WebhookSendBehavior>(x => x.Queue = queue);
+        }
+
         // OR-merged across repeated AddWebhooks calls: a later call without the flag never turns it back off.
         builder.Services.Configure<WebhookSendBehavior>(x =>
         {
@@ -84,6 +98,15 @@ public sealed class WarpWebhookOptions
     internal bool CustomSigningDeclared { get; private set; }
 
     internal Type? EndpointHealthHandlerType { get; private set; }
+
+    /// <summary>
+    /// The queue this process's webhook deliveries run on (8.2). <c>null</c> (the default) puts them on
+    /// <c>DefaultQueue</c> like any other job. A <see cref="WebhookSend.Queue"/> overrides it per send. The queue is
+    /// stamped on each delivery at <c>SendAsync</c>, so its retries and redeliveries stay on it. To keep slow
+    /// receivers away from your job workers, give webhooks their own queue and drain it with its own
+    /// <c>AddWorkerGroup</c>. A server also uses it for deliveries sent before 8.2, which carry no queue.
+    /// </summary>
+    public string? Queue { get; set; }
 
     /// <summary>
     /// When <see langword="true"/>, deliveries this process sends with a <c>Group</c> track their endpoint's health
@@ -174,21 +197,38 @@ public sealed class WarpWebhookOptions
 }
 
 /// <summary>
-/// Enqueues the webhook executor job for a redelivery through the shared <see cref="IPublisher"/> and
+/// Enqueues the webhook executor job for a redelivery, on the delivery's own queue, through the shared <see cref="IPublisher"/> and
 /// commits it together with any pending changes on the shared scoped context (outbox), so the caller's
 /// settled→Pending reset and the new job land in one <c>SaveChanges</c>. Registered unconditionally by
 /// <c>AddWarp</c> (webhooks are part of Core), so <c>Redeliver</c> works in any process.
 /// </summary>
-internal sealed class WebhookRedeliveryEnqueuer : IWebhookRedeliveryEnqueuer
+internal sealed class WebhookRedeliveryEnqueuer<TContext> : IWebhookRedeliveryEnqueuer
+    where TContext : DbContext
 {
+    private readonly TContext _context;
     private readonly IPublisher _publisher;
+    private readonly WarpConfiguration _configuration;
+    private readonly WebhookSendBehavior _behavior;
 
-    public WebhookRedeliveryEnqueuer(IPublisher publisher) => _publisher = publisher;
+    public WebhookRedeliveryEnqueuer(TContext context, IPublisher publisher, IOptions<WarpConfiguration> configuration, IOptions<WebhookSendBehavior> behavior)
+    {
+        _context = context;
+        _publisher = publisher;
+        _configuration = configuration.Value;
+        _behavior = behavior.Value;
+    }
 
     public async Task EnqueueAsync(Guid deliveryId, CancellationToken ct = default)
     {
+        // The delivery stays on the queue it was sent on; a row from before 8.2 has none and takes this process's.
+        var deliveryQueue = await _context.Set<WebhookDelivery>()
+            .AsNoTracking()
+            .Where(x => x.Id == deliveryId)
+            .Select(x => x.Queue)
+            .FirstOrDefaultAsync(ct);
+
         // Immediate (not scheduled) so signal-driven pickup applies — mirrors the first attempt in SendAsync.
-        await _publisher.Enqueue(new ExecuteWebhookDelivery { DeliveryId = deliveryId }, WebhookDefaults.Queue);
+        await _publisher.Enqueue(new ExecuteWebhookDelivery { DeliveryId = deliveryId }, _behavior.ResolveQueue(deliveryQueue, _configuration));
         await _publisher.SaveChangesAsync(ct);
     }
 }

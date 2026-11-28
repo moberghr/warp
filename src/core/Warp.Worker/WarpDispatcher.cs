@@ -70,7 +70,7 @@ public class WarpDispatcher<TContext> : BackgroundService
         });
 
         // Registered with the group's queues: a push for a queue this group does not claim must not send
-        // it to claim (8.1's dedicated webhook group made every enqueue cost an empty warp:webhooks claim).
+        // it to claim (with several groups, a wake-all cost every enqueue an empty claim in each other group).
         _registration = registry.Register(_signal, groupConfiguration.Queues);
         _signals = signals;
     }

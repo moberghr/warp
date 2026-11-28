@@ -14,11 +14,4 @@ public static class WebhookConstants
     /// <c>CorrelationId</c> alone.
     /// </summary>
     public const string AdapterName = "warp-webhooks";
-
-    /// <summary>
-    /// The dedicated queue the webhook executor jobs run on. Core-visible so the stuck-delivery sweep in
-    /// <c>StaleJobRecovery</c> can check for a live executor job before re-enqueueing; the addon's internal
-    /// <c>WebhookDefaults.Queue</c> references this so there is a single source of truth.
-    /// </summary>
-    public const string Queue = "warp:webhooks";
 }

@@ -102,4 +102,12 @@ public class WebhookDelivery
     /// Null for deliveries sent without deduplication.
     /// </summary>
     public string? DedupeKey { get; set; }
+
+    /// <summary>
+    /// The queue every executor job of this delivery runs on (8.2): <c>WebhookSend.Queue</c>, else the sender's
+    /// <c>AddWebhooks(w => w.Queue)</c>, else its <c>DefaultQueue</c>, resolved at <c>SendAsync</c>. The first attempt,
+    /// every retry, a redelivery and crash recovery all enqueue here, so a delivery stays on its queue for life. Null on
+    /// rows written before 8.2; those run on the webhook queue of the server that enqueues them.
+    /// </summary>
+    public string? Queue { get; set; }
 }

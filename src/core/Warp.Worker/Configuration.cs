@@ -1,5 +1,4 @@
 using Warp.Core;
-using Warp.Core.Webhooks;
 
 namespace Warp.Worker;
 
@@ -48,10 +47,6 @@ public class WorkerGroupConfiguration
     /// </para>
     /// </summary>
     public int? PrefetchCount { get; set; }
-
-    // Set only on the group GetEffectiveWorkerGroups adds for warp:webhooks (WebhookWorkerCount), so the
-    // zero-worker validation can tell job capacity from webhook capacity.
-    internal bool IsDedicatedWebhookGroup { get; init; }
 }
 
 public class WarpServerConfiguration : WarpConfiguration
@@ -62,18 +57,6 @@ public class WarpServerConfiguration : WarpConfiguration
     /// How many worker instances should be created. Applies to the implicit default worker group.
     /// </summary>
     public int WorkerCount { get; set; } = DefaultWorkerCount;
-
-    /// <summary>
-    /// Workers dedicated to webhook delivery (8.1). Webhook attempts wait on other people's servers (up to
-    /// <c>WebhookAttemptTimeout</c> each), so a slow or hanging receiver must not take the workers your jobs need.
-    /// With a value above zero this server runs an extra worker group that polls only the <c>warp:webhooks</c> queue
-    /// with this many workers, and the default group no longer polls it: at most this many webhook attempts run at
-    /// once on this server, and they never take a job worker. <c>0</c> restores the pre-8.1 shape (the default group
-    /// drains <c>warp:webhooks</c> alongside its own queues). When <c>Queues</c> or an <see cref="AddWorkerGroup"/>
-    /// group already lists <c>warp:webhooks</c>, that explicit routing wins and no dedicated group is added. Polling
-    /// settings follow the top-level ones. Default 4.
-    /// </summary>
-    public int WebhookWorkerCount { get; set; } = 4;
 
     /// <summary>
     /// Whether this server runs the job worker (fetch/execute loop + job-orchestration server
@@ -466,26 +449,12 @@ public class WarpServerConfiguration : WarpConfiguration
         // value so the substitution follows the queue publishes actually land on.
         var baseQueues = _queuesExplicitlySet ? Queues : [resolvedDefaultQueue ?? DefaultQueue];
 
-        // Webhook delivery is a Core feature (§8.20): every server with a worker drains warp:webhooks, with no
-        // per-process opt-in to forget. Since 8.1 it gets its own bounded group (WebhookWorkerCount) so slow
-        // receivers cannot starve the job workers; with 0 the default group drains it as before. Explicit routing
-        // (Queues or an AddWorkerGroup group listing it) wins. Deduped so an explicit Queues that lists it stays single.
-        var listedByQueues = _queuesExplicitlySet && Queues.Contains(WebhookConstants.Queue, StringComparer.Ordinal);
-
-        // A group with no workers drains nothing (registration skips it), so it does not count as routing the queue.
-        var listedByGroup = ExplicitWorkerGroups.Exists(x => x.WorkerCount > 0 && x.Queues.Contains(WebhookConstants.Queue, StringComparer.Ordinal));
-        var dedicatedWebhookGroup = WebhookWorkerCount > 0 && !listedByQueues && !listedByGroup;
-
-        var defaultQueues = dedicatedWebhookGroup || listedByGroup || baseQueues.Contains(WebhookConstants.Queue, StringComparer.Ordinal)
-            ? baseQueues
-            : [.. baseQueues, WebhookConstants.Queue];
-
         var groups = new List<WorkerGroupConfiguration>
         {
             new()
             {
                 WorkerCount = WorkerCount,
-                Queues = defaultQueues,
+                Queues = baseQueues,
                 PollingInterval = PollingInterval,
                 MaxPollingInterval = MaxPollingInterval,
                 PollingIntervalFactor = PollingIntervalFactor,
@@ -494,20 +463,6 @@ public class WarpServerConfiguration : WarpConfiguration
         };
 
         groups.AddRange(ExplicitWorkerGroups);
-
-        if (dedicatedWebhookGroup)
-        {
-            groups.Add(new WorkerGroupConfiguration
-            {
-                WorkerCount = WebhookWorkerCount,
-                Queues = [WebhookConstants.Queue],
-                PollingInterval = PollingInterval,
-                MaxPollingInterval = MaxPollingInterval,
-                PollingIntervalFactor = PollingIntervalFactor,
-                PrefetchCount = 0,
-                IsDedicatedWebhookGroup = true,
-            });
-        }
 
         return groups;
     }
@@ -526,9 +481,7 @@ public class WarpServerConfiguration : WarpConfiguration
     }
 
     /// <summary>
-    /// Total number of job workers across all groups; the dedicated webhook group (WebhookWorkerCount) is not counted.
+    /// Total number of workers across all groups.
     /// </summary>
-    internal int TotalWorkerCount => GetEffectiveWorkerGroups()
-        .Where(x => !x.IsDedicatedWebhookGroup)
-        .Sum(x => x.WorkerCount);
+    internal int TotalWorkerCount => GetEffectiveWorkerGroups().Sum(x => x.WorkerCount);
 }
