@@ -33,7 +33,7 @@ The group's worker count is also the most attempts that server runs at once. See
 
 ### Upgrading from 8.1
 
-Executor jobs waiting on the `warp:webhooks` queue (first attempts not yet run, retries scheduled for later) are moved automatically: every 8.2 server's crash-recovery task moves `Enqueued` and `Scheduled` jobs on `warp:webhooks` to its webhook queue, so nothing is stranded. Remove `warp:webhooks` from `Queues` or `AddWorkerGroup` groups once no 8.1 server runs.
+Executor jobs waiting on the `warp:webhooks` queue (first attempts not yet run, retries scheduled for later) are moved automatically: every 8.2 server's crash-recovery task moves them to its webhook queue once they are due to run, so nothing is stranded.
 
 ## 8.1.0
 

@@ -357,29 +357,25 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
     }
 
     // REMOVE in 9.0 (issue #367). Until 8.2 every webhook executor job ran on the special warp:webhooks queue, which
-    // every server drained on its own. Nothing drains it now, so the jobs a deployment still has there (first
-    // attempts not yet run, retries scheduled hours out) are moved to this server's webhook queue, where its workers
-    // or the host's AddWorkerGroup pick them up. Idempotent: once a row has moved it no longer matches. An 8.1
-    // process still running in a rolling deploy can put new ones there; the next run moves those too.
+    // every server drained on its own. Nothing drains it now, so Enqueued jobs a deployment still has there are moved
+    // to this server's webhook queue, where its workers or the host's AddWorkerGroup pick them up. Only Enqueued:
+    // a legacy retry still Scheduled there is flipped to Enqueued by ScheduledJobActivation when due and moved by the
+    // next run, so it never has to be found among every Scheduled job. Idempotent: a moved row no longer matches. An
+    // 8.1 process still running in a rolling deploy can put new ones there; the next run moves those too.
     internal async Task<int> MoveLegacyWebhookJobsAsync(CancellationToken ct)
     {
         var queue = _webhookBehavior.ResolveQueue(null, _configuration);
 
-        // CurrentState compared to literals, one statement per state, so each reads its partial index (§6.15).
-        var enqueued = await _context.Set<Job>()
+        // Kind and CurrentState as literals so the statement reads the claim partial index (§6.15).
+        var moved = await _context.Set<Job>()
             .Where(x => x.Kind == JobKind.Job)
             .Where(x => x.CurrentState == State.Enqueued)
             .Where(x => x.Queue == LegacyWebhookQueue)
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.Queue, queue), ct);
 
-        var scheduled = await _context.Set<Job>()
-            .Where(x => x.CurrentState == State.Scheduled)
-            .Where(x => x.Queue == LegacyWebhookQueue)
-            .ExecuteUpdateAsync(s => s.SetProperty(x => x.Queue, queue), ct);
-
-        if (enqueued == 0)
+        if (moved == 0)
         {
-            return scheduled;
+            return 0;
         }
 
         // ExecuteUpdate modifies rows CapturePending never sees, so the wake is built here (§6.3). Under the task host
@@ -392,7 +388,7 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
             await DispatchPendingNotificationsAsync();
         }
 
-        return enqueued + scheduled;
+        return moved;
     }
 
     /// <summary>

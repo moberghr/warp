@@ -589,11 +589,10 @@ public abstract class CrashRecoveryTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
-    public async Task MoveLegacyWebhookJobs_EnqueuedAndScheduledOnTheLegacyQueue_MovesThemAndWakesTheWebhookQueue()
+    public async Task MoveLegacyWebhookJobs_EnqueuedOnTheLegacyQueue_MovesItAndWakesTheWebhookQueue()
     {
         // Executor jobs 8.1 left on warp:webhooks, which nothing drains any more, move to the server's webhook queue.
         var enqueued = await SeedJobAsync("warp:webhooks", State.Enqueued);
-        var scheduled = await SeedJobAsync("warp:webhooks", State.Scheduled);
 
         var transport = new RecordingNotificationTransport();
         var signals = new ServerTaskSignals<TestContext>();
@@ -604,11 +603,10 @@ public abstract class CrashRecoveryTestsBase : IAsyncLifetime
             .CreateStaleJobRecovery(_fixture.CreateContext(), TimeProvider.System, TimeSpan.FromMinutes(5), signals: signals, transport: transport, webhookQueue: "webhooks")
             .MoveLegacyWebhookJobsAsync(CancellationToken.None);
 
-        moved.ShouldBe(2);
+        moved.ShouldBe(1);
         (await GetQueueAsync(enqueued)).ShouldBe("webhooks");
-        (await GetQueueAsync(scheduled)).ShouldBe("webhooks");
 
-        // No outer transaction: the update is committed, so the wake for the moved Enqueued job fires now.
+        // No outer transaction: the update is committed, so the wake for the moved job fires now.
         woken.ShouldBe(1);
         transport.Published.ShouldBe([(NotificationKind.JobEnqueued, "webhooks")]);
     }
@@ -628,6 +626,8 @@ public abstract class CrashRecoveryTestsBase : IAsyncLifetime
     [TimedFact]
     public async Task MoveLegacyWebhookJobs_OtherQueuesAndOtherStates_LeftAloneAndASecondRunMovesNothing()
     {
+        // A Scheduled legacy retry stays until ScheduledJobActivation makes it Enqueued; a later run moves it then.
+        var scheduled = await SeedJobAsync("warp:webhooks", State.Scheduled);
         var otherQueue = await SeedJobAsync("default", State.Enqueued);
         var processing = await SeedJobAsync("warp:webhooks", State.Processing);
         var completed = await SeedJobAsync("warp:webhooks", State.Completed);
@@ -639,11 +639,12 @@ public abstract class CrashRecoveryTestsBase : IAsyncLifetime
         (await recovery.MoveLegacyWebhookJobsAsync(CancellationToken.None)).ShouldBe(1);
         (await recovery.MoveLegacyWebhookJobsAsync(CancellationToken.None)).ShouldBe(0);
 
+        (await GetQueueAsync(scheduled)).ShouldBe("warp:webhooks");
         (await GetQueueAsync(otherQueue)).ShouldBe("default");
         (await GetQueueAsync(processing)).ShouldBe("warp:webhooks");
         (await GetQueueAsync(completed)).ShouldBe("warp:webhooks");
 
-        // Only the run that moved an Enqueued job announces one.
+        // Only the run that moved a job announces one.
         transport.Published.Count.ShouldBe(1);
     }
 
